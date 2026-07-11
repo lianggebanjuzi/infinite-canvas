@@ -1,0 +1,36 @@
+# Dependencies
+node_modules/
+.venv/
+
+# Build output
+gui/dist/
+dist/
+build/
+
+# Python cache
+*.pyc
+__pycache__/
+
+# Local app data and secrets
+/providers_data.json
+/settings.json
+/prompts_library.json
+*.icproj
+
+# Editor and assistant state
+.idea/
+.cursor/
+.lingma/
+.reasonix/
+.workbuddy/
+.codegraph/
+.agents/
+.cursorrules
+
+# Local archives and generated logs
+*.rar
+*.zip
+*.7z
+*.log
+tsc-check.txt
+tsc-errors*.txt

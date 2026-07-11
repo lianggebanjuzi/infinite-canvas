@@ -1,0 +1,496 @@
+/* styles/sidebar.css */
+/* Infinite Canvas 2.2 — 左侧边栏样式（玻璃极简风） */
+/* P3: 浅色主题硬编码已替换为变量 */
+
+/* ═══════════════════════════════════════
+   左侧边栏整体
+═══════════════════════════════════════ */
+#left-sidebar {
+    position: fixed;
+    top: var(--space-4);
+    bottom: var(--space-4);
+    left: 0;
+    display: block;
+    z-index: 300;
+    pointer-events: none;
+}
+
+/* ── 项目名称按钮 ── */
+.project-name-btn {
+    position: absolute;
+    top: 0;
+    left: 0;
+    z-index: 2;
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-3);
+    background: var(--bg-elevated);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-md);
+    box-shadow: var(--shadow-sm);
+    pointer-events: auto;
+    flex-shrink: 0;
+    transition: box-shadow var(--duration-fast) var(--ease-default),
+                border-color var(--duration-fast) var(--ease-default);
+    backdrop-filter: blur(20px) saturate(180%);
+    -webkit-backdrop-filter: blur(20px) saturate(180%);
+}
+
+.project-name-btn:hover {
+    box-shadow: var(--shadow-md);
+    border-color: var(--accent-cyan);
+}
+
+.project-name-icon {
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    background: linear-gradient(135deg, var(--accent-primary), var(--accent-tertiary));
+    color: #fff;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 10px;
+    box-shadow: 0 2px 6px rgba(99, 102, 241, 0.35);
+}
+
+.project-name-input {
+    border: none;
+    background: transparent;
+    font-size: var(--text-sm);
+    font-weight: 500;
+    color: var(--text-primary);
+    outline: none;
+    min-width: 52px;
+    max-width: 90px;
+}
+
+.project-name-input::placeholder {
+    color: var(--text-tertiary);
+}
+
+/* 横向：图库 → 生成历史面板 → 三角（与 index.html 一致）；钉在视口左侧中央，展开收起不跳动 */
+#sidebar-wrap {
+    position: fixed;
+    left: var(--space-4);
+    top: 50%;
+    transform: translateY(-50%);
+    z-index: 1;
+    pointer-events: none;
+    display: flex;
+    flex-direction: row;
+    flex-wrap: nowrap;
+    align-items: flex-start;
+    gap: var(--space-1);
+}
+
+/* ── 标签条 ── */
+#sidebar-tabs {
+    flex-shrink: 0;
+    width: 52px;
+    background: var(--bg-elevated);
+    backdrop-filter: blur(20px) saturate(180%);
+    -webkit-backdrop-filter: blur(20px) saturate(180%);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-md);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: flex-start;
+    padding: var(--space-2) 0;
+    gap: var(--space-1);
+    pointer-events: auto;
+    box-shadow: var(--shadow-sm);
+}
+
+.sidebar-tab-btn {
+    width: 40px;
+    height: 44px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 3px;
+    background: transparent;
+    border: none;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    color: var(--text-tertiary);
+    font-size: 10px;
+    font-weight: 500;
+    transition: background var(--duration-fast) var(--ease-default),
+                color var(--duration-fast) var(--ease-default);
+}
+
+.sidebar-tab-btn i {
+    font-size: 16px;
+}
+
+.sidebar-tab-btn:hover {
+    background: var(--accent-cyan-subtle);
+    color: var(--accent-cyan);
+}
+
+.sidebar-tab-btn:focus-visible {
+    outline: 2px solid var(--accent-primary);
+    outline-offset: 2px;
+}
+
+.sidebar-tab-btn--active,
+.sidebar-tab-btn.active {
+    background: var(--accent-primary);
+    color: var(--text-on-accent);
+}
+
+/* ── 折叠拉手（在最右侧；相对整列竖直居中，便于对齐窄侧栏） ── */
+#sidebar-toggle {
+    position: relative;
+    align-self: center;
+    flex-shrink: 0;
+    width: 20px;
+    height: 40px;
+    background: var(--bg-elevated);
+    backdrop-filter: blur(20px) saturate(180%);
+    -webkit-backdrop-filter: blur(20px) saturate(180%);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-sm);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    pointer-events: auto;
+    color: var(--text-tertiary);
+    font-size: 10px;
+    transition: background var(--duration-fast) var(--ease-default),
+                color var(--duration-fast) var(--ease-default);
+}
+
+#sidebar-toggle:hover {
+    background: var(--accent-cyan-subtle);
+    color: var(--accent-cyan);
+}
+
+/* ── 面板内容区 ── */
+#sidebar-panel {
+    flex-shrink: 0;
+    width: 220px;
+    overflow: hidden;
+    background: var(--bg-elevated);
+    backdrop-filter: blur(20px) saturate(180%);
+    -webkit-backdrop-filter: blur(20px) saturate(180%);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-md);
+    display: none;
+    flex-direction: column;
+    pointer-events: auto;
+    box-shadow: var(--shadow-md);
+    max-height: 420px;
+
+    /* 展开动画 */
+    animation: panel-slide-in 220ms var(--ease-out) both;
+}
+
+@keyframes panel-slide-in {
+    from {
+        opacity: 0;
+        transform: translateX(-8px);
+    }
+    to {
+        opacity: 1;
+        transform: translateX(0);
+    }
+}
+
+#left-sidebar.expanded #sidebar-panel {
+    display: flex;
+}
+
+#left-sidebar.expanded #sidebar-toggle-icon {
+    transform: rotate(180deg);
+}
+
+#sidebar-toggle-icon {
+    display: inline-block;
+    transition: transform var(--duration-slow) var(--ease-out);
+}
+
+/* ═══════════════════════════════════════
+   面板内容
+═══════════════════════════════════════ */
+.sidebar-panel__content,
+.sidebar-panel-content {
+    display: none;
+    flex-direction: column;
+    height: 100%;
+    max-height: 420px;
+    overflow: hidden;
+}
+
+.sidebar-panel__content--active,
+.sidebar-panel-content.active {
+    display: flex;
+}
+
+.sidebar-panel__header,
+.sidebar-panel-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: var(--space-3) var(--space-3) var(--space-2);
+    flex-shrink: 0;
+}
+
+.sidebar-panel__title,
+.sidebar-panel-title {
+    font-size: var(--text-sm);
+    font-weight: 600;
+    color: var(--text-primary);
+    letter-spacing: 0.01em;
+}
+
+.sidebar-panel__count,
+.sidebar-panel-count {
+    font-size: var(--text-xs);
+    color: var(--text-secondary);
+    background: var(--accent-cyan-subtle);
+    padding: 2px 8px;
+    border-radius: var(--radius-full);
+    border: 1px solid rgba(34, 211, 238, 0.25);
+    font-weight: 500;
+}
+
+.sidebar-panel__hint,
+.sidebar-panel-hint {
+    font-size: var(--text-xs);
+    color: var(--text-tertiary);
+    padding: 0 var(--space-3) var(--space-3);
+    line-height: 1.5;
+    flex-shrink: 0;
+    border-bottom: 1px solid var(--border-subtle);
+    margin-bottom: var(--space-2);
+}
+
+/* ═══════════════════════════════════════
+   历史图片网格
+═══════════════════════════════════════ */
+#history-grid {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    padding: 0 var(--space-3) var(--space-3);
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: var(--space-3);
+    align-content: start;
+}
+
+#history-grid::-webkit-scrollbar {
+    width: 3px;
+}
+
+#history-grid::-webkit-scrollbar-thumb {
+    background: var(--border-default);
+    border-radius: var(--radius-full);
+}
+
+#history-grid::-webkit-scrollbar-thumb:hover {
+    background: var(--accent-cyan);
+}
+
+.history-item {
+    position: relative;
+    border-radius: var(--radius-md);
+    overflow: hidden;
+    cursor: grab;
+    border: 1.5px solid transparent;
+    transition: border-color var(--duration-fast) var(--ease-default),
+                transform var(--duration-fast) var(--ease-spring),
+                box-shadow var(--duration-fast) var(--ease-default);
+    background: var(--bg-embedded);
+    display: flex;
+    flex-direction: column;
+}
+
+.history-item:hover {
+    border-color: var(--accent-cyan);
+    transform: translateY(-3px);
+    box-shadow: var(--shadow-md);
+}
+
+.history-item:active {
+    cursor: grabbing;
+}
+
+.history-item img {
+    width: 100%;
+    aspect-ratio: 1;
+    object-fit: cover;
+    display: block;
+    pointer-events: none;
+    user-select: none;
+    -webkit-user-drag: none;
+    flex-shrink: 0;
+}
+
+.history-item__index,
+.history-item-index {
+    position: absolute;
+    top: var(--space-1);
+    left: var(--space-1);
+    background: linear-gradient(135deg, var(--accent-primary), var(--accent-tertiary));
+    color: #fff;
+    font-size: 10px;
+    font-weight: 600;
+    padding: 2px 6px;
+    border-radius: var(--radius-sm);
+    pointer-events: none;
+    line-height: 1.4;
+    box-shadow: var(--shadow-sm);
+}
+
+/* ── 历史图片 meta 信息条 ── */
+.history-item__meta,
+.history-item-meta {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: var(--space-1) var(--space-2);
+    background: rgba(255, 255, 255, 0.85);
+    backdrop-filter: blur(4px);
+    gap: var(--space-1);
+    flex-shrink: 0;
+    min-height: 20px;
+}
+
+[data-theme="dark"] .history-item__meta,
+[data-theme="dark"] .history-item-meta {
+    background: rgba(0, 0, 0, 0.45);
+}
+
+.history-meta__tags,
+.history-meta-tags {
+    display: flex;
+    gap: 3px;
+    flex-wrap: wrap;
+    flex: 1;
+    min-width: 0;
+}
+
+.history-meta__tag,
+.history-meta-tag {
+    font-size: 10px;
+    padding: 1px 5px;
+    border-radius: var(--radius-sm);
+    background: var(--accent-primary-glow);
+    color: var(--text-secondary);
+    white-space: nowrap;
+    line-height: 1.4;
+    font-weight: 500;
+}
+
+.history-meta__time,
+.history-meta-time {
+    font-size: 10px;
+    color: var(--text-tertiary);
+    white-space: nowrap;
+    flex-shrink: 0;
+}
+
+/* ── 空状态 ── */
+.history-empty {
+    grid-column: 1 / -1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: var(--space-2);
+    padding: var(--space-6) var(--space-4);
+    color: var(--text-tertiary);
+    font-size: var(--text-sm);
+    text-align: center;
+}
+
+.history-empty i {
+    font-size: 28px;
+    color: var(--accent-tertiary);
+    background: var(--accent-primary-glow);
+    width: 48px;
+    height: 48px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+/* ═══════════════════════════════════════
+   浅色主题调整
+═══════════════════════════════════════ */
+[data-theme="light"] .project-name-btn,
+[data-theme="light"] #sidebar-tabs,
+[data-theme="light"] #sidebar-toggle,
+[data-theme="light"] #sidebar-panel {
+    border-color: var(--panel-border);
+}
+
+[data-theme="light"] .history-item__meta,
+[data-theme="light"] .history-item-meta {
+    background: rgba(255, 255, 255, 0.85);
+}
+
+/* ═══════════════════════════════════════
+   浅色主题侧边栏（补充）
+═══════════════════════════════════════ */
+[data-theme="light"] .project-name-btn {
+    background: rgba(255, 255, 255, 0.92);
+    backdrop-filter: blur(16px) saturate(160%);
+    -webkit-backdrop-filter: blur(16px) saturate(160%);
+}
+
+[data-theme="light"] #sidebar-tabs {
+    background: rgba(255, 255, 255, 0.92);
+    backdrop-filter: blur(16px) saturate(160%);
+    -webkit-backdrop-filter: blur(16px) saturate(160%);
+}
+
+[data-theme="light"] #sidebar-toggle {
+    background: rgba(255, 255, 255, 0.92);
+    backdrop-filter: blur(16px) saturate(160%);
+    -webkit-backdrop-filter: blur(16px) saturate(160%);
+}
+
+[data-theme="light"] #sidebar-panel {
+    background: rgba(255, 255, 255, 0.95);
+    backdrop-filter: blur(20px) saturate(180%);
+    -webkit-backdrop-filter: blur(20px) saturate(180%);
+}
+
+[data-theme="light"] .sidebar-panel__hint,
+[data-theme="light"] .sidebar-panel-hint {
+    border-bottom-color: var(--border-muted);
+}
+
+[data-theme="light"] #history-grid::-webkit-scrollbar-thumb {
+    background: var(--surface-control);
+}
+
+[data-theme="light"] .history-item {
+    border-color: var(--surface-elevated);
+}
+
+[data-theme="light"] .history-item:hover {
+    border-color: var(--accent-cyan);
+}
+
+[data-theme="light"] .history-meta__tag,
+[data-theme="light"] .history-meta-tag {
+    background: rgba(34, 211, 238, 0.08);
+}
+
+[data-theme="light"] .history-empty {
+    color: var(--text-tertiary);
+}
+
+[data-theme="light"] .history-empty i {
+    background: rgba(124, 58, 237, 0.08);
+}

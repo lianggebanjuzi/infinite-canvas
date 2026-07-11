@@ -1,0 +1,411 @@
+/* styles/card-image-input.css */
+/* Infinite Canvas 2.2 — 图片卡片样式（玻璃极简风） */
+
+/* ═══════════════════════════════════════
+   Image 卡片
+   色相区分：橙色 — 橙色透明标题栏 + 橙色类型徽章
+═══════════════════════════════════════ */
+.card[data-type="image"],
+.image-card {
+    background: var(--bg-card);
+    border: 1px solid var(--border-subtle);
+}
+
+.card[data-type="image"] .card__header,
+.image-card .card-header {
+    background: rgba(249, 115, 22, 0.15);
+}
+
+.card[data-type="image"] .card__type-badge,
+.image-card .card-type-badge {
+    color: #F97316;
+    background: rgba(249, 115, 22, 0.15);
+    border-color: #F97316;
+}
+
+/* ═══════════════════════════════════════
+   图片卡片容器
+═══════════════════════════════════════ */
+.image-card__wrapper,
+.image-card-wrapper {
+    position: relative;
+    flex: 1;
+    min-height: 0;
+    overflow: hidden;
+    border-radius: 0 0 calc(var(--card-border-radius) - 2px) calc(var(--card-border-radius) - 2px);
+}
+
+/* ═══════════════════════════════════════
+   图片本体
+═══════════════════════════════════════ */
+.image__content,
+.image-content {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    display: block;
+    pointer-events: none;
+    user-select: none;
+    -webkit-user-drag: none;
+    image-rendering: -webkit-optimize-contrast;
+    image-rendering: crisp-edges;
+    border-radius: 0 0 calc(var(--card-border-radius) - 2px) calc(var(--card-border-radius) - 2px);
+}
+
+/* ═══════════════════════════════════════
+   空状态占位
+═══════════════════════════════════════ */
+.image__placeholder,
+.image-placeholder {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: var(--space-2);
+    background: var(--bg-embedded);
+    cursor: pointer;
+    color: var(--text-tertiary);
+    font-size: var(--text-sm);
+    transition: background var(--duration-fast) var(--ease-default),
+                color var(--duration-fast) var(--ease-default);
+    border-radius: 0 0 calc(var(--card-border-radius) - 2px) calc(var(--card-border-radius) - 2px);
+}
+
+.image__placeholder i,
+.image-placeholder i {
+    font-size: 24px;
+    color: var(--border-default);
+    transition: color var(--duration-fast) var(--ease-default);
+}
+
+.image__placeholder:hover,
+.image-placeholder:hover {
+    background: var(--accent-primary-glow);
+    color: var(--accent-primary);
+}
+
+.image__placeholder:hover i,
+.image-placeholder:hover i {
+    color: var(--accent-primary);
+}
+
+/* ═══════════════════════════════════════
+   遮罩相关
+═══════════════════════════════════════ */
+.mask-canvas {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+    border-radius: 0 0 calc(var(--card-border-radius) - 2px) calc(var(--card-border-radius) - 2px);
+    z-index: 10;
+}
+
+.image-mask-overlay {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    pointer-events: none;
+    opacity: 0.55;
+    border-radius: 0 0 calc(var(--card-border-radius) - 2px) calc(var(--card-border-radius) - 2px);
+    z-index: 10;
+}
+
+/* ═══════════════════════════════════════
+   Hover 底部浮动操作栏
+═══════════════════════════════════════ */
+.image__hover-toolbar,
+.image-hover-toolbar {
+    position: absolute;
+    bottom: var(--space-3);
+    left: 50%;
+    transform: translateX(-50%) translateY(6px);
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    background: rgba(24, 24, 27, 0.85);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border-radius: var(--radius-full);
+    padding: var(--space-2);
+    z-index: 20;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity var(--duration-base) var(--ease-default),
+                transform var(--duration-base) var(--ease-spring);
+    white-space: nowrap;
+    box-shadow: var(--shadow-md);
+    border: 1px solid var(--border-subtle);
+}
+
+.card:hover .image__hover-toolbar,
+.card:hover .image-hover-toolbar {
+    opacity: 1;
+    pointer-events: auto;
+    transform: translateX(-50%) translateY(0);
+}
+
+.img__action-btn,
+.img-action-btn {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    background: transparent;
+    border: none;
+    color: rgba(255, 255, 255, 0.75);
+    cursor: pointer;
+    padding: var(--space-1) var(--space-2);
+    border-radius: var(--radius-sm);
+    font-size: var(--text-xs);
+    font-weight: 500;
+    transition: background var(--duration-fast) var(--ease-default),
+                color var(--duration-fast) var(--ease-default);
+    white-space: nowrap;
+}
+
+.img__action-btn i,
+.img-action-btn i {
+    font-size: 12px;
+}
+
+.img__action-btn:hover,
+.img-action-btn:hover {
+    background: rgba(255, 255, 255, 0.14);
+    color: #fff;
+}
+
+.img__action-btn--danger,
+.img-action-btn.img-action-danger:hover {
+    background: rgba(239, 68, 68, 0.30);
+    color: #fff;
+}
+
+.img__action-btn--primary,
+.img-action-btn.img-action-primary:hover {
+    background: rgba(14, 165, 233, 0.30);
+    color: #fff;
+}
+
+.img__toolbar-divider,
+.img-toolbar-divider {
+    width: 1px;
+    height: 14px;
+    background: rgba(255, 255, 255, 0.15);
+    margin: 0 2px;
+    flex-shrink: 0;
+}
+
+/* ═══════════════════════════════════════
+   浅色主题图片卡片
+═══════════════════════════════════════ */
+[data-theme="light"] .card[data-type="image"] .card__header,
+[data-theme="light"] .image-card .card-header {
+    background: var(--accent-orange-subtle);
+}
+
+[data-theme="light"] .card[data-type="image"] .card__type-badge,
+[data-theme="light"] .image-card .card-type-badge {
+    color: var(--accent-orange);
+    background: var(--accent-orange-subtle);
+    border-color: rgba(249, 115, 22, 0.30);
+}
+
+[data-theme="light"] .image__placeholder {
+    background: var(--surface-hover);
+}
+
+[data-theme="light"] .image__placeholder i {
+    color: rgba(0, 0, 0, 0.20);
+}
+
+/* ═══════════════════════════════════════
+   浅色主题悬浮工具栏（白色背景图上需深色图标）
+═══════════════════════════════════════ */
+[data-theme="light"] .image__hover-toolbar,
+[data-theme="light"] .image-hover-toolbar {
+    background: rgba(255, 255, 255, 0.90);
+    border-color: var(--divider);
+}
+
+[data-theme="light"] .img__action-btn,
+[data-theme="light"] .img-action-btn {
+    color: var(--toolbar-text);
+}
+
+[data-theme="light"] .img__action-btn:hover,
+[data-theme="light"] .img-action-btn:hover {
+    background: var(--toolbar-hover-bg);
+    color: var(--accent-primary);
+}
+
+[data-theme="light"] .img__toolbar-divider,
+[data-theme="light"] .img-toolbar-divider {
+    background: var(--divider);
+}
+
+/* ═══════════════════════════════════════
+   浅色主题遮罩编辑弹窗
+═══════════════════════════════════════ */
+[data-theme="light"] .mask-modal__toolbar,
+[data-theme="light"] .mask-modal-toolbar {
+    background: rgba(255, 255, 255, 0.92);
+    border-color: var(--divider);
+}
+
+[data-theme="light"] .mask-modal__toolbar .mask__tool-btn,
+[data-theme="light"] .mask-modal-toolbar .mask-tool-btn {
+    color: var(--toolbar-text);
+}
+
+[data-theme="light"] .mask-modal__toolbar .mask__tool-btn:hover,
+[data-theme="light"] .mask-modal__toolbar .mask__tool-btn.active,
+[data-theme="light"] .mask-modal-toolbar .mask-tool-btn:hover,
+[data-theme="light"] .mask-modal-toolbar .mask-tool-btn.active {
+    background: var(--toolbar-hover-bg);
+    color: var(--accent-primary);
+}
+
+[data-theme="light"] .mask-modal__toolbar .mask__clear-btn:hover,
+[data-theme="light"] .mask-modal-toolbar .mask-clear-btn:hover {
+    background: rgba(220, 38, 38, 0.10);
+    color: var(--color-error);
+}
+
+[data-theme="light"] .mask-modal__toolbar .mask__done-btn:hover,
+[data-theme="light"] .mask-modal-toolbar .mask-done-btn:hover {
+    background: rgba(99, 102, 241, 0.08);
+    color: var(--accent-primary);
+}
+
+[data-theme="light"] .mask-modal__toolbar .mask__brush-size,
+[data-theme="light"] .mask-modal-toolbar .mask-brush-size {
+    accent-color: var(--accent-primary);
+}
+
+[data-theme="light"] .mask__toolbar-divider,
+[data-theme="light"] .mask-toolbar-divider {
+    background: var(--divider);
+}
+
+/* ═══════════════════════════════════════
+   遮罩编辑弹窗层
+═══════════════════════════════════════ */
+.mask-modal__layer,
+.mask-modal-layer {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    pointer-events: none;
+}
+
+.mask-modal__toolbar,
+.mask-modal-toolbar {
+    position: absolute;
+    bottom: var(--space-6);
+    left: 50%;
+    transform: translateX(-50%);
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    background: rgba(24, 24, 27, 0.90);
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
+    border-radius: var(--radius-full);
+    padding: var(--space-2) var(--space-4);
+    z-index: 100;
+    pointer-events: auto;
+    white-space: nowrap;
+    box-shadow: var(--shadow-lg);
+    border: 1px solid var(--border-default);
+    animation: toolbar-slide-in var(--duration-base) var(--ease-spring);
+}
+
+@keyframes toolbar-slide-in {
+    from {
+        opacity: 0;
+        transform: translateX(-50%) translateY(8px);
+    }
+    to {
+        opacity: 1;
+        transform: translateX(-50%) translateY(0);
+    }
+}
+
+.mask-modal__toolbar .mask__tool-btn,
+.mask-modal-toolbar .mask-tool-btn {
+    padding: var(--space-2) var(--space-3);
+    font-size: var(--text-sm);
+    display: flex;
+    align-items: center;
+}
+
+.mask-modal__toolbar .mask__clear-btn:hover,
+.mask-modal-toolbar .mask-clear-btn:hover {
+    background: rgba(239, 68, 68, 0.30);
+    color: #fff;
+}
+
+.mask-modal__toolbar .mask__done-btn:hover,
+.mask-modal-toolbar .mask-done-btn:hover {
+    background: var(--accent-primary-glow);
+    color: var(--accent-primary);
+}
+
+.mask-modal__toolbar .mask__brush-size,
+.mask-modal-toolbar .mask-brush-size {
+    width: 80px;
+    accent-color: #fff;
+    cursor: pointer;
+    vertical-align: middle;
+}
+
+.mask__toolbar-divider,
+.mask-toolbar-divider {
+    width: 1px;
+    height: 14px;
+    background: rgba(255, 255, 255, 0.15);
+    margin: 0 var(--space-1);
+    flex-shrink: 0;
+}
+
+.mask__brush-size,
+.mask-brush-size {
+    width: 60px;
+    accent-color: #fff;
+    cursor: pointer;
+    vertical-align: middle;
+}
+
+.mask__tool-btn,
+.mask-tool-btn {
+    background: transparent;
+    border: none;
+    color: rgba(255, 255, 255, 0.65);
+    cursor: pointer;
+    padding: var(--space-1) var(--space-2);
+    border-radius: var(--radius-sm);
+    font-size: var(--text-xs);
+    transition: background var(--duration-fast) var(--ease-default),
+                color var(--duration-fast) var(--ease-default);
+}
+
+.mask__tool-btn:hover,
+.mask__tool-btn--active,
+.mask__tool-btn.active,
+.mask-tool-btn:hover,
+.mask-tool-btn.active {
+    background: rgba(255, 255, 255, 0.16);
+    color: #fff;
+}

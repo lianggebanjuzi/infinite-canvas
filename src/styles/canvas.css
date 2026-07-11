@@ -1,0 +1,156 @@
+/* styles/canvas.css */
+/* Infinite Canvas 2.2 — 画布背景样式（物理深度风） */
+
+/* ═══════════════════════════════════════
+   画布容器
+═══════════════════════════════════════ */
+#canvas-container {
+    width: 100vw;
+    height: 100vh;
+    position: relative;
+    background-color: var(--bg-canvas);
+    background-image: radial-gradient(circle, var(--grid-color) 1px, transparent 1px);
+    background-size: 22px 22px;
+    z-index: var(--z-canvas);
+}
+
+/* 右上角装饰光斑 */
+#canvas-container::before {
+    content: '';
+    position: fixed;
+    top: -10%;
+    right: -10%;
+    width: 40%;
+    height: 40%;
+    background: var(--glow-accent);
+    border-radius: 50%;
+    filter: blur(120px);
+    pointer-events: none;
+    z-index: -1;
+}
+
+/* 左下角装饰光斑 */
+#canvas-container::after {
+    content: '';
+    position: fixed;
+    bottom: -10%;
+    left: -10%;
+    width: 50%;
+    height: 50%;
+    background: var(--glow-secondary);
+    border-radius: 50%;
+    filter: blur(150px);
+    pointer-events: none;
+    z-index: -1;
+}
+
+/* ═══════════════════════════════════════
+   变换层
+═══════════════════════════════════════ */
+#transform-layer {
+    position: absolute;
+    width: 100%;
+    height: 100%;
+    transform-origin: 0 0;
+    will-change: transform;
+    image-rendering: -webkit-optimize-contrast;
+    image-rendering: crisp-edges;
+}
+
+/* ═══════════════════════════════════════
+   SVG 连线层
+═══════════════════════════════════════ */
+#svg-layer {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+    overflow: visible;
+    z-index: var(--z-svg-layer);
+}
+
+/* 连线默认样式（Cyan 色系 — 与端口/光斑统一） */
+#svg-layer path {
+    pointer-events: stroke;
+    cursor: pointer;
+    fill: none;
+    stroke: var(--connection-color);
+    stroke-width: 2px;
+    transition: stroke var(--duration-fast) var(--ease-default),
+                stroke-width var(--duration-fast) var(--ease-default),
+                filter var(--duration-fast) var(--ease-default);
+}
+
+#svg-layer path:hover {
+    stroke: var(--connection-color-hover);
+    stroke-width: 2.5px;
+    filter: drop-shadow(0 0 5px rgba(34, 211, 238, 0.45));
+}
+
+/* ═══════════════════════════════════════
+   激光切割线
+═══════════════════════════════════════ */
+.laser-line {
+    stroke: var(--color-error);
+    stroke-width: 2px;
+    stroke-dasharray: 5, 5;
+    stroke-linecap: round;
+    opacity: 0.75;
+    pointer-events: none;
+    filter: drop-shadow(0 0 3px rgba(239, 68, 68, 0.45));
+}
+
+/* ═══════════════════════════════════════
+   框选
+═══════════════════════════════════════ */
+.selection-box {
+    position: absolute;
+    border: 1.5px solid var(--accent-cyan);
+    background: var(--accent-cyan-subtle);
+    pointer-events: none;
+    z-index: var(--z-selection);
+    border-radius: var(--radius-xs);
+}
+
+/* ═══════════════════════════════════════
+   浅色主题画布
+═══════════════════════════════════════ */
+[data-theme="light"] #canvas-container {
+    /* 浅色画布 — 统一使用点阵背景 + 装饰光斑 */
+    background-image: radial-gradient(circle, var(--grid-color) 1px, transparent 1px);
+    background-size: 22px 22px;
+}
+
+[data-theme="light"] #canvas-container::before {
+    filter: blur(100px);
+}
+
+[data-theme="light"] #canvas-container::after {
+    filter: blur(120px);
+}
+
+[data-theme="light"] #svg-layer path {
+    stroke: var(--connection-color);
+}
+
+[data-theme="light"] #svg-layer path:hover {
+    stroke: var(--connection-color-hover);
+    filter: drop-shadow(0 0 4px rgba(34, 211, 238, 0.35));
+}
+
+/* ═══════════════════════════════════════
+   浅色主题框选矩形
+═══════════════════════════════════════ */
+[data-theme="light"] .selection-box {
+    background: rgba(34, 211, 238, 0.06);
+    border: 1.5px solid rgba(34, 211, 238, 0.35);
+}
+
+/* ═══════════════════════════════════════
+   浅色主题激光切割线
+═══════════════════════════════════════ */
+[data-theme="light"] .laser-line {
+    filter: drop-shadow(0 0 3px rgba(220, 38, 38, 0.35));
+}

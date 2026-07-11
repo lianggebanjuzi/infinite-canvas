@@ -1,0 +1,65 @@
+/* styles/card-text.css */
+/* Infinite Canvas 2.2 — 文本卡片样式（玻璃极简风） */
+
+/* ═══════════════════════════════════════
+   Text 卡片
+   色相区分：主强调色 — 靛蓝透明标题栏 + 靛蓝类型徽章
+═══════════════════════════════════════ */
+.card[data-type="text"],
+.text-card {
+    background: var(--bg-card);
+    border: 1px solid var(--border-subtle);
+    min-width: 160px;
+    min-height: 100px;
+}
+
+.card[data-type="text"] .card__header,
+.text-card .card-header {
+    background: var(--accent-primary-glow);
+}
+
+/* ═══════════════════════════════════════
+   浅色主题文本卡片
+═══════════════════════════════════════ */
+[data-theme="light"] .card[data-type="text"] .card__header,
+[data-theme="light"] .text-card .card-header {
+    background: rgba(99, 102, 241, 0.10);
+}
+
+[data-theme="light"] .card[data-type="text"] .card__type-badge,
+[data-theme="light"] .text-card .card-type-badge {
+    color: var(--accent-primary);
+    background: rgba(99, 102, 241, 0.10);
+    border-color: rgba(99, 102, 241, 0.30);
+}
+
+/* ═══════════════════════════════════════
+   文本内容输入框
+═══════════════════════════════════════ */
+.text__content,
+.text-content {
+    width: 100%;
+    height: 100%;
+    border: none;
+    outline: none;
+    resize: none;
+    background: transparent;
+    font-family: inherit;
+    font-size: var(--text-sm);
+    line-height: 1.6;
+    color: var(--text-primary);
+    padding: var(--space-3);
+    box-sizing: border-box;
+    display: block;
+    caret-color: var(--accent-primary);
+}
+
+.text__content::placeholder,
+.text-content::placeholder {
+    color: var(--text-tertiary);
+}
+
+.text__content:focus,
+.text-content:focus {
+    outline: none;
+}

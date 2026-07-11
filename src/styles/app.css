@@ -1,0 +1,18 @@
+/* styles/app.css */
+/* 样式主入口，按层级顺序引入所有 CSS */
+/* index.html 只需引入这一个文件 */
+
+@import "variables.css";
+@import "base.css";
+@import "canvas.css";
+@import "card.css";
+@import "card-text.css";
+@import "card-image-input.css";
+@import "card-ai-draw.css";
+@import "card-preview.css";
+@import "provider.css";
+@import "model.css";
+@import "settings.css";
+@import "ui.css";
+@import "sidebar.css";
+@import "agent-panel.css";

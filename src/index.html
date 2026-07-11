@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Infinite Canvas 1.0</title>
+
+    <link rel="stylesheet" href="styles/app.css">
+    <link rel="stylesheet" href="styles/group.css">
+    <link rel="stylesheet" href="styles/card-agent.css">
+    <link rel="stylesheet" href="styles/card-ai-draw.css">
+    <link rel="stylesheet" href="styles/card-drawing-board.css">
+    <link rel="stylesheet" href="styles/custom-select.css">
+    <link rel="stylesheet" href="styles/animations.css">
+</head>
+<body>
+    <!-- ===================== 画布区域 ===================== -->
+    <div id="canvas-container">
+        <div id="transform-layer">
+            <svg id="svg-layer" xmlns="http://www.w3.org/2000/svg"></svg>
+            <div id="cards-container"></div>
+        </div>
+    </div>
+
+    <!-- ===================== 左侧边栏（项目名 + 历史图库） ===================== -->
+    <div id="left-sidebar">
+
+        <!-- 项目名称按钮（可编辑） -->
+        <div id="project-name-btn" class="project-name-btn">
+            <div class="project-name-icon">
+                <i class="fas fa-project-diagram"></i>
+            </div>
+            <input type="text"
+                   id="project-name-input"
+                   class="project-name-input"
+                   value="未命名项目"
+                   placeholder="未命名项目"
+                   spellcheck="false">
+        </div>
+
+        <!-- 标签+面板容器（用于折叠按钮定位） -->
+        <div id="sidebar-wrap" class="sidebar-wrap">
+        <div id="sidebar-tabs">
+            <button class="sidebar-tab-btn active"
+                    data-panel="history"
+                    title="生成历史">
+                <i class="fas fa-images"></i>
+                <span>图库</span>
+            </button>
+        </div>
+
+        <!-- 面板内容区（不再撑满，限制高度） -->
+        <div id="sidebar-panel">
+            <div class="sidebar-panel-content active" id="sidebar-panel-history">
+                <div class="sidebar-panel-header">
+                    <span class="sidebar-panel-title">生成历史</span>
+                    <span class="sidebar-panel-count" id="history-count">0 张</span>
+                </div>
+                <div class="sidebar-panel-hint">
+                    保存项目后图库将清空 · 可拖入画布
+                </div>
+                <div id="history-grid" class="history-grid"></div>
+            </div>
+        </div>
+
+        <!-- 折叠/展开拉手 -->
+        <div id="sidebar-toggle" title="折叠/展开侧边栏">
+            <i class="fas fa-chevron-right" id="sidebar-toggle-icon"></i>
+        </div>
+        </div>
+    </div>
+
+    <!-- ===================== 底部工具栏 ===================== -->
+    <div id="ui-layer">
+        <div class="toolbar">
+            <button class="tool-btn" id="btn-save">
+                <i class="fas fa-save"></i> 保存
+            </button>
+            <button class="tool-btn" id="btn-save-as">
+                <i class="fas fa-file-export"></i> 另存为
+            </button>
+            <button class="tool-btn" id="btn-open">
+                <i class="fas fa-folder-open"></i> 打开
+            </button>
+            <div class="divider"></div>
+            <button class="tool-btn" id="btn-new">
+                <i class="fas fa-file"></i> 新建
+            </button>
+            <div class="divider"></div>
+            <button class="tool-btn" id="btn-settings">
+                <i class="fas fa-cog"></i> 设置
+            </button>
+            <div class="divider"></div>
+            <button class="tool-btn tool-btn-dark" id="theme-toggle-btn" title="切换深色/浅色">
+                <i class="fas fa-moon"></i> 暗色
+            </button>
+        </div>
+    </div>
+
+    <!-- ===================== 小地图 ===================== -->
+    <div id="minimap" class="minimap">
+        <div class="minimap-header">
+            <span>导览</span>
+            <button class="minimap-toggle" id="minimap-toggle-btn" title="折叠/展开">
+                <i class="fas fa-minus"></i>
+            </button>
+        </div>
+        <div class="minimap-content" id="minimap-content">
+            <div class="minimap-viewport" id="minimap-viewport"></div>
+        </div>
+    </div>
+
+    <!-- ===================== 画布右键菜单 ===================== -->
+    <div id="canvas-menu" class="context-menu" style="display: none;">
+        <div class="menu-item" data-action="create-text-card">
+            <i class="fas fa-font"></i> 文本卡片
+        </div>
+        <div class="menu-item" data-action="create-image-card">
+            <i class="fas fa-image"></i> 图片卡片
+        </div>
+        <div class="menu-item" data-action="create-ai-image-card">
+            <i class="fas fa-magic"></i> AI绘图卡片
+        </div>
+        <div class="menu-item" data-action="create-drawing-board-card">
+            <i class="fas fa-paint-brush"></i> 画板卡片
+        </div>
+        <div class="menu-item" data-action="create-preview-card">
+            <i class="fas fa-eye"></i> 预览卡片
+        </div>
+        <div class="menu-item" data-action="create-agent-card">
+            <i class="fas fa-robot"></i> Agent 卡片
+        </div>
+        <div class="menu-item" data-action="create-compare-card">
+            <i class="fas fa-columns"></i> 对比卡片
+        </div>
+        <div class="menu-divider"></div>
+        <div class="menu-item" data-action="paste">
+            <i class="fas fa-paste"></i> 粘贴
+        </div>
+    </div>
+
+    <!-- ===================== 卡片右键菜单 ===================== -->
+    <div id="card-context-menu" class="context-menu" style="display: none;">
+        <div class="menu-item" data-action="copy">
+            <i class="fas fa-copy"></i> 复制
+        </div>
+        <div class="menu-item" data-action="paste">
+            <i class="fas fa-paste"></i> 粘贴
+        </div>
+        <div class="menu-divider"></div>
+        <div class="menu-item" data-action="delete">
+            <i class="fas fa-trash"></i> 删除
+        </div>
+        <div class="menu-divider"></div>
+        <div class="menu-item" data-action="create-group">
+            <i class="fas fa-object-group"></i> 创建分组 <span style="color:#999;font-size:11px">（Ctrl+G）</span>
+        </div>
+        <div class="menu-divider"></div>
+        <div class="color-palette">
+            <div class="color-dot" data-color="#ffffff" style="background:#ffffff; border:1px solid #ddd;"></div>
+            <div class="color-dot" data-color="#ffebee" style="background:#ffebee;"></div>
+            <div class="color-dot" data-color="#fff3e0" style="background:#fff3e0;"></div>
+            <div class="color-dot" data-color="#e8f5e9" style="background:#e8f5e9;"></div>
+            <div class="color-dot" data-color="#e3f2fd" style="background:#e3f2fd;"></div>
+            <div class="color-dot" data-color="#f3e5f5" style="background:#f3e5f5;"></div>
+        </div>
+    </div>
+
+    <!-- ===================== 隐藏的图片上传控件 ===================== -->
+    <input type="file" id="image-upload" accept="image/*" style="display: none;">
+
+    <!-- ===================== 图片大图查看 ===================== -->
+    <div id="image-modal" class="modal-overlay">
+        <span class="close-btn">&times;</span>
+        <img id="modal-image" src="" alt="Large View">
+    </div>
+
+    <!-- ===================== 设置面板 ===================== -->
+    <div id="settings-modal" class="settings-overlay" style="display: none;">
+        <div class="settings-panel" style="width: 600px;">
+            <div class="settings-header">
+                <h2>设置</h2>
+                <button class="close-settings" id="btn-close-settings" aria-label="关闭设置">&times;</button>
+            </div>
+            <div class="settings-content">
+                <div class="settings-tabs">
+                    <button class="settings-tab active" data-tab="api">
+                        <i class="fas fa-plug"></i> API 设置
+                    </button>
+                    <button class="settings-tab" data-tab="storage">
+                        <i class="fas fa-folder"></i> 存储设置
+                    </button>
+                </div>
+                <div id="settings-tab-api" class="settings-tab-content active">
+                    <div class="settings-section-header">
+                        <span>模型供应商</span>
+                        <div id="provider-search-wrap"></div>
+                    </div>
+                    <div class="provider-list" id="provider-list"></div>
+                    <button class="btn-add-provider" id="btn-add-provider">
+                        <i class="fas fa-plus"></i> 添加供应商
+                    </button>
+                </div>
+                <div id="settings-tab-storage" class="settings-tab-content" style="display: none;">
+                    <div id="storage-settings-form"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ===================== 添加供应商对话框 ===================== -->
+    <div id="add-provider-modal" class="modal-overlay" style="display: none;">
+        <div class="add-provider-dialog">
+            <h3>添加提供商</h3>
+            <div class="provider-icon-placeholder" id="add-provider-icon"><i class="fas fa-server"></i></div>
+            <div id="add-provider-form"></div>
+            <div class="dialog-actions">
+                <button class="btn-cancel" id="btn-cancel-add-provider">取消</button>
+                <button class="btn-confirm" id="btn-confirm-add-provider">确定</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- ===================== 供应商详情面板 ===================== -->
+    <div id="provider-detail-modal" class="settings-overlay" style="display: none;">
+        <div class="settings-panel">
+            <div class="settings-header">
+                <div class="provider-icon-placeholder" id="detail-provider-icon" style="width:48px;height:48px;font-size:18px;margin:0;"><i class="fas fa-server"></i></div>
+                <h2 id="provider-detail-title"></h2>
+                <div class="header-actions">
+                    <div id="detail-enabled-wrap"></div>
+                    <button class="icon-btn" id="btn-delete-provider"
+                            title="删除供应商">
+                        <i class="fas fa-trash"></i>
+                    </button>
+                    <button class="close-settings"
+                            id="btn-close-provider-detail" aria-label="关闭供应商详情">&times;</button>
+                </div>
+            </div>
+            <div class="settings-content" id="provider-detail-content"></div>
+        </div>
+    </div>
+
+    <!-- ===================== 模型管理器 ===================== -->
+    <div id="model-manager-modal" class="settings-overlay" style="display: none;">
+        <div class="model-manager-panel">
+            <div class="model-manager-header">
+                <h2 id="model-manager-title">模型管理</h2>
+                <button class="close-settings" id="btn-close-model-manager" aria-label="关闭模型管理">&times;</button>
+            </div>
+            <div class="model-manager-content">
+                <div class="model-categories" id="model-categories"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ===================== Agent 对话面板（右侧栏） ===================== -->
+    <div id="right-sidebar">
+        <!-- 折叠/展开小标签 -->
+        <div class="agent-panel-toggle" id="agent-panel-toggle" title="Agent 对话" role="button" aria-label="展开/折叠 Agent 面板" tabindex="0">
+            <i class="fas fa-chevron-left"></i>
+        </div>
+        <!-- 面板主体 -->
+        <div class="agent-panel">
+            <div class="agent-panel-header">
+                <div class="agent-panel-title">
+                    <span class="agent-icon"><i class="fas fa-robot"></i></span>
+                    Agent
+                </div>
+                <div id="agent-model-select-wrap"></div>
+            </div>
+            <div class="agent-messages">
+                <div class="agent-empty-state">
+                    <div class="empty-icon"><i class="fas fa-robot"></i></div>
+                    <div class="empty-title">Agent 对话</div>
+                    <div class="empty-hint">
+                        输入指令，AI 将帮你操作画布<br>生成图片、创建卡片、批量处理
+                    </div>
+                </div>
+            </div>
+            <div class="agent-input-area" id="agent-input-area"></div>
+        </div>
+    </div>
+
+    <!-- ===================== Toast 提示 ===================== -->
+    <div id="toast" class="toast" style="display: none;"></div>
+
+    <!-- Vite 模块入口（放在 body 末尾，确保 DOM 已解析） -->
+    <script type="module" src="./main.ts"></script>
+</body>
+</html>

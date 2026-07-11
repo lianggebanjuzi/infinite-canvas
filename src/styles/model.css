@@ -1,0 +1,593 @@
+/* styles/model.css */
+/* Infinite Canvas 2.2 — 模型面板样式（玻璃极简风） */
+/* P3: 浅色主题硬编码已替换为变量 */
+
+/* ═══════════════════════════════════════
+   模型管理面板
+═══════════════════════════════════════ */
+.model-manager-panel {
+    background: var(--bg-elevated);
+    backdrop-filter: blur(20px) saturate(180%);
+    -webkit-backdrop-filter: blur(20px) saturate(180%);
+    color: var(--text-primary);
+    width: 780px;
+    max-height: 84vh;
+    border-radius: var(--radius-xl);
+    box-shadow: var(--shadow-xl);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    animation: panelSlideUp var(--duration-slow) var(--ease-spring);
+}
+
+/* panelSlideUp 已提取到 animations.css */
+
+/* ═══════════════════════════════════════
+   模型管理面板头部
+═══════════════════════════════════════ */
+.model-manager__header,
+.model-manager-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: var(--space-4) var(--space-5);
+    border-bottom: 1px solid var(--border-subtle);
+}
+
+.model-manager__header h2,
+.model-manager-header h2 {
+    margin: 0;
+    font-size: var(--text-xl);
+    font-weight: 600;
+    letter-spacing: -0.02em;
+    color: var(--text-primary);
+}
+
+/* ═══════════════════════════════════════
+   模型管理面板内容
+═══════════════════════════════════════ */
+.model-manager__content,
+.model-manager-content {
+    padding: var(--space-4) var(--space-5);
+    overflow-y: auto;
+    flex: 1;
+}
+
+.model-categories {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+}
+
+/* ═══════════════════════════════════════
+   分类折叠块
+═══════════════════════════════════════ */
+.model-category {
+    background: var(--bg-embedded);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-md);
+    overflow: hidden;
+}
+
+.category__header,
+.category-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: var(--space-3);
+    cursor: pointer;
+    user-select: none;
+    background: var(--bg-card);
+    transition: background var(--duration-fast) var(--ease-default);
+}
+
+.category__header:hover,
+.category-header:hover {
+    background: rgba(255, 255, 255, 0.02);
+}
+
+.category__title,
+.category-title {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    font-size: var(--text-base);
+    font-weight: 600;
+    color: var(--text-primary);
+    letter-spacing: -0.01em;
+}
+
+.category__count,
+.category-count {
+    background: var(--bg-embedded);
+    border: 1px solid var(--border-subtle);
+    padding: 2px 8px;
+    border-radius: var(--radius-full);
+    font-size: var(--text-xs);
+    font-weight: 500;
+    color: var(--text-tertiary);
+}
+
+.category__toggle,
+.category-toggle {
+    color: var(--text-tertiary);
+    font-size: 12px;
+    transition: transform var(--duration-base) var(--ease-out);
+}
+
+.category__header--collapsed .category__toggle,
+.category-header.collapsed .category-toggle {
+    transform: rotate(-90deg);
+}
+
+.category__models,
+.category-models {
+    padding: var(--space-2) var(--space-3) var(--space-3);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+}
+
+.category__header--collapsed + .category__models,
+.category-header.collapsed + .category-models {
+    display: none;
+}
+
+/* ═══════════════════════════════════════
+   模型条目
+═══════════════════════════════════════ */
+.category-model-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: var(--space-2) var(--space-3);
+    background: var(--bg-embedded);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-sm);
+    transition: background var(--duration-fast) var(--ease-default),
+                border-color var(--duration-fast) var(--ease-default),
+                transform var(--duration-fast) var(--ease-spring);
+}
+
+.category-model-item:hover {
+    background: var(--accent-primary-glow);
+    border-color: var(--accent-primary);
+    transform: translateX(2px);
+}
+
+.category-model__info,
+.category-model-info {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    flex: 1;
+    min-width: 0;
+}
+
+.model__icon,
+.model-icon {
+    width: 22px;
+    height: 22px;
+    border-radius: var(--radius-xs);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 14px;
+    flex-shrink: 0;
+    background: var(--bg-card);
+    border: 1px solid var(--border-subtle);
+}
+
+.model__icon img,
+.model-icon img {
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+}
+
+.model__name,
+.model-name {
+    font-size: var(--text-sm);
+    color: var(--text-primary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    letter-spacing: -0.005em;
+}
+
+.model__badges,
+.model-badges {
+    display: flex;
+    gap: var(--space-1);
+    flex-shrink: 0;
+}
+
+/* ═══════════════════════════════════════
+   徽章
+═══════════════════════════════════════ */
+.badge {
+    padding: 2px 6px;
+    border-radius: var(--radius-xs);
+    font-size: var(--text-xs);
+    font-weight: 600;
+    letter-spacing: 0.01em;
+}
+
+.badge--vision,
+.badge-vision {
+    background: var(--accent-primary-glow);
+    color: var(--accent-primary);
+}
+
+.badge--web,
+.badge-web {
+    background: rgba(34, 197, 94, 0.15);
+    color: var(--color-success);
+}
+
+.badge--thinking,
+.badge-thinking {
+    background: rgba(167, 139, 250, 0.15);
+    color: var(--accent-tertiary);
+}
+
+.badge--edit,
+.badge-edit {
+    background: rgba(245, 158, 11, 0.15);
+    color: var(--color-warning);
+}
+
+/* ═══════════════════════════════════════
+   添加模型按钮
+═══════════════════════════════════════ */
+.add-model-btn {
+    background: none;
+    border: none;
+    color: var(--accent-primary);
+    cursor: pointer;
+    font-size: 18px;
+    padding: var(--space-1);
+    border-radius: var(--radius-xs);
+    transition: background var(--duration-fast) var(--ease-default),
+                transform var(--duration-fast) var(--ease-spring);
+    line-height: 1;
+}
+
+.add-model-btn:hover {
+    background: var(--accent-primary-glow);
+    transform: scale(1.1);
+}
+
+.add-model-btn:focus-visible {
+    outline: 2px solid var(--accent-primary);
+    outline-offset: 2px;
+}
+
+/* ═══════════════════════════════════════
+   模型数量
+═══════════════════════════════════════ */
+.model-count {
+    background: var(--accent-primary-glow);
+    color: var(--accent-primary);
+    padding: 2px 8px;
+    border-radius: var(--radius-full);
+    font-size: var(--text-xs);
+    font-weight: 600;
+    margin-left: var(--space-2);
+    border: 1px solid var(--accent-primary);
+}
+
+/* ═══════════════════════════════════════
+   模型列表（供应商详情内）
+═══════════════════════════════════════ */
+.model-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: var(--space-2) var(--space-3);
+    background: var(--bg-embedded);
+    border-radius: var(--radius-sm);
+    margin-bottom: var(--space-2);
+    cursor: pointer;
+    border: 1px solid var(--border-subtle);
+    transition: background var(--duration-fast) var(--ease-default),
+                border-color var(--duration-fast) var(--ease-default),
+                transform var(--duration-fast) var(--ease-spring);
+}
+
+.model-item:hover {
+    background: var(--accent-primary-glow);
+    border-color: var(--accent-primary);
+    transform: translateX(2px);
+}
+
+.model-item--selected,
+.model-item.selected {
+    background: var(--accent-primary-glow);
+    border-color: var(--accent-primary);
+}
+
+.model-item:last-child {
+    margin-bottom: 0;
+}
+
+.model-item__info,
+.model-info {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+}
+
+.model-actions {
+    display: flex;
+    gap: var(--space-2);
+    margin-top: var(--space-2);
+}
+
+/* ═══════════════════════════════════════
+   次要按钮
+═══════════════════════════════════════ */
+.btn-secondary {
+    flex: 1;
+    padding: var(--space-2) var(--space-3);
+    background: var(--bg-embedded);
+    border: 1px solid var(--border-default);
+    color: var(--text-secondary);
+    border-radius: var(--radius-md);
+    cursor: pointer;
+    font-size: var(--text-sm);
+    font-weight: 500;
+    font-family: inherit;
+    letter-spacing: -0.01em;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: var(--space-1);
+    transition: background var(--duration-fast) var(--ease-default),
+                border-color var(--duration-fast) var(--ease-default),
+                color var(--duration-fast) var(--ease-default),
+                transform var(--duration-fast) var(--ease-spring);
+}
+
+.btn-secondary:hover {
+    background: var(--accent-primary-glow);
+    border-color: var(--accent-primary);
+    color: var(--accent-primary);
+    transform: translateY(-1px);
+}
+
+.btn-secondary:active {
+    transform: scale(0.97);
+}
+
+.btn-secondary:focus-visible {
+    outline: 2px solid var(--accent-primary);
+    outline-offset: 2px;
+}
+
+/* ═══════════════════════════════════════
+   分组 Section 容器
+═══════════════════════════════════════ */
+.model-category__section,
+.model-category-section {
+    background: var(--bg-embedded);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-md);
+    overflow: hidden;
+    margin-bottom: var(--space-3);
+}
+
+.model-category__header,
+.model-category-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: var(--space-3);
+    background: var(--bg-card);
+    border-bottom: 1px solid var(--border-subtle);
+}
+
+.model-category__title,
+.model-category-title {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+}
+
+.model-category__label,
+.model-category-label {
+    font-size: var(--text-base);
+    font-weight: 600;
+    color: var(--text-primary);
+    letter-spacing: -0.01em;
+}
+
+/* ═══════════════════════════════════════
+   空状态提示
+═══════════════════════════════════════ */
+.model-category__empty,
+.model-category-empty {
+    padding: var(--space-4);
+    font-size: var(--text-sm);
+    color: var(--text-tertiary);
+    text-align: center;
+    letter-spacing: -0.005em;
+}
+
+/* ═══════════════════════════════════════
+   模型条目行
+═══════════════════════════════════════ */
+.model-manager__row,
+.model-manager-row {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    padding: var(--space-3);
+    border-bottom: 1px solid var(--border-subtle);
+    transition: background var(--duration-fast) var(--ease-default);
+}
+
+.model-manager__row:last-child,
+.model-manager-row:last-child {
+    border-bottom: none;
+}
+
+.model-manager__row:hover,
+.model-manager-row:hover {
+    background: var(--accent-primary-glow);
+}
+
+.model-manager__info,
+.model-manager-info {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.model-manager__name,
+.model-manager-name {
+    font-size: var(--text-sm);
+    color: var(--text-primary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    letter-spacing: -0.005em;
+    font-weight: 450;
+}
+
+.model-manager__id,
+.model-manager-id {
+    font-size: var(--text-xs);
+    color: var(--text-tertiary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    font-family: "SF Mono", "Menlo", monospace;
+    letter-spacing: 0;
+}
+
+/* ═══════════════════════════════════════
+   条目右侧操作区
+═══════════════════════════════════════ */
+.model-manager__row-actions,
+.model-manager-row-actions {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    flex-shrink: 0;
+}
+
+/* ═══════════════════════════════════════
+   删除按钮
+═══════════════════════════════════════ */
+.remove-model-btn {
+    width: 26px;
+    height: 26px;
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: var(--radius-xs);
+    color: var(--text-tertiary);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 12px;
+    transition: background var(--duration-fast) var(--ease-default),
+                border-color var(--duration-fast) var(--ease-default),
+                color var(--duration-fast) var(--ease-default),
+                transform var(--duration-fast) var(--ease-spring);
+}
+
+.remove-model-btn:hover {
+    background: rgba(239, 68, 68, 0.10);
+    border-color: var(--color-error);
+    color: var(--color-error);
+    transform: scale(1.08);
+}
+
+.remove-model-btn:focus-visible {
+    outline: 2px solid var(--color-error);
+    outline-offset: 2px;
+}
+
+/* ═══════════════════════════════════════
+   添加表单容器
+═══════════════════════════════════════ */
+.add-chat-model-form__wrap,
+.add-chat-model-form-wrap {
+    padding: 0 var(--space-3);
+}
+
+.add-chat-model-form__wrap .add-chat-model-form,
+.add-chat-model-form-wrap .add-chat-model-form {
+    margin: var(--space-3) 0;
+}
+
+/* ═══════════════════════════════════════
+   浅色主题调整
+═══════════════════════════════════════ */
+[data-theme="light"] .model-manager-panel {
+    border-color: var(--panel-border);
+}
+
+[data-theme="light"] .category__header,
+[data-theme="light"] .category-header,
+[data-theme="light"] .model-category__header,
+[data-theme="light"] .model-category-header {
+    background: var(--panel-header-bg);
+}
+
+/* ═══════════════════════════════════════
+   浅色主题模型面板（补充）
+═══════════════════════════════════════ */
+[data-theme="light"] .model-category {
+    background: var(--surface-subtle);
+}
+
+[data-theme="light"] .category__header:hover,
+[data-theme="light"] .category-header:hover {
+    background: var(--surface-hover);
+}
+
+[data-theme="light"] .category__count {
+    background: var(--card-badge-bg);
+}
+
+[data-theme="light"] .category-model-item {
+    background: var(--surface-subtle);
+}
+
+[data-theme="light"] .model-icon {
+    background: var(--surface-subtle);
+}
+
+[data-theme="light"] .badge--web {
+    background: var(--accent-green-subtle);
+}
+
+[data-theme="light"] .badge--thinking {
+    background: var(--accent-purple-subtle);
+}
+
+[data-theme="light"] .badge--edit {
+    background: rgba(217, 119, 6, 0.10);
+}
+
+[data-theme="light"] .model-item {
+    background: var(--surface-subtle);
+}
+
+[data-theme="light"] .model-category-section {
+    background: var(--panel-section-bg);
+}
+
+[data-theme="light"] .model-category-header {
+    border-bottom-color: var(--border-muted);
+}
+
+[data-theme="light"] .model-manager-row {
+    border-bottom-color: var(--surface-elevated);
+}
