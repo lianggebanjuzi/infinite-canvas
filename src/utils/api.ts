@@ -172,6 +172,14 @@ export const API = {
         return await pywebview.api.open_project_dialog();
     },
 
+    async loadProject(filePath: string) {
+        return await pywebview.api.load_project(filePath);
+    },
+
+    async getCurrentProjectPath() {
+        return await pywebview.api.get_current_project_path();
+    },
+
     async loadSettings() {
         return await pywebview.api.load_settings();
     },

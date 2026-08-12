@@ -1,0 +1,63 @@
+/* ═══════════════════════════════════════════
+   src/v1/styles/variables.css
+   温馨园艺风设计 Token（唯一权威来源：prototypes/ui-v2.html）
+   迁移自原型 :root，逐字保持色值/圆角/阴影
+   ═══════════════════════════════════════════ */
+
+:root {
+  --bg-app: #FAF9F6;
+  --bg-panel: #FFFFFF;
+  --bg-hover: #F4F2EE;
+  --bg-active: #ECE9E3;
+  --bg-float: #FFFFFF;
+  --border: #E9E6E0;
+  --border-strong: #D8D3C9;
+  --border-soft: #F0EDE8;
+  --text-1: #3D3833;
+  --text-2: #7A7268;
+  --text-3: #9C948A;
+  --accent: #7C9A72;
+  --accent-dim: rgba(124,154,114,.15);
+  --warm: #C08552;
+  --warm-dim: rgba(192,133,82,.14);
+  --st-idle: #C9C4BA;
+  --st-run: #7C9A72;
+  --st-done: #5FA878;
+  --st-stale: #D99A4E;
+  --st-fail: #D97B6C;
+  --canvas-dot: #EDEAE4;
+  --link: #D2CEC4;
+  --r-sm: 8px;
+  --r-md: 12px;
+  --r-lg: 16px;
+  --shadow-node: 0 1px 3px rgba(60,54,46,.05), 0 8px 24px rgba(60,54,46,.07);
+  --shadow-bar: 0 4px 14px rgba(60,54,46,.09), 0 12px 36px rgba(60,54,46,.1);
+  --font: -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+}
+
+[data-theme="dark"] {
+  --bg-app: #232220;
+  --bg-panel: #2B2A27;
+  --bg-hover: #353330;
+  --bg-active: #3F3C37;
+  --bg-float: #2B2A27;
+  --border: #3C3A35;
+  --border-strong: #514D45;
+  --border-soft: #33312D;
+  --text-1: #EFECE6;
+  --text-2: #A6A096;
+  --text-3: #7C766C;
+  --accent: #93AC87;
+  --accent-dim: rgba(147,172,135,.18);
+  --warm: #D19A6B;
+  --warm-dim: rgba(209,154,107,.16);
+  --st-idle: #575046;
+  --st-run: #93AC87;
+  --st-done: #7BBF92;
+  --st-stale: #D99A4E;
+  --st-fail: #D97B6C;
+  --canvas-dot: #3B362F;
+  --link: #4A443B;
+  --shadow-node: 0 4px 20px rgba(0,0,0,.35), 0 1px 4px rgba(0,0,0,.25);
+  --shadow-bar: 0 8px 28px rgba(0,0,0,.45), 0 2px 8px rgba(0,0,0,.3);
+}
