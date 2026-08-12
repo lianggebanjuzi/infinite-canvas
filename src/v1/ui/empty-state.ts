@@ -35,7 +35,8 @@ class EmptyState {
 
   private _sync(): void {
     if (!this.el) return;
-    this.el.classList.toggle('show', flowState.nodes.length === 0);
+    // 仅"首次启动且画布从无节点"时显示引导卡；用户主动删空（everHadNodes=true）保持干净空白
+    this.el.classList.toggle('show', flowState.nodes.length === 0 && !flowState.everHadNodes);
   }
 }
 

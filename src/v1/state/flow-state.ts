@@ -14,6 +14,8 @@ export class FlowState {
   canvas: FlowCanvasState = { scale: 1, panX: 60, panY: 40 };
   projectName = '未命名项目';
   dirty = false;
+  /** 画布是否曾经有过节点（addNode/replaceAll 置 true；用于区分"首次启动空画布"与"用户主动删空"） */
+  everHadNodes = false;
   createdAt = Date.now();
   updatedAt = Date.now();
 
@@ -115,6 +117,7 @@ export class FlowState {
       ...extra,
     };
     this.nodes.push(node);
+    this.everHadNodes = true;
     this.updatedAt = Date.now();
     this.dirty = true;
     this.notify();
@@ -245,6 +248,8 @@ export class FlowState {
       lastRunAt: n.lastRunAt ?? null,
     }));
     this.edges = project.edges.map(e => ({ ...e }));
+    // 打开/创建项目即视为"用过画布"：删空后不再弹首启引导卡（含打开空项目场景）
+    this.everHadNodes = true;
     const defaultCanvas: FlowCanvasState = { scale: 1, panX: 60, panY: 40 };
     this.canvas = { ...defaultCanvas, ...(project.canvas || {}) };
     this.projectName = project.projectName || '未命名项目';
