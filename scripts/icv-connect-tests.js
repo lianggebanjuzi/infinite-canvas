@@ -143,5 +143,52 @@ function setup() {
   assert(flowState.edges.length === 2, '手动边随项目往返保留');
 }
 
+// ═══════ 8. 删除连线 → 下游及子孙标 stale（QA 缺陷回归） ═══════
+{
+  // 8a：链 A→B→C，删 A→B → B/C 均 stale
+  flowState.clear();
+  const a = flowState.addNode('product-image', 0, 0);
+  const b = flowState.addNode('style-transfer', 400, 0);
+  const c = flowState.addNode('style-transfer', 800, 0);
+  flowState.setNodeImage(a.id, 'data:image/png;base64,REF', 3 / 4);
+  flowState.updateNode(a.id, { status: 'done' });
+  flowState.addEdge(a.id, b.id);
+  flowState.addEdge(b.id, c.id);
+  flowState.updateNode(b.id, { status: 'done', imageUrl: 'file:///b.png' });
+  flowState.updateNode(c.id, { status: 'done', imageUrl: 'file:///c.png' });
+  const eAB = flowState.edges.find(e => e.from === a.id && e.to === b.id);
+  flowState.removeEdge(eAB.id);
+  assert(flowState.getNode(b.id).status === 'stale', '删 A→B 后下游 B → stale');
+  assert(flowState.getNode(c.id).status === 'stale', '删 A→B 后孙节点 C → stale（间接）');
+  assert(flowState.getNode(a.id).status === 'done', '删边不影响上游 A 状态');
+
+  // 8b：运行中的下游不被覆盖
+  flowState.clear();
+  const a2 = flowState.addNode('product-image', 0, 0);
+  const b2 = flowState.addNode('style-transfer', 400, 0);
+  flowState.setNodeImage(a2.id, 'data:image/png;base64,REF', 3 / 4);
+  flowState.updateNode(a2.id, { status: 'done' });
+  flowState.addEdge(a2.id, b2.id);
+  flowState.updateNode(b2.id, { status: 'run' });
+  flowState.removeEdge(flowState.edges[0].id);
+  assert(flowState.getNode(b2.id).status === 'run', '删边不覆盖运行中（run）节点状态');
+
+  // 8c：删边后重连新上游 → 仍保持 stale（结果图来自旧上游，不可信）
+  flowState.clear();
+  const a3 = flowState.addNode('product-image', 0, 0);
+  const a4 = flowState.addNode('product-image', 0, 300);
+  const b3 = flowState.addNode('style-transfer', 400, 0);
+  flowState.setNodeImage(a3.id, 'data:image/png;base64,OLD', 3 / 4);
+  flowState.setNodeImage(a4.id, 'data:image/png;base64,NEW', 3 / 4);
+  flowState.updateNode(a3.id, { status: 'done' });
+  flowState.updateNode(a4.id, { status: 'done' });
+  flowState.addEdge(a3.id, b3.id);
+  flowState.updateNode(b3.id, { status: 'done', imageUrl: 'file:///old-result.png' });
+  flowState.removeEdge(flowState.edges[0].id);
+  assert(flowState.getNode(b3.id).status === 'stale', '删边后 B stale（准备重连）');
+  flowState.connect(a4.id, b3.id);
+  assert(flowState.getNode(b3.id).status === 'stale', '重连新上游后 B 仍 stale（结果图不可信）');
+}
+
 console.log(`\n手动连线边界测试结束：${pass} 通过 / ${fail} 失败`);
 process.exitCode = fail > 0 ? 1 : 0;

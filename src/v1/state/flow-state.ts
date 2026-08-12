@@ -199,8 +199,25 @@ export class FlowState {
     return node;
   }
 
+  /**
+   * 删除连线（手动连线 P0：× 按钮 / 右键「删除连线」共用）。
+   * 删除后原下游及其所有子孙的结果已不可信 → 标 stale（与插入步骤/换图口径一致）；
+   * 运行中（run）节点不覆盖；即使 to 还有其它上游也标 stale（数据流已变化）。
+   */
   removeEdge(id: string): void {
+    const edge = this.edges.find(e => e.id === id);
+    if (!edge) return;
     this.edges = this.edges.filter(e => e.id !== id);
+
+    // 原下游 + 所有间接下游子孙标 stale
+    const toNode = this.getNode(edge.to);
+    if (toNode) {
+      const affected = [toNode, ...this.getAllDownstreams(edge.to)];
+      affected.forEach(n => {
+        if (n.status !== 'run' && n.status !== 'stale') n.status = 'stale';
+      });
+    }
+
     this.updatedAt = Date.now();
     this.dirty = true;
     this.notify();
