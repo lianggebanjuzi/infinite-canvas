@@ -5,6 +5,7 @@
 import { flowState } from '../state/flow-state';
 import { selection } from '../state/selection';
 import { dirty } from '../state/dirty';
+import { nodeRegistry } from '../nodes/node-registry';
 import { canvasView, CARD_W } from './canvas-view';
 import { cardView, openImageModal } from './card-view';
 import { linkView } from './link-view';
@@ -289,17 +290,84 @@ class Interactions {
     this._clearDroppable();
     if (!fromId) return;
 
-    // 松手点必须是另一张卡的 in 端口，否则取消
+    // 松手点落在合法 in 端口 → 正常连线（现有行为）
     const el = document.elementFromPoint(e.clientX, e.clientY) as HTMLElement | null;
     const inPort = el?.closest('.port.in') as HTMLElement | null;
-    if (!inPort) return;
-    const toCard = inPort.closest('.pcard') as HTMLElement | null;
-    const toId = toCard?.dataset.nodeId;
-    if (!toId) return;
+    if (inPort) {
+      const toCard = inPort.closest('.pcard') as HTMLElement | null;
+      const toId = toCard?.dataset.nodeId;
+      if (toId) {
+        const res = flowState.connect(fromId, toId);
+        if (!res.ok) showToast(res.error || '连线失败', false);
+        else showToast('已创建连线');
+      }
+      return;
+    }
 
-    const res = flowState.connect(fromId, toId);
-    if (!res.ok) showToast(res.error || '连线失败', false);
-    else showToast('已创建连线');
+    // 松手在空白/非法位置 → 弹出「新建节点」菜单（可作下游类型，过滤产品图）
+    this._showNewNodeMenu(e.clientX, e.clientY, fromId);
+  }
+
+  // ───────────────────────── 拖线松手 → 新建节点菜单（P0） ─────────────────────────
+
+  /** 可作下游的节点类型（产品图不能作下游，canConnect 已有规则） */
+  private _newNodeCandidates(): NodeDefinition[] {
+    return nodeRegistry.list().filter(d => d.type !== 'product-image');
+  }
+
+  /** 松手处弹「新建节点」菜单：选择类型 → 建节点并自动连上拖出的线 */
+  private _showNewNodeMenu(screenX: number, screenY: number, fromId: string): void {
+    const candidates = this._newNodeCandidates();
+    if (candidates.length === 0) return;
+
+    const menu = this._menuEl();
+    menu.innerHTML = `
+      <div class="ctx-hint">松手新建节点并连接</div>
+      ${candidates.map(d => `
+      <div class="ctx-item" data-act="create-node" data-node-type="${d.type}">
+        ${this._nodeTypeIcon(d.type)}
+        ${d.label}
+      </div>`).join('')}
+      <div class="ctx-sep"></div>
+      <div class="ctx-item danger" data-act="cancel-connect">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
+        取消
+      </div>`;
+    menu.dataset.nodeId = fromId; // 拖出端口的源节点
+    menu.dataset.edgeId = '';
+    menu.dataset.newX = String(screenX);
+    menu.dataset.newY = String(screenY);
+    this._showMenu(menu, screenX, screenY);
+  }
+
+  /** 在松手处（世界坐标，节点中心对准松手点）创建节点并自动连上拖出的线 */
+  private _createNodeFromMenu(type: string, fromId: string, screenX: number, screenY: number): void {
+    const def = nodeRegistry.get(type as NodeType);
+    const world = canvasView.toWorldCoords(screenX, screenY);
+    const h = CARD_W / (def.defaultRatio > 0 ? def.defaultRatio : 3 / 4);
+    const node = flowState.addNode(type as NodeType, world.x - CARD_W / 2, world.y - h / 2);
+    selection.select(node.id);
+    if (fromId && flowState.canConnect(fromId, node.id) === null) {
+      flowState.addEdge(fromId, node.id);
+      showToast(`已新建「${def.label}」并连接`);
+    }
+    // 模型回填（与 new-style/new-image-gen 口径一致）
+    void resolveDefaultModel().then(model => {
+      if (model && !(flowState.getNode(node.id)?.params.model)) {
+        flowState.updateNodeParams(node.id, { model });
+      }
+    });
+  }
+
+  private _nodeTypeIcon(type: string): string {
+    switch (type) {
+      case 'style-transfer':
+        return '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="13.5" cy="6.5" r="1.5"/><circle cx="17.5" cy="10.5" r="1.5"/><circle cx="8.5" cy="7.5" r="1.5"/><circle cx="6.5" cy="12.5" r="1.5"/><path d="M12 2a10 10 0 0 0 0 20 2.5 2.5 0 0 0 2.5-2.5c0-.6-.24-1.2-.7-1.6-.4-.5-.7-1-.7-1.6A2.5 2.5 0 0 1 15.6 14H19a3 3 0 0 0 3-3c0-5-4.6-9-10-9Z"/></svg>';
+      case 'image-gen':
+        return '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="m21 15-5-5L5 21"/><path d="M12 9v6M9 12h6"/></svg>';
+      default:
+        return '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/></svg>';
+    }
   }
 
   // ───────────────────────── Shift 框选 ─────────────────────────
@@ -616,6 +684,8 @@ class Interactions {
       if (!item) return;
       const act = item.dataset.act || '';
       const nodeId = menu.dataset.nodeId || '';
+      // 新建节点菜单：把选中项的类型暂存到菜单 dataset，供 _handleMenuAction 使用
+      if (item.dataset.nodeType) menu.dataset.newType = item.dataset.nodeType;
       this._handleMenuAction(act, nodeId);
       this._hideMenu();
     };
@@ -700,6 +770,18 @@ class Interactions {
         });
         break;
       }
+      case 'create-node': {
+        // 拖线松手弹菜单 → 建新节点并自动连上拖出的线
+        const menu = this._menuEl();
+        const type = menu.dataset.newType || '';
+        const x = Number(menu.dataset.newX || 0);
+        const y = Number(menu.dataset.newY || 0);
+        if (type) this._createNodeFromMenu(type, nodeId, x, y);
+        break;
+      }
+      case 'cancel-connect':
+        // 取消拖线新建（仅关闭菜单，不建节点）
+        break;
       case 'run-selected':
         void runEngine.runSelected();
         break;
