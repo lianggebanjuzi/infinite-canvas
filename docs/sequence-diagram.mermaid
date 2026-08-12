@@ -1,0 +1,54 @@
+```mermaid
+sequenceDiagram
+    actor User as 用户
+    participant UI as CardView/CmdPanel
+    participant FS as FlowState
+    participant DM as DirtyMarker
+    participant RE as RunEngine
+    participant PO as Poller
+    participant BA as BackendApi
+    participant BE as backend UnifiedAPI
+
+    %% 场景1：换图（改上游）
+    User->>UI: 拖入新产品图到 n1
+    UI->>FS: updateNode('n1', {imageUrl})
+    FS->>DM: markUpstreamChanged('n1')
+    DM->>FS: n2.status = 'stale'
+    FS-->>UI: 渲染：n2 状态点变橙
+
+    %% 场景2：改 prompt 再跑（分段执行）
+    User->>UI: 选 n2 → 指令面板 → 改 prompt
+    UI->>FS: updateNode('n2', {params.prompt})
+    FS->>DM: markSelfChanged（不标 stale）
+    User->>UI: 点发送
+    UI->>RE: run('n2')
+    RE->>FS: n2.status = 'run'
+    FS-->>UI: 渲染：扫描光 + 上游连线流光
+    RE->>RE: buildOptions(n2)（含 referenceImages=[n1.imageUrl]）
+    RE->>BA: unifiedGenerateImage(prompt, options)
+    BA->>BE: pywebview.api.unified_generate_image(...)
+    BE-->>BA: { success, task_id }
+    BA-->>RE: task_id
+    RE->>PO: poll(task_id)
+    loop 轮询
+        PO->>BE: unified_get_task_result(task_id)
+        BE-->>PO: { status: 'pending' } | { status: 'done', result }
+    end
+    PO-->>RE: result
+    alt 成功
+        RE->>FS: updateNode('n2', {status:'done', imageUrl})
+        RE->>BA: saveImageToLocal(imageUrl)（可选）
+        FS-->>UI: 渲染：深绿点 + 历史图库加入
+    else 失败
+        RE->>FS: updateNode('n2', {status:'fail', error})
+        FS-->>UI: 渲染：红点，hover 显示原因（不自动切供应商）
+    end
+
+    %% 场景3：保存/打开
+    User->>UI: 底部胶囊「保存」
+    UI->>FS: collect()
+    FS-->>UI: FlowProject
+    UI->>BA: saveProject(flowProject)
+    BA->>BE: pywebview.api.save_project(data)
+    BE-->>UI: { status: 'success', path }
+```
