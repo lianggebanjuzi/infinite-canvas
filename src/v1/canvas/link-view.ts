@@ -1,8 +1,10 @@
 // src/v1/canvas/link-view.ts
-// 连线渲染：贝塞尔曲线（参照旧 _wirePointOnCard 算法）、流光动画、hover 中点 + 号
-// 首版连线中点 + 号：点击提示「暂不支持插入步骤」（不报错）
+// 连线渲染：贝塞尔曲线（参照旧 _wirePointOnCard 算法）、流光动画、
+// hover 中点 + 号（插入步骤）/ × 删除按钮、端口拖拽橡皮筋临时线
 
 import { flowState } from '../state/flow-state';
+import { selection } from '../state/selection';
+import { dirty } from '../state/dirty';
 import { CARD_W } from './canvas-view';
 import { cardView } from './card-view';
 import { showToast } from '../ui/toast';
@@ -15,7 +17,9 @@ class LinkView {
   private canvasEl: HTMLElement | null = null;
   private paths = new Map<string, SVGPathElement>();
   private pluses = new Map<string, HTMLElement>();
+  private dels = new Map<string, HTMLElement>();
   private flowing = new Set<string>();
+  private tempPath: SVGPathElement | null = null;
 
   init(canvasEl: HTMLElement): void {
     this.canvasEl = canvasEl;
@@ -41,6 +45,7 @@ class LinkView {
 
     this.paths.forEach((p, id) => { if (!edgeIds.has(id)) { p.remove(); this.paths.delete(id); } });
     this.pluses.forEach((p, id) => { if (!edgeIds.has(id)) { p.remove(); this.pluses.delete(id); } });
+    this.dels.forEach((p, id) => { if (!edgeIds.has(id)) { p.remove(); this.dels.delete(id); } });
 
     flowState.edges.forEach(edge => this.renderEdge(edge));
   }
@@ -56,6 +61,8 @@ class LinkView {
     const y2 = b.y + cardView.cardHeight(b) / 2;
     const dx = Math.max(50, Math.abs(x2 - x1) * 0.5);
     const d = `M ${x1} ${y1} C ${x1 + dx} ${y1}, ${x2 - dx} ${y2}, ${x2} ${y2}`;
+    const midX = (x1 + x2) / 2;
+    const midY = (y1 + y2) / 2;
 
     let path = this.paths.get(edge.id);
     if (!path) {
@@ -65,21 +72,31 @@ class LinkView {
       this.svg.appendChild(path);
       this.paths.set(edge.id, path);
 
-      // hover 连线 → 中点 + 号出现
+      // hover 连线 → 中点 + 号与删除按钮出现
       const plus = this._buildPlus(edge);
-      path.addEventListener('mouseenter', () => plus.classList.add('show'));
+      const del = this._buildDelete(edge);
+      path.addEventListener('mouseenter', () => { plus.classList.add('show'); del.classList.add('show'); });
       path.addEventListener('mouseleave', () => {
-        setTimeout(() => { if (!plus.matches(':hover')) plus.classList.remove('show'); }, 120);
+        setTimeout(() => {
+          if (!plus.matches(':hover') && !del.matches(':hover')) {
+            plus.classList.remove('show');
+            del.classList.remove('show');
+          }
+        }, 120);
       });
     }
     path.setAttribute('d', d);
     applyLinkFlowing(path, this.flowing.has(edge.id));
 
     const plus = this.pluses.get(edge.id);
-    if (plus && this.canvasEl) {
-      plus.style.left = ((x1 + x2) / 2) + 'px';
-      plus.style.top = ((y1 + y2) / 2) + 'px';
+    const del = this.dels.get(edge.id);
+    if (plus && del && this.canvasEl) {
+      plus.style.left = midX + 'px';
+      plus.style.top = midY + 'px';
+      del.style.left = (midX + 15) + 'px';
+      del.style.top = (midY - 15) + 'px';
       this.canvasEl.appendChild(plus);
+      this.canvasEl.appendChild(del);
     }
   }
 
@@ -91,10 +108,40 @@ class LinkView {
     plus.dataset.edgeId = edge.id;
     plus.innerHTML = '<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>';
     plus.title = '在中间插入步骤';
-    plus.addEventListener('click', () => showToast('暂不支持插入步骤', false));
+    plus.addEventListener('click', (e: MouseEvent) => {
+      e.stopPropagation();
+      this._insertStep(edge.id);
+    });
     plus.addEventListener('mouseleave', () => plus.classList.remove('show'));
     this.pluses.set(edge.id, plus);
     return plus;
+  }
+
+  private _buildDelete(edge: FlowEdge): HTMLElement {
+    let del = this.dels.get(edge.id);
+    if (del) return del;
+    del = document.createElement('div');
+    del.className = 'link-del';
+    del.dataset.edgeId = edge.id;
+    del.innerHTML = '<svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>';
+    del.title = '删除连线';
+    del.addEventListener('click', (e: MouseEvent) => {
+      e.stopPropagation();
+      flowState.removeEdge(edge.id);
+      showToast('连线已删除');
+    });
+    del.addEventListener('mouseleave', () => del.classList.remove('show'));
+    this.dels.set(edge.id, del);
+    return del;
+  }
+
+  /** 中点 + 号 → 真插入：断开原连线并在中点插入新 style-transfer 节点 */
+  private _insertStep(edgeId: string): void {
+    const node = flowState.insertStep(edgeId);
+    if (!node) { showToast('插入步骤失败', false); return; }
+    dirty.markUpstreamChanged(node.id); // 原下游因上游变化标 stale
+    selection.select(node.id);
+    showToast('已插入新步骤');
   }
 
   /** 开关连线流光（上游 → 目标） */
@@ -113,6 +160,42 @@ class LinkView {
       const path = this.paths.get(edge.id);
       applyLinkFlowing(path ?? null, on);
     });
+  }
+
+  // ───────────────────────── 端口拖拽橡皮筋临时线 ─────────────────────────
+  /** 从 out 端口开始拖线：创建临时虚线（世界坐标） */
+  startTempLine(fromNodeId: string): void {
+    this.clearTempLine();
+    if (!this.svg) return;
+    const from = flowState.getNode(fromNodeId);
+    if (!from) return;
+    const x1 = from.x + CARD_W;
+    const y1 = from.y + cardView.cardHeight(from) / 2;
+    const temp = document.createElementNS(NS, 'path');
+    temp.setAttribute('class', 'link-temp');
+    temp.dataset.fromId = fromNodeId;
+    temp.setAttribute('d', `M ${x1} ${y1} L ${x1} ${y1}`);
+    this.svg.appendChild(temp);
+    this.tempPath = temp;
+  }
+
+  /** 拖动中更新橡皮筋终点（世界坐标） */
+  updateTempLine(x: number, y: number): void {
+    if (!this.tempPath) return;
+    const fromId = this.tempPath.dataset.fromId;
+    const from = fromId ? flowState.getNode(fromId) : undefined;
+    const x1 = from ? from.x + CARD_W : x;
+    const y1 = from ? from.y + cardView.cardHeight(from) / 2 : y;
+    const dx = Math.max(30, Math.abs(x - x1) * 0.5);
+    this.tempPath.setAttribute('d', `M ${x1} ${y1} C ${x1 + dx} ${y1}, ${x - dx} ${y}, ${x} ${y}`);
+  }
+
+  /** 结束拖线：移除橡皮筋 */
+  clearTempLine(): void {
+    if (this.tempPath) {
+      this.tempPath.remove();
+      this.tempPath = null;
+    }
   }
 }
 

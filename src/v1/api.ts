@@ -24,14 +24,6 @@ export async function resolveDefaultModel(): Promise<string> {
   return '';
 }
 
-/** 把 backend 响应映射为 FlowError（对应 backend/api/errors.py 分层） */
-export function toFlowError(response: unknown): FlowError {
-  const r = (response || {}) as { error_code?: number; message?: string; error?: string; success?: boolean };
-  const code = r.error_code ?? 500;
-  const message = r.message || r.error || '操作失败，请重试';
-  return { code, message };
-}
-
 export const Backend = {
   // ── 生成链路 ──
   async generateImage(prompt: string, options: Record<string, unknown>): Promise<BackendTaskCreate> {

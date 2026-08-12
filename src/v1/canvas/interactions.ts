@@ -14,7 +14,7 @@ import { resolveDefaultModel } from '../api';
 
 const DRAG_THRESHOLD = 3;
 
-type DragMode = 'node' | 'pan' | 'select';
+type DragMode = 'node' | 'pan' | 'select' | 'connect';
 
 interface DragState {
   mode: DragMode;
@@ -56,7 +56,16 @@ class Interactions {
       if (e.button !== 0) return;
       const target = e.target as Element;
 
-      if (target.closest('.ctx-menu') || target.closest('.cmd-panel') || target.closest('.action-bar') || target.closest('.link-plus') || target.closest('.overlay')) {
+      if (target.closest('.ctx-menu') || target.closest('.cmd-panel') || target.closest('.action-bar') || target.closest('.link-plus') || target.closest('.link-del') || target.closest('.overlay')) {
+        return;
+      }
+
+      // 端口：out 端口按住拖线（手动连线 P0）；in 端口不响应 mousedown
+      const portEl = target.closest('.port') as HTMLElement | null;
+      if (portEl) {
+        if (portEl.classList.contains('out')) {
+          this._startConnectDrag(e, portEl);
+        }
         return;
       }
 
@@ -150,6 +159,14 @@ class Interactions {
       return;
     }
 
+    if (d.mode === 'connect') {
+      // 橡皮筋临时线跟随鼠标（世界坐标）
+      const world = canvasView.toWorldCoords(e.clientX, e.clientY);
+      linkView.updateTempLine(world.x, world.y);
+      this._updateDroppable(e);
+      return;
+    }
+
     // node 模式：超过阈值才开始移动
     if (!d.moved && Math.abs(e.clientX - d.startX) + Math.abs(e.clientY - d.startY) > DRAG_THRESHOLD) {
       d.moved = true;
@@ -208,7 +225,73 @@ class Interactions {
       canvasView.endPan();
     }
 
+    if (d.mode === 'connect') {
+      this._finishConnect(e);
+    }
+
     this.drag = null;
+  }
+
+  // ───────────────────────── 端口拖拽连线（手动连线 P0） ─────────────────────────
+  private _lastDroppable: HTMLElement | null = null;
+
+  private _startConnectDrag(e: MouseEvent, portEl: HTMLElement): void {
+    e.stopPropagation();
+    const cardEl = portEl.closest('.pcard') as HTMLElement | null;
+    const nodeId = cardEl?.dataset.nodeId || '';
+    if (!nodeId) return;
+
+    this.drag = {
+      mode: 'connect',
+      startX: e.clientX,
+      startY: e.clientY,
+      moved: false,
+      nodeId,
+      group: null,
+      panVx: 0,
+      panVy: 0,
+      selX: 0,
+      selY: 0,
+    };
+    portEl.classList.add('dragging');
+    linkView.startTempLine(nodeId);
+  }
+
+  private _updateDroppable(e: MouseEvent): void {
+    this._clearDroppable();
+    const el = document.elementFromPoint(e.clientX, e.clientY) as HTMLElement | null;
+    const inPort = el?.closest('.port.in') as HTMLElement | null;
+    if (inPort) {
+      inPort.classList.add('droppable');
+      this._lastDroppable = inPort;
+    }
+  }
+
+  private _clearDroppable(): void {
+    if (this._lastDroppable) {
+      this._lastDroppable.classList.remove('droppable');
+      this._lastDroppable = null;
+    }
+    document.querySelectorAll('.port.dragging').forEach(p => p.classList.remove('dragging'));
+  }
+
+  private _finishConnect(e: MouseEvent): void {
+    const fromId = this.drag?.nodeId;
+    linkView.clearTempLine();
+    this._clearDroppable();
+    if (!fromId) return;
+
+    // 松手点必须是另一张卡的 in 端口，否则取消
+    const el = document.elementFromPoint(e.clientX, e.clientY) as HTMLElement | null;
+    const inPort = el?.closest('.port.in') as HTMLElement | null;
+    if (!inPort) return;
+    const toCard = inPort.closest('.pcard') as HTMLElement | null;
+    const toId = toCard?.dataset.nodeId;
+    if (!toId) return;
+
+    const res = flowState.connect(fromId, toId);
+    if (!res.ok) showToast(res.error || '连线失败', false);
+    else showToast('已创建连线');
   }
 
   // ───────────────────────── Shift 框选 ─────────────────────────
@@ -393,6 +476,14 @@ class Interactions {
       this._hideMenu();
       if (!wrap.contains(target)) return;      // 不在画布区域 → 交给浏览器原生菜单
       e.preventDefault();
+
+      // 右键目标是连线（路径/中点 +/删除按钮）→ 连线菜单
+      const edgeId = this._edgeIdFromTarget(target);
+      if (edgeId) {
+        const edge = flowState.edges.find(ed => ed.id === edgeId);
+        if (edge) { this._showLinkMenu(e.clientX, e.clientY, edge); return; }
+      }
+
       const cardEl = target.closest('.pcard') as HTMLElement | null;
       if (cardEl) {
         const node = flowState.getNode(cardEl.dataset.nodeId || '');
@@ -407,6 +498,32 @@ class Interactions {
       if (target.closest('.ctx-menu')) return; // 菜单项点击由 onclick 处理
       this._hideMenu();
     });
+  }
+
+  /** 从右键目标解析连线 id（路径/中点 +/删除按钮均可） */
+  private _edgeIdFromTarget(target: Element): string {
+    if (target.closest('.link-path')) return (target.closest('.link-path') as HTMLElement).dataset.edgeId || '';
+    if (target.closest('.link-plus')) return (target.closest('.link-plus') as HTMLElement).dataset.edgeId || '';
+    if (target.closest('.link-del')) return (target.closest('.link-del') as HTMLElement).dataset.edgeId || '';
+    return '';
+  }
+
+  private _showLinkMenu(x: number, y: number, edge: FlowEdge): void {
+    const menu = this._menuEl();
+    menu.innerHTML = `
+      <div class="ctx-hint">连线操作</div>
+      <div class="ctx-item" data-act="insert-step">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+        插入步骤
+      </div>
+      <div class="ctx-sep"></div>
+      <div class="ctx-item danger" data-act="delete-edge">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></svg>
+        删除连线
+      </div>`;
+    menu.dataset.nodeId = '';
+    menu.dataset.edgeId = edge.id;
+    this._showMenu(menu, x, y);
   }
 
   private _showCardMenu(x: number, y: number, node: FlowNode): void {
@@ -432,6 +549,7 @@ class Interactions {
         删除节点
       </div>`;
     menu.dataset.nodeId = node.id;
+    menu.dataset.edgeId = '';
     this._showMenu(menu, x, y);
   }
 
@@ -457,6 +575,7 @@ class Interactions {
         运行全部
       </div>`;
     menu.dataset.nodeId = '';
+    menu.dataset.edgeId = '';
     this._showMenu(menu, x, y);
   }
 
@@ -508,6 +627,24 @@ class Interactions {
       case 'delete': {
         flowState.removeNode(nodeId);
         selection.clear();
+        break;
+      }
+      case 'insert-step': {
+        const edgeId = this._menuEl().dataset.edgeId || '';
+        const node = flowState.insertStep(edgeId);
+        if (node) {
+          dirty.markUpstreamChanged(node.id);
+          selection.select(node.id);
+          showToast('已插入新步骤');
+        } else {
+          showToast('插入步骤失败', false);
+        }
+        break;
+      }
+      case 'delete-edge': {
+        const edgeId = this._menuEl().dataset.edgeId || '';
+        flowState.removeEdge(edgeId);
+        showToast('连线已删除');
         break;
       }
       case 'new-product': {

@@ -4,6 +4,9 @@
 import { uid } from '../../utils/uid';
 import { nodeRegistry } from '../nodes/node-registry';
 
+/** 卡片固定宽度（与 canvas-view.CARD_W 同值；数据层不依赖视图层） */
+const CARD_W = 260;
+
 export class FlowState {
   nodes: FlowNode[] = [];
   edges: FlowEdge[] = [];
@@ -142,6 +145,58 @@ export class FlowState {
     this.dirty = true;
     this.notify();
     return edge;
+  }
+
+  /** 校验连线是否可建：返回 null=可建，否则为拒绝原因（手动连线 P0） */
+  canConnect(from: string, to: string): string | null {
+    if (!this.getNode(from) || !this.getNode(to)) return '节点不存在';
+    if (from === to) return '不能连接自己';
+    if (this.edges.some(e => e.from === from && e.to === to)) return '已有相同连线';
+    const toNode = this.getNode(to);
+    if (toNode && toNode.type === 'product-image') return '产品图是起点，不能作为下游';
+    return null;
+  }
+
+  /** 校验后连线：返回 ok/error（供 UI 直接 toast 提示） */
+  connect(from: string, to: string): { ok: boolean; error?: string } {
+    const reason = this.canConnect(from, to);
+    if (reason) return { ok: false, error: reason };
+    const edge = this.addEdge(from, to);
+    return edge ? { ok: true } : { ok: false, error: '连线创建失败' };
+  }
+
+  /**
+   * 在连线中间插入新 style-transfer 节点（中点 + 号升级，手动连线 P0）：
+   * 原 from → 新节点 → 原 to；新节点 status=idle、参数用注册表默认值。
+   * 若原上游是产品图，新节点参考图由 buildOptions 自动取上游图，无需额外赋值。
+   */
+  insertStep(edgeId: string): FlowNode | null {
+    const edge = this.edges.find(e => e.id === edgeId);
+    if (!edge) return null;
+    const from = this.getNode(edge.from);
+    const to = this.getNode(edge.to);
+    if (!from || !to) return null;
+    if (to.type === 'product-image') return null; // 产品图不能作为下游（异常连线防御）
+
+    const fromX = from.x + CARD_W;
+    const fromY = from.y + (CARD_W / from.ratio) / 2;
+    const toX = to.x;
+    const toY = to.y + (CARD_W / to.ratio) / 2;
+    const midX = (fromX + toX) / 2;
+    const midY = (fromY + toY) / 2;
+
+    const def = nodeRegistry.get('style-transfer');
+    const newHeight = CARD_W / def.defaultRatio;
+
+    // 断开原连线并重连
+    this.edges = this.edges.filter(e => e.id !== edgeId);
+    const node = this.addNode('style-transfer', midX - CARD_W / 2, midY - newHeight / 2);
+    this.edges.push({ id: uid('edge'), from: edge.from, to: node.id });
+    this.edges.push({ id: uid('edge'), from: node.id, to: edge.to });
+    this.updatedAt = Date.now();
+    this.dirty = true;
+    this.notify();
+    return node;
   }
 
   removeEdge(id: string): void {

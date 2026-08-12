@@ -158,16 +158,36 @@ body { font-family: var(--font); background: var(--bg-app); color: var(--text-1)
 .pcard:hover .pcard-act { opacity:1; }
 .pcard-act:hover { background: #FFFDFA; }
 
-/* 端口：视觉小、热区大（::after 扩展到 25px） */
+/* 端口：视觉小、热区大（::after 扩展到 25px）；支持拖线（手动连线 P0） */
 .port {
   position:absolute; width:11px; height:11px; border-radius:50%;
   background: var(--bg-float); border:2px solid var(--border-strong); top:50%;
-  transform: translateY(-50%); cursor:crosshair; transition: all .15s; z-index:5;
-  pointer-events:none; opacity:.6;
+  transform: translateY(-50%); cursor:crosshair; transition: all .15s; z-index:6;
+  pointer-events:auto; opacity:.75;
 }
 .port::after { content:''; position:absolute; inset:-7px; border-radius:50%; }
 .port.in  { left:-6px; }
 .port.out { right:-6px; }
+.port:hover { border-color: var(--accent); transform: translateY(-50%) scale(1.3); background: var(--accent-dim); opacity:1; }
+.port.out.dragging { border-color: var(--accent); background: var(--accent); transform: translateY(-50%) scale(1.45); opacity:1; }
+.port.in.droppable { border-color: var(--accent); background: var(--accent-dim); transform: translateY(-50%) scale(1.45); opacity:1; box-shadow: 0 0 0 3px var(--accent-dim); }
+
+/* 端口拖线橡皮筋临时线 */
+.link-temp {
+  fill:none; stroke: var(--accent); stroke-width:2; stroke-dasharray:6 6;
+  pointer-events:none; opacity:.85;
+}
+
+/* 连线删除按钮（hover 连线出现，位于中点 + 号旁） */
+.link-del {
+  position:absolute; width:18px; height:18px; border-radius:50%;
+  background: var(--bg-float); border:1px solid rgba(217,123,108,.45);
+  color: var(--st-fail); display:flex; align-items:center; justify-content:center;
+  cursor:pointer; z-index:6; transition: all .15s; transform: translate(-50%,-50%) scale(.8);
+  opacity:0; pointer-events:none;
+}
+.link-del.show { opacity:1; pointer-events:auto; transform: translate(-50%,-50%) scale(1); }
+.link-del:hover { border-color: var(--st-fail); background: rgba(217,123,108,.1); transform: translate(-50%,-50%) scale(1.15); }
 
 /* ═══════════ 卡片上方悬浮操作条（仅单选出现） ═══════════ */
 .action-bar {
