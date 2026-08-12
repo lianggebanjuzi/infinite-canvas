@@ -572,6 +572,12 @@ class Interactions {
     document.addEventListener('click', (e: MouseEvent) => {
       const target = e.target as Element;
       if (target.closest('.ctx-menu')) return; // 菜单项点击由 onclick 处理
+      // 屏蔽"菜单显示后 250ms 内的 click"：拖线/右键等交互 mousedown+mouseup 结束后，
+      // 浏览器会补发一次 click（target 为共同祖先、不在菜单内），会立即误关刚弹出的菜单。
+      // 防抖只屏蔽同一次交互派生的事件，不影响稍后正常的点外关闭。
+      const menu = this._menuEl();
+      const shownAt = Number(menu.dataset.shownAt || 0);
+      if (Date.now() - shownAt < 250) return;
       this._hideMenu();
     });
   }
@@ -674,6 +680,8 @@ class Interactions {
     menu.classList.add('show');
     menu.style.left = x + 'px';
     menu.style.top = y + 'px';
+    // 记录显示时间戳：屏蔽同一次拖线/右键交互派生 click 的误关（见 document click 关闭逻辑）
+    menu.dataset.shownAt = String(Date.now());
     // 视口钳制
     const rect = menu.getBoundingClientRect();
     if (rect.right > window.innerWidth - 8) menu.style.left = (window.innerWidth - rect.width - 8) + 'px';

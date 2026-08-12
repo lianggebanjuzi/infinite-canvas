@@ -44,6 +44,8 @@ function makeEl() {
 }
 
 const menuEl = makeEl();
+// 捕获 document 监听器（供防抖逻辑桩验证：菜单显示后同次 click 不误关）
+const docListeners = {};
 global.window = { innerWidth: 1200, innerHeight: 800 };
 global.document = {
   // ctx-menu 返回持久元素（可检查 show class）；其余为 null
@@ -53,7 +55,7 @@ global.document = {
   createElement: () => makeEl(),
   createElementNS: () => makeEl(),
   elementFromPoint: () => null, // 默认空白；用例内按需覆盖
-  addEventListener: () => {},
+  addEventListener: (type, fn) => { docListeners[type] = fn; },
   documentElement: { setAttribute() {}, getAttribute: () => 'light' },
   body: { appendChild() {} },
 };
@@ -198,6 +200,36 @@ function setConnectDrag(fromId) {
     assert(flowState.edges.length === 0, '空白松手不产生连线');
     assert(menuEl._classes.has('show'), '空白松手 → 弹出新建菜单');
     assert((menuEl.innerHTML || '').includes('松手新建节点并连接'), '菜单含引导文案');
+  }
+
+  // ═══════ 7. 菜单显示后同次交互 click 不误关（250ms 防抖） ═══════
+  {
+    const p = setupProduct();
+    interactions._bindContextMenu(); // 注册 document click 点外关闭逻辑
+    const clickHandler = docListeners['click'];
+    assert(typeof clickHandler === 'function', 'document click 关闭逻辑已注册');
+
+    // 显示菜单 → 同次 click（target 不在菜单内）→ 250ms 内不应关闭
+    menuEl._classes.delete('show');
+    interactions._showMenu(menuEl, 100, 100);
+    assert(menuEl._classes.has('show'), '菜单已显示');
+    clickHandler({ target: { closest: () => null } });
+    assert(menuEl._classes.has('show'), '显示后同次 click（<250ms）不误关菜单');
+
+    // 菜单内点击 → document 逻辑直接 return（菜单项由 onclick 处理，不重复关闭）
+    clickHandler({ target: { closest: sel => (sel === '.ctx-menu' ? menuEl : null) } });
+    assert(menuEl._classes.has('show'), '菜单内点击不重复关闭（回归）');
+  }
+
+  // ═══════ 8. 250ms 后点外点击正常关闭 ═══════
+  {
+    setupProduct();
+    const clickHandler = docListeners['click'];
+    menuEl._classes.delete('show');
+    interactions._showMenu(menuEl, 100, 100);
+    await new Promise(r => setTimeout(r, 260));
+    clickHandler({ target: { closest: () => null } });
+    assert(!menuEl._classes.has('show'), '250ms 后点外点击正常关闭菜单');
   }
 
   console.log(`\n拖线新建菜单测试结束：${pass} 通过 / ${fail} 失败`);
