@@ -53,12 +53,33 @@ class Interactions {
     const wrap = this.wrap!;
 
     wrap.addEventListener('mousedown', (e: MouseEvent) => {
-      if (e.button !== 0) return;
       const target = e.target as Element;
 
+      // 悬浮面板/控件区域不响应画布交互（中键/左键均跳过）
       if (target.closest('.ctx-menu') || target.closest('.cmd-panel') || target.closest('.action-bar') || target.closest('.link-plus') || target.closest('.link-del') || target.closest('.overlay')) {
         return;
       }
+
+      // 中键：画布平移（preventDefault 避免浏览器 autoscroll 图标；不改动选中态）
+      if (e.button === 1) {
+        e.preventDefault();
+        this.drag = {
+          mode: 'pan',
+          startX: e.clientX,
+          startY: e.clientY,
+          moved: false,
+          nodeId: null,
+          group: null,
+          panVx: flowState.canvas.panX,
+          panVy: flowState.canvas.panY,
+          selX: 0,
+          selY: 0,
+        };
+        canvasView.startPan(e.clientX, e.clientY);
+        return;
+      }
+
+      if (e.button !== 0) return;
 
       // 端口：out 端口按住拖线（手动连线 P0）；in 端口不响应 mousedown
       const portEl = target.closest('.port') as HTMLElement | null;
@@ -75,25 +96,12 @@ class Interactions {
         return;
       }
 
-      // 空白处：Shift 框选 / 否则清空选中 + 平移
+      // 空白处：Shift 框选 / 否则仅取消选中（左键不再平移，平移只走中键）
       if (e.shiftKey) {
         this._startFrameSelect(e);
         return;
       }
       selection.clear();
-      this.drag = {
-        mode: 'pan',
-        startX: e.clientX,
-        startY: e.clientY,
-        moved: false,
-        nodeId: null,
-        group: null,
-        panVx: flowState.canvas.panX,
-        panVy: flowState.canvas.panY,
-        selX: 0,
-        selY: 0,
-      };
-      canvasView.startPan(e.clientX, e.clientY);
     });
 
     window.addEventListener('mousemove', (e: MouseEvent) => this._onMouseMove(e));

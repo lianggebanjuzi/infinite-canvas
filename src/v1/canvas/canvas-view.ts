@@ -80,17 +80,12 @@ class CanvasView {
       linkView.renderAll();
     }, { passive: false });
 
-    // 平移（左键拖空白 / 中键）—— 具体 mousedown 语义在 interactions.ts 中处理
-    this.wrap.addEventListener('mousedown', (e: MouseEvent) => {
-      if (e.button !== 1) return; // 中键平移在此兜底
-      e.preventDefault();
-      this._startPan(e.clientX, e.clientY);
-    });
+    // 平移 mousedown 语义统一在 interactions.ts 处理（中键平移），此处只挂全局 move/up
     window.addEventListener('mousemove', (e: MouseEvent) => this._movePan(e));
     window.addEventListener('mouseup', () => this._endPan());
   }
 
-  /** 供 interactions 调用：左键空白拖动画布 */
+  /** 供 interactions 调用：中键拖动画布平移 */
   startPan(clientX: number, clientY: number): void {
     this._startPan(clientX, clientY);
   }

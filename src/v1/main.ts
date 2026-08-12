@@ -20,7 +20,8 @@ import { cmdPanel } from './ui/cmd-panel';
 import { actionBar } from './ui/action-bar';
 import { historyDrawer } from './ui/history-drawer';
 import { bottomBar } from './ui/bottom-bar';
-import { emptyState } from './ui/empty-state';
+// 挂起：空态引导卡停用（index.html 容器已注释；恢复时取消本行与 init() 调用的注释）
+// import { emptyState } from './ui/empty-state';
 import { settingsPanel } from './ui/settings-panel';
 import { persistence } from './persistence';
 import { resolveDefaultModel } from './api';
@@ -102,7 +103,7 @@ async function init(): Promise<void> {
   cmdPanel.init();
   actionBar.init();
   bottomBar.init();
-  emptyState.init();
+  // emptyState.init(); // 挂起：空态引导卡停用（恢复时取消注释）
   settingsPanel.init();
 
   bindKeyboard();
