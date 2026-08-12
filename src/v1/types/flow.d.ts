@@ -2,8 +2,8 @@
 // ICV v1 流程画布核心类型（ambient 全局类型，无需 import 即可使用）
 // 与架构文档「四、数据结构与接口」保持一致
 
-/** 首版节点类型：产品图输入 / 换风格，注册式扩展 */
-type NodeType = 'product-image' | 'style-transfer';
+/** 首版节点类型：产品图输入 / 换风格 / 图片生成（多图参考生成一张），注册式扩展 */
+type NodeType = 'product-image' | 'style-transfer' | 'image-gen';
 
 /** 节点状态机五态 */
 type NodeStatus = 'idle' | 'run' | 'done' | 'stale' | 'fail';

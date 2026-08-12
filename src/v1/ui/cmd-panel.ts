@@ -30,6 +30,8 @@ class CmdPanel {
   private chipCountLabel!: HTMLElement;
   private activeTab = 'style';
   private modelOptions: Array<{ id: string; name: string }> = [];
+  /** 动态多缩略图元素（image-gen 参考区，随上游增删重建） */
+  private _multiRefs: HTMLElement[] = [];
 
   init(): void {
     this.el = document.getElementById('cmd-panel');
@@ -191,10 +193,14 @@ class CmdPanel {
     }
     this.send.disabled = node.status === 'run';
 
-    // 默认 tab：换风格节点 → 风格
+    // 默认 tab：换风格节点 → 风格；图片生成 → 参考（多上游缩略图）；输入节点 → 参考
     if (node.type === 'style-transfer' && this.activeTab !== 'style') {
       this.activeTab = 'style';
       this.tabs.forEach(t => t.classList.toggle('active', t.dataset.tab === 'style'));
+    }
+    if (node.type === 'image-gen' && this.activeTab !== 'ref') {
+      this.activeTab = 'ref';
+      this.tabs.forEach(t => t.classList.toggle('active', t.dataset.tab === 'ref'));
     }
     if (node.type === 'product-image' && this.activeTab !== 'ref') {
       this.activeTab = 'ref';
@@ -203,7 +209,7 @@ class CmdPanel {
 
     this._renderRefs();
     this._renderChips(node);
-    if (node.type === 'style-transfer' && !(node.params.model as string | undefined)) {
+    if ((node.type === 'style-transfer' || node.type === 'image-gen') && !(node.params.model as string | undefined)) {
       this._ensureModel(node.id);
     }
     this._position(node);
@@ -234,20 +240,54 @@ class CmdPanel {
   private _renderRefs(): void {
     const node = selection.single();
     if (!node) { this.refs.style.display = 'flex'; return; }
-    if (this.activeTab !== 'ref' || node.type !== 'style-transfer') {
+    const isRefNode = node.type === 'style-transfer' || node.type === 'image-gen';
+    if (this.activeTab !== 'ref' || !isRefNode) {
       // 非参考 tab：隐藏参考行（保持面板紧凑）
       this.refs.style.display = 'none';
       return;
     }
     this.refs.style.display = 'flex';
-    const upstream = flowState.getUpstreams(node.id).filter(u => u.imageUrl);
-    if (upstream.length > 0) {
-      this.refMain.style.backgroundImage = `url('${upstream[0].imageUrl!.replace(/'/g, "\\'")}')`;
-      this.refMain.style.display = 'block';
-    } else {
-      this.refMain.style.backgroundImage = 'none';
-      this.refMain.style.display = 'block';
+    const upstreams = flowState.getUpstreams(node.id).filter(u => u.imageUrl);
+
+    if (node.type === 'image-gen') {
+      // 图片生成：动态显示全部上游缩略图（随上游增删变化）
+      this._renderMultiRefs(upstreams);
+      return;
     }
+
+    // 换风格：单主参考（保持首图语义，多上游歧义由 image-gen 承接）
+    this._clearMultiRefs();
+    this.refMain.style.display = 'block';
+    this.refMain.style.backgroundImage = upstreams.length > 0
+      ? `url('${upstreams[0].imageUrl!.replace(/'/g, "\\'")}')`
+      : 'none';
+  }
+
+  /** 动态多缩略图：重建参考区子项（保留静态 + 按钮，插到 refMain 之前） */
+  private _renderMultiRefs(upstreams: FlowNode[]): void {
+    this._clearMultiRefs();
+    this.refMain.style.display = 'none';
+    if (upstreams.length === 0) {
+      const hint = document.createElement('div');
+      hint.className = 'cmd-ref-hint';
+      hint.textContent = '连接上游后自动带入参考图';
+      this.refs.insertBefore(hint, this.refMain);
+      this._multiRefs.push(hint);
+      return;
+    }
+    upstreams.forEach(u => {
+      const t = document.createElement('div');
+      t.className = 'cmd-ref';
+      t.style.backgroundImage = `url('${u.imageUrl!.replace(/'/g, "\\'")}')`;
+      t.title = u.title || '上游参考图';
+      this.refs.insertBefore(t, this.refMain);
+      this._multiRefs.push(t);
+    });
+  }
+
+  private _clearMultiRefs(): void {
+    this._multiRefs.forEach(t => t.remove());
+    this._multiRefs = [];
   }
 
   private _renderChips(node: FlowNode): void {

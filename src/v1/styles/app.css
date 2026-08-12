@@ -158,6 +158,18 @@ body { font-family: var(--font); background: var(--bg-app); color: var(--text-1)
 .pcard:hover .pcard-act { opacity:1; }
 .pcard-act:hover { background: #FFFDFA; }
 
+/* image-gen 卡片：底部"已接入上游图"缩略图行（动态增删，叠加不改变卡片尺寸） */
+.pcard-upstreams {
+  position:absolute; left:6px; right:6px; bottom:6px;
+  display:flex; gap:4px; flex-wrap:wrap; z-index:3; pointer-events:none;
+}
+.pcard-up-thumb {
+  width:28px; height:28px; border-radius:6px;
+  background-size:cover; background-position:center;
+  border:1.5px solid rgba(255,253,250,.92);
+  box-shadow: 0 1px 4px rgba(60,50,40,.28);
+}
+
 /* 端口：视觉小、热区大（::after 扩展到 25px）；支持拖线（手动连线 P0） */
 .port {
   position:absolute; width:11px; height:11px; border-radius:50%;
@@ -253,6 +265,10 @@ body { font-family: var(--font); background: var(--bg-app); color: var(--text-1)
   display:flex; align-items:center; justify-content:center; transition: all .15s;
 }
 .cmd-ref-add:hover { border-color: var(--accent); color: var(--accent); }
+/* 图片生成节点参考区：无上游时的占位提示 */
+.cmd-ref-hint {
+  font-size:11px; color: var(--text-3); line-height:40px; user-select:none;
+}
 .cmd-input {
   border:none; outline:none; resize:none; background:transparent;
   font-family:var(--font); font-size:13px; color: var(--text-1);

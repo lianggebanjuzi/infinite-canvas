@@ -42,7 +42,7 @@ class Persistence {
     }
 
     const nodes = p.nodes
-      .filter(n => n && typeof n.id === 'string' && (n.type === 'product-image' || n.type === 'style-transfer'))
+      .filter(n => n && typeof n.id === 'string' && (n.type === 'product-image' || n.type === 'style-transfer' || n.type === 'image-gen'))
       .map(n => ({
         id: n.id,
         type: n.type,

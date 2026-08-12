@@ -573,6 +573,10 @@ class Interactions {
         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="13.5" cy="6.5" r="1.5"/><circle cx="17.5" cy="10.5" r="1.5"/><circle cx="8.5" cy="7.5" r="1.5"/><circle cx="6.5" cy="12.5" r="1.5"/><path d="M12 2a10 10 0 0 0 0 20 2.5 2.5 0 0 0 2.5-2.5c0-.6-.24-1.2-.7-1.6-.4-.5-.7-1-.7-1.6A2.5 2.5 0 0 1 15.6 14H19a3 3 0 0 0 3-3c0-5-4.6-9-10-9Z"/></svg>
         新建换风格节点
       </div>
+      <div class="ctx-item" data-act="new-image-gen">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="m21 15-5-5L5 21"/><path d="M12 9v6M9 12h6"/></svg>
+        图片生成节点
+      </div>
       <div class="ctx-sep"></div>
       <div class="ctx-item" data-act="run-selected">
         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 3l14 9-14 9V3Z"/></svg>
@@ -670,6 +674,24 @@ class Interactions {
         // 自动接第一个产品图节点（若有）
         const product = flowState.nodes.find(n => n.type === 'product-image');
         if (product) flowState.addEdge(product.id, node.id);
+        // 回填默认模型
+        void resolveDefaultModel().then(model => {
+          if (model && !(flowState.getNode(node.id)?.params.model)) {
+            flowState.updateNodeParams(node.id, { model });
+          }
+        });
+        break;
+      }
+      case 'new-image-gen': {
+        const world = canvasView.toWorldCoords(window.innerWidth / 2, window.innerHeight / 2);
+        const node = flowState.addNode('image-gen', world.x - CARD_W / 2 + 40, world.y - 100);
+        selection.select(node.id);
+        // 自动接入所有"带图且尚未连出"的产品图节点（多图参考；与 new-style 接线口径一致）
+        flowState.nodes
+          .filter(n => n.type === 'product-image' && n.imageUrl && flowState.getEdgesFrom(n.id).length === 0)
+          .forEach(p => {
+            if (flowState.canConnect(p.id, node.id) === null) flowState.addEdge(p.id, node.id);
+          });
         // 回填默认模型
         void resolveDefaultModel().then(model => {
           if (model && !(flowState.getNode(node.id)?.params.model)) {

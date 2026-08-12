@@ -71,9 +71,11 @@ class CardView {
     const img = el.querySelector('.pcard-img') as HTMLElement;
     if (img) {
       img.style.height = this.cardHeight(node) + 'px';
+      // image-gen：底部叠加"已接入上游图"缩略图行（动态随上游增减，叠加不改变卡片尺寸）
+      const upstreamStrip = node.type === 'image-gen' ? this._upstreamStrip(node) : '';
       img.innerHTML = node.imageUrl
-        ? `<div class="ph" style="background-image:url('${escapeUrl(node.imageUrl)}')"></div><div class="scan"></div>`
-        : `<div class="ph"><div class="ph-empty">${emptyContent(node)}</div></div><div class="scan"></div>`;
+        ? `<div class="ph" style="background-image:url('${escapeUrl(node.imageUrl)}')"></div><div class="scan"></div>${upstreamStrip}`
+        : `<div class="ph"><div class="ph-empty">${emptyContent(node)}</div></div><div class="scan"></div>${upstreamStrip}`;
     }
 
     const tag = el.querySelector('.tag-text') as HTMLElement | null;
@@ -99,6 +101,16 @@ class CardView {
       };
     }
   }
+
+  /** image-gen 卡片底部缩略图行：展示已接入的全部上游图（小图，动态增删） */
+  private _upstreamStrip(node: FlowNode): string {
+    const upstreams = flowState.getUpstreams(node.id).filter(u => u.imageUrl);
+    if (upstreams.length === 0) return '';
+    const thumbs = upstreams
+      .map(u => `<div class="pcard-up-thumb" style="background-image:url('${escapeUrl(u.imageUrl!)}')" title="${escapeAttr(u.title || '')}"></div>`)
+      .join('');
+    return `<div class="pcard-upstreams">${thumbs}</div>`;
+  }
 }
 
 function emptyContent(node: FlowNode): string {
@@ -106,11 +118,19 @@ function emptyContent(node: FlowNode): string {
   if (node.type === 'product-image') {
     return `${plus}<span>点击选择或拖入产品图</span>`;
   }
+  if (node.type === 'image-gen') {
+    return `${plus}<span>连接多张上游图后生成</span>`;
+  }
   return `${plus}<span>点「+」或选中上游后生成</span>`;
 }
 
 function escapeUrl(url: string): string {
   return url.replace(/'/g, "\\'").replace(/"/g, '\\"');
+}
+
+/** HTML 属性转义（title 等文本属性） */
+function escapeAttr(value: string): string {
+  return value.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
 /** 大图查看（简单全屏浮层） */
