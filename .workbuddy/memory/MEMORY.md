@@ -26,3 +26,10 @@
 - 迁移：persistence `migrateNode` 三旧类型归一 image-gen（product-image → refImages=[imageUrl]/imageUrl=null/status=idle），version 3.1。
 - 边界（已知取舍）：迁移后旧产品图节点 imageUrl=null，须补提示词重跑才产生新输出图喂下游——是"强制提示词"拍板的直接结果，后续若觉得"扔图即图"更重要可加"参考图直达输出"轻量操作。
 - 已删文件：`src/v1/nodes/product-image.ts`、`style-transfer.ts`。
+
+## 跨电脑协作约定（2026-08-13 建立）
+
+- 项目已托管 GitHub：`github.com/lianggebanjuzi/infinite-canvas`，本机 git 已免密（代理 7890 / TLS openssl / credential store）。`.workbuddy/memory/` 开发日志已入库跨设备同步，其余 `.workbuddy` 本地状态仍排除。
+- **用户在别的电脑打开项目时的开场白**：先 git pull 拉最新代码 → 读 `.workbuddy/memory/` 日志 → 汇报项目状态/上次进度/待办 → 再继续干活。新电脑则先 git clone + 装依赖（pip install -r requirements.txt + npm install && npm run build）。
+- **收工固定动作**：把改动提交到 git（提交说明写人话：改了什么/为什么）→ push 到 GitHub → 在当日开发日志记一笔今天做了什么 → 告知提交号与状态。
+- 铁律：开工先 pull、收工必 push；完成一个功能就提交一次。换电脑不会丢进度，任何电脑 git log + memory 日志都是同一份历史。
