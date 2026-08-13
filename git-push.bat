@@ -18,8 +18,8 @@ if %errorlevel% neq 0 (
   echo       no new changes, push existing commits
 )
 
-echo [3/3] push to GitHub...
-git push origin main
+echo [3/3] push to GitHub (direct, no proxy)...
+git -c http.proxy= -c https.proxy= push origin main
 if %errorlevel% equ 0 (
   echo.
   echo ====== push OK ======
