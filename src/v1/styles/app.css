@@ -170,6 +170,16 @@ body { font-family: var(--font); background: var(--bg-app); color: var(--text-1)
   box-shadow: 0 1px 4px rgba(60,50,40,.28);
 }
 
+/* ═══════════ 结果卡（image-result，只读结果载体） ═══════════ */
+.pcard.result { border-color: rgba(124,154,114,.6); }
+.pcard.result .port.in { display:none; } /* 无入端口（canConnect 亦拒绝 to=结果卡） */
+.pcard-badge {
+  position:absolute; left:10px; bottom:10px; z-index:4;
+  font-size:10px; line-height:1; padding:4px 8px; border-radius:999px;
+  background: var(--accent); color:#fff; font-weight:600;
+  box-shadow: 0 1px 4px rgba(60,50,40,.25); pointer-events:none;
+}
+
 /* 端口：视觉小、热区大（::after 扩展到 25px）；支持拖线（手动连线 P0） */
 .port {
   position:absolute; width:11px; height:11px; border-radius:50%;
@@ -234,6 +244,11 @@ body { font-family: var(--font); background: var(--bg-app); color: var(--text-1)
 .cmd-panel.show { opacity:1; pointer-events:auto; transform: translate(-50%, 12px); }
 .cmd-panel.pos-above { transform: translate(-50%, calc(-100% - 20px)); }
 .cmd-panel.pos-above.show { transform: translate(-50%, calc(-100% - 12px)); }
+/* 结果卡只读模式：隐藏参考图区/输入框/参数 chips/发送钮 */
+.cmd-panel.readonly .cmd-refs,
+.cmd-panel.readonly .cmd-input,
+.cmd-panel.readonly .cmd-controls { display:none; }
+.cmd-panel.readonly .cmd-context { padding-bottom:12px; }
 .cmd-context {
   display:flex; align-items:center; gap:8px; padding:10px 14px 0;
   font-size:12px; color: var(--text-2);

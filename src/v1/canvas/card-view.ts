@@ -56,11 +56,14 @@ class CardView {
     el.className = 'pcard';
     el.id = `node-${node.id}`;
     el.dataset.nodeId = node.id;
+    const isResult = node.type === 'image-result';
+    if (isResult) el.classList.add('result');
     el.innerHTML = `
       <div class="pcard-img"></div>
       <div class="pcard-tag"><span class="dot"></span><span class="tag-text"></span></div>
+      ${isResult ? '<span class="pcard-badge">结果</span>' : ''}
       <button class="pcard-act" title="查看大图">${ICON_EXPAND}</button>
-      <div class="port in"></div>
+      ${isResult ? '' : '<div class="port in"></div>'}
       <div class="port out"></div>
     `;
     return el;
@@ -71,9 +74,13 @@ class CardView {
     el.style.top = node.y + 'px';
     el.style.width = CARD_W + 'px';
 
-    // 主视觉来源：输出图 imageUrl，无输出图时回退第一张参考图（用户拖入的图）作全图占位
+    // 主视觉来源：输出图 imageUrl，无输出图时回退第一张参考图（用户拖入的图）作全图占位。
+    // 结果卡只读：只取 imageUrl（无 refImages 回退，恒以自身输出图为主视觉）。
     const ownRefs = Array.isArray(node.refImages) ? node.refImages : [];
-    const mainSrc = node.imageUrl || (ownRefs.length > 0 ? ownRefs[0] : '');
+    const isResult = node.type === 'image-result';
+    const mainSrc = isResult
+      ? (node.imageUrl || '')
+      : (node.imageUrl || (ownRefs.length > 0 ? ownRefs[0] : ''));
 
     const img = el.querySelector('.pcard-img') as HTMLElement;
     if (img) {
@@ -94,10 +101,11 @@ class CardView {
     if (changed) {
       this._contentFingerprint.set(node.id, fp);
       if (img) {
-        // 底部叠加参考图缩略行（本节点 refImages ∪ 上游可作参考图的图，动态增删，叠加不改变卡片尺寸）
+        // 底部叠加参考图缩略行（本节点 refImages ∪ 上游可作参考图的图，动态增删，叠加不改变卡片尺寸）；
+        // 结果卡无参考图缩略行
         img.innerHTML = mainSrc
           ? `<div class="ph" style="background-image:url('${escapeUrl(mainSrc)}')"></div><div class="scan"></div>${refStrip}`
-          : `<div class="ph"><div class="ph-empty">${emptyContent()}</div></div><div class="scan"></div>${refStrip}`;
+          : `<div class="ph"><div class="ph-empty">${emptyContent(isResult)}</div></div><div class="scan"></div>${refStrip}`;
       }
       const tag = el.querySelector('.tag-text') as HTMLElement | null;
       if (tag) tag.textContent = title;
@@ -126,6 +134,8 @@ class CardView {
 
   /** 卡片底部参考图缩略行：展示 getReferenceImages(id)（本节点 refImages + 上游可作参考图的图） */
   private _refStrip(node: FlowNode): string {
+    // 结果卡只读：无参考图缩略行
+    if (node.type === 'image-result') return '';
     // 当主视觉正在用 refImages[0] 占位（即无输出图）时，缩略行排除这张占位图，避免重复显示
     const placeholder = node.imageUrl ? null : (Array.isArray(node.refImages) ? node.refImages[0] : null) || null;
     const refs = flowState.getReferenceImages(node.id).filter(u => u !== placeholder);
@@ -137,7 +147,8 @@ class CardView {
   }
 }
 
-function emptyContent(): string {
+function emptyContent(isResult: boolean): string {
+  if (isResult) return '<span>无结果图</span>';
   const plus = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>';
   return `${plus}<span>拖入图片或写提示词</span>`;
 }

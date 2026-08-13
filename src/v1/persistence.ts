@@ -7,21 +7,43 @@ import { Backend } from './api';
 import { showToast } from './ui/toast';
 
 /**
- * 旧节点归一迁移为统一「生成节点」。
+ * 旧节点归一迁移为统一「生成节点」/「结果卡」。
  * - product-image：旧输入图 → refImages=[imageUrl]，imageUrl 置空、status 重置 idle（旧 done 无输出图，避免 done+空卡矛盾）。
  * - style-transfer / image-gen：type 统一 image-gen，refImages 保留（缺省补空）。
+ * - image-result：透传（type 保持、title 默认'生成结果'、params 恒 {}、imageUrl string|null、refImages []、parentId string|null 校验）。
  * 连线 / 标题 / 参数保留。
  */
 function migrateNode(raw: unknown): FlowNode | null {
   if (!raw || typeof raw !== 'object') return null;
   const r = raw as Record<string, unknown>;
   const t = r.type as string;
-  if (t !== 'product-image' && t !== 'style-transfer' && t !== 'image-gen') return null;
+  if (t !== 'product-image' && t !== 'style-transfer' && t !== 'image-gen' && t !== 'image-result') return null;
   if (typeof r.id !== 'string') return null;
 
   const rawParams = r.params && typeof r.params === 'object'
     ? (r.params as Record<string, unknown>)
     : {};
+
+  const parentId = typeof r.parentId === 'string' && r.parentId ? r.parentId : null;
+
+  // 结果卡：只读透传（3.1 及更早版本不存在，此分支面向 3.2 及未来回读）
+  if (t === 'image-result') {
+    return {
+      id: r.id,
+      type: 'image-result',
+      x: typeof r.x === 'number' ? r.x : 0,
+      y: typeof r.y === 'number' ? r.y : 0,
+      ratio: typeof r.ratio === 'number' && r.ratio > 0 ? r.ratio : 3 / 4,
+      status: (['idle', 'run', 'done', 'stale', 'fail'] as NodeStatus[]).includes(r.status as NodeStatus) ? r.status as NodeStatus : 'idle',
+      title: typeof r.title === 'string' ? r.title : '生成结果',
+      params: {},
+      imageUrl: typeof r.imageUrl === 'string' ? r.imageUrl : null,
+      refImages: [],
+      error: typeof r.error === 'string' ? r.error : null,
+      lastRunAt: typeof r.lastRunAt === 'number' ? r.lastRunAt : null,
+      parentId,
+    };
+  }
 
   const node: FlowNode = {
     id: r.id,
@@ -36,6 +58,7 @@ function migrateNode(raw: unknown): FlowNode | null {
     refImages: [],
     error: typeof r.error === 'string' ? r.error : null,
     lastRunAt: typeof r.lastRunAt === 'number' ? r.lastRunAt : null,
+    parentId,
   };
 
   if (t === 'product-image') {
@@ -57,17 +80,22 @@ class Persistence {
   collect(): FlowProject {
     return {
       format: 'icv',
-      version: '3.1',
+      version: '3.2',
       projectName: flowState.projectName,
       canvas: { ...flowState.canvas },
-      nodes: flowState.nodes.map(n => ({ ...n, params: { ...(n.params || {}) }, refImages: [...(n.refImages || [])] })),
+      nodes: flowState.nodes.map(n => ({
+        ...n,
+        params: { ...(n.params || {}) },
+        refImages: [...(n.refImages || [])],
+        parentId: n.parentId ?? null,
+      })),
       edges: flowState.edges.map(e => ({ ...e })),
       createdAt: flowState.createdAt,
       updatedAt: Date.now(),
     };
   }
 
-  /** 校验并恢复项目（A9：format!=='icv' → 提示不支持；3.0/3.1 均接受并迁移） */
+  /** 校验并恢复项目（A9：format!=='icv' → 提示不支持；3.0/3.1/3.2 均接受并迁移，不校验版本号） */
   restore(raw: unknown): boolean {
     if (!raw || typeof raw !== 'object') {
       showToast('项目文件格式错误', false);
@@ -94,7 +122,7 @@ class Persistence {
 
     flowState.replaceAll({
       format: 'icv',
-      version: '3.1',
+      version: '3.2',
       projectName: typeof p.projectName === 'string' ? p.projectName : '未命名项目',
       canvas: {
         scale: typeof p.canvas?.scale === 'number' ? p.canvas.scale : 1,

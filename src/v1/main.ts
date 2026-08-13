@@ -9,6 +9,8 @@ import './styles/app.css';
 
 // 注册节点定义（副作用：向 nodeRegistry 注册；统一「生成节点」唯一注册）
 import './nodes/image-gen';
+// 结果卡：只读结果载体（引擎自动创建，不进新建菜单）；必须在 image-gen 之后注册（菜单过滤依赖 creatable）
+import './nodes/image-result';
 
 import { flowState } from './state/flow-state';
 import { selection } from './state/selection';

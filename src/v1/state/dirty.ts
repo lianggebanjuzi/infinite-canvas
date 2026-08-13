@@ -36,6 +36,33 @@ class DirtyMarker {
     flowState.dirty = true;
     flowState.notify();
   }
+
+  /**
+   * 上游变更但跳过指定节点及其子树（批次成功建卡后调用，exceptIds=本批次新建结果卡 id 集合）：
+   * 让旧下游标 stale、新结果卡（刚 done）及其子树跳过，避免被立即打回 stale。
+   * BFS 传播：从直接下游出发，遇到 exceptIds 中的节点即整棵子树跳过（不再向下递归）。
+   */
+  markUpstreamChangedExcept(fromId: string, exceptIds: Set<string>): void {
+    const skip = new Set(exceptIds);
+    let changed = false;
+    const visit = (id: string): void => {
+      if (skip.has(id)) return; // 跳过该节点及其整棵子树
+      const node = flowState.getNode(id);
+      if (!node) return;
+      if (node.status === 'run') return;            // 运行中不覆盖
+      if (node.status !== 'stale') {
+        node.status = 'stale';
+        changed = true;
+      }
+      flowState.getDownstreams(id).forEach(d => visit(d.id));
+    };
+    flowState.getDownstreams(fromId).forEach(d => visit(d.id));
+    if (changed) {
+      flowState.updatedAt = Date.now();
+      flowState.dirty = true;
+      flowState.notify();
+    }
+  }
 }
 
 export const dirty = new DirtyMarker();

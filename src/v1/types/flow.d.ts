@@ -2,8 +2,8 @@
 // ICV v1 流程画布核心类型（ambient 全局类型，无需 import 即可使用）
 // 与架构文档「四、数据结构与接口」保持一致
 
-/** 统一「生成节点」：多图参考（0~N）→ 生成一张新图，注册式扩展（本期收敛为单一类型） */
-type NodeType = 'image-gen';
+/** 统一「生成节点」：多图参考（0~N）→ 生成 N 张新图（每张一张结果卡），注册式扩展 */
+type NodeType = 'image-gen' | 'image-result';
 
 /** 旧版节点类型字面量：仅在 persistence 迁移时使用，业务代码禁止引用 */
 type LegacyNodeType = 'product-image' | 'style-transfer' | 'image-gen';
@@ -25,6 +25,7 @@ interface FlowNode {
   refImages: string[];       // 用户主动挂载的参考图（默认 []；上游可作参考图的图由 getReferenceImages 派生）
   error: string | null;      // fail 原因（红点 hover/点击展示）
   lastRunAt: number | null;
+  parentId: string | null;   // 结果卡专属：所属生成节点 id；其余节点恒 null（用于重跑顶掉旧结果卡）
 }
 
 /** 画布连线：模板默认连好，首版不支持手动新建 */
@@ -41,10 +42,10 @@ interface FlowCanvasState {
   panY: number;
 }
 
-/** .icproj 项目格式（3.1：三节点合并为统一生成节点） */
+/** .icproj 项目格式（3.2：新增 image-result 结果卡，节点带 parentId） */
 interface FlowProject {
   format: 'icv';
-  version: '3.1';
+  version: '3.2';
   projectName: string;
   canvas: FlowCanvasState;
   nodes: FlowNode[];
@@ -68,6 +69,7 @@ interface NodeDefinition {
   defaultTitle: string;
   defaultRatio: number;       // 3/4
   defaultParams: Record<string, unknown>;
+  creatable?: boolean;        // false=不进新建菜单（结果卡由引擎自动创建，缺省 true）
   canRun(node: FlowNode, ctx: FlowContext): boolean | string; // true / 禁止原因
   buildOptions(node: FlowNode, ctx: FlowContext): Record<string, unknown>; // backend options
 }

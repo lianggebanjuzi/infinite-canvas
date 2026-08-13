@@ -175,17 +175,27 @@ class CmdPanel {
     if (!this.el) return;
     const node = selection.single();
     if (!node) {
-      this.el.classList.remove('show', 'pos-above');
+      this.el.classList.remove('show', 'pos-above', 'readonly');
       return;
     }
 
     // 上下文标识
     this.ctxName.textContent = node.title || '节点';
     this.ctxThumb.style.backgroundImage = node.imageUrl ? `url('${node.imageUrl.replace(/'/g, "\\'")}')` : 'none';
+
+    // 结果卡只读模式：隐藏输入/chips/发送钮/参考图区，仅提示「结果卡（只读）」
+    if (node.type === 'image-result') {
+      this.el.classList.add('readonly');
+      this.ctxHint.textContent = '· 结果卡（只读）';
+      this._position(node);
+      return;
+    }
+    this.el.classList.remove('readonly');
+
     this.ctxHint.textContent =
       node.status === 'stale' ? '· 上游已改，待重跑' :
       node.status === 'done' ? '· 已完成' :
-      node.status === 'run' ? '· 生成中' :
+      node.status === 'run' ? this._runHint(node.id) :
       node.status === 'fail' ? '· 生成失败' : '';
 
     // 输入框（用户未聚焦时回填）
@@ -201,6 +211,13 @@ class CmdPanel {
       this._ensureModel(node.id);
     }
     this._position(node);
+  }
+
+  /** run 状态提示：批次进度「生成中 done/total」（无批次时退化为「生成中」） */
+  private _runHint(nodeId: string): string {
+    const p = runEngine.getBatchProgress(nodeId);
+    if (p && p.total > 0) return `· 生成中 ${p.done}/${p.total}`;
+    return '· 生成中';
   }
 
   private _modelFilling = new Set<string>();

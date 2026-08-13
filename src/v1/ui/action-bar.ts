@@ -54,7 +54,8 @@ class ActionBar {
   sync(): void {
     if (!this.el) return;
     const node = selection.single();
-    if (!node) {
+    // 结果卡只读：隐藏操作条
+    if (!node || node.type === 'image-result') {
       this.el.classList.remove('show', 'pos-below');
       return;
     }

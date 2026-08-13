@@ -3,6 +3,7 @@
 
 import { uid } from '../../utils/uid';
 import { nodeRegistry } from '../nodes/node-registry';
+import { showToast } from '../ui/toast';
 
 /** 卡片固定宽度（与 canvas-view.CARD_W 同值；数据层不依赖视图层） */
 const CARD_W = 260;
@@ -68,6 +69,34 @@ export class FlowState {
     return result;
   }
 
+  /** 结果卡归属查询：返回所有 parentId===parentId 的子节点（重跑顶掉旧结果卡用） */
+  getChildren(parentId: string): FlowNode[] {
+    return this.nodes.filter(n => n.parentId === parentId);
+  }
+
+  /**
+   * 删除某生成节点的全部结果卡（重跑顶掉）：逐个 removeNode（清理连线与选中），
+   * 并把被删结果卡的下游标 stale（先标后删，边仍在可 BFS 到达；仅一次 notify 由 removeNode 触发）。
+   */
+  removeChildren(parentId: string): void {
+    const children = this.nodes.filter(n => n.parentId === parentId);
+    if (children.length === 0) return;
+    let changed = false;
+    children.forEach(child => {
+      // 被删结果卡的下游（用户手动连的节点）结果已不可信 → 标 stale
+      this.getAllDownstreams(child.id).forEach(n => {
+        if (n.status === 'run' || n.status === 'stale') return;
+        n.status = 'stale';
+        changed = true;
+      });
+      this.removeNode(child.id);
+    });
+    if (changed) {
+      this.updatedAt = Date.now();
+      this.dirty = true;
+    }
+  }
+
   /**
    * 参考图合并唯一入口：本节点 refImages（用户主动挂载，在前）+ 上游可作参考图的图（imageUrl 优先、
    * 无输出图时回退其 refImages，可为多张；在后），去重保序。仍只取直接上游一层，不做 BFS 传播。
@@ -76,6 +105,8 @@ export class FlowState {
   getReferenceImages(id: string): string[] {
     const node = this.getNode(id);
     if (!node) return [];
+    // 结果卡只读：只返回自身 refImages（恒空 → []），不展开上游
+    if (node.type === 'image-result') return [...(node.refImages || [])];
     const result: string[] = [];
     const seen = new Set<string>();
     (node.refImages || []).forEach(url => {
@@ -162,6 +193,7 @@ export class FlowState {
       refImages: [],
       error: null,
       lastRunAt: null,
+      parentId: null,
       ...extra,
     };
     this.nodes.push(node);
@@ -187,20 +219,24 @@ export class FlowState {
   getEdgesFrom(id: string): FlowEdge[] { return this.edges.filter(e => e.from === id); }
   getEdgesTo(id: string): FlowEdge[] { return this.edges.filter(e => e.to === id); }
 
-  addEdge(from: string, to: string): FlowEdge | null {
+  addEdge(from: string, to: string, opts: { suppressStale?: boolean } = {}): FlowEdge | null {
     if (from === to) return null;
     if (this.edges.some(e => e.from === from && e.to === to)) return null;
     const edge: FlowEdge = { id: uid('edge'), from, to };
     this.edges.push(edge);
 
     // 连线后数据流已变化：to 及其所有下游子孙的结果不可信 → 标 stale（与 removeEdge 口径一致：
-    // idle/done 转 stale，run 中不覆盖，stale 保持 stale）
-    const toNode = this.getNode(to);
-    if (toNode) {
-      const affected = [toNode, ...this.getAllDownstreams(to)];
-      affected.forEach(n => {
-        if (n.status !== 'run' && n.status !== 'stale') n.status = 'stale';
-      });
+    // idle/done 转 stale，run 中不覆盖，stale 保持 stale）。
+    // suppressStale=true 仅用于引擎自动建卡连线（生成节点→刚建的结果卡），避免刚 done 的卡被立即打回 stale；
+    // 手动连线语义不变（仍标 stale）。
+    if (!opts.suppressStale) {
+      const toNode = this.getNode(to);
+      if (toNode) {
+        const affected = [toNode, ...this.getAllDownstreams(to)];
+        affected.forEach(n => {
+          if (n.status !== 'run' && n.status !== 'stale') n.status = 'stale';
+        });
+      }
     }
 
     this.updatedAt = Date.now();
@@ -214,6 +250,8 @@ export class FlowState {
     if (!this.getNode(from) || !this.getNode(to)) return '节点不存在';
     if (from === to) return '不能连接自己';
     if (this.edges.some(e => e.from === from && e.to === to)) return '已有相同连线';
+    // 结果卡只读：无入端口，不能作为 to（引擎自动建卡连线走 addEdge 直连，不经 canConnect）
+    if (this.getNode(to)?.type === 'image-result') return '结果卡不能作为输入';
     if (this._wouldCycle(from, to)) return '不能形成循环';
     return null;
   }
@@ -252,6 +290,12 @@ export class FlowState {
     const from = this.getNode(edge.from);
     const to = this.getNode(edge.to);
     if (!from || !to) return null;
+
+    // 结果卡前不能插步骤（结果卡只读无入端口，canConnect 亦拒绝 to=结果卡）
+    if (to.type === 'image-result') {
+      showToast('结果卡前不能插步骤', false);
+      return null;
+    }
 
     const fromX = from.x + CARD_W;
     const fromY = from.y + (CARD_W / from.ratio) / 2;
@@ -308,6 +352,7 @@ export class FlowState {
       refImages: Array.isArray(n.refImages) ? n.refImages : [],
       error: n.error ?? null,
       lastRunAt: n.lastRunAt ?? null,
+      parentId: typeof n.parentId === 'string' && n.parentId ? n.parentId : null,
     }));
     this.edges = project.edges.map(e => ({ ...e }));
     // 打开/创建项目即视为"用过画布"：删空后不再弹首启引导卡（含打开空项目场景）
