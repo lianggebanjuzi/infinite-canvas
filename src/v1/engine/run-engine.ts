@@ -15,6 +15,7 @@ import { showToast } from '../ui/toast';
 const ctx: FlowContext = {
   getUpstreams: id => flowState.getUpstreams(id),
   getDownstreams: id => flowState.getDownstreams(id),
+  getReferenceImages: id => flowState.getReferenceImages(id),
   getImageModels: fetchImageModels,
 };
 
@@ -31,13 +32,6 @@ class RunEngine {
     const def = nodeRegistry.get(node.type);
     const check = def.canRun(node, ctx);
     if (typeof check === 'string') { showToast(check, false); return; }
-
-    // 输入节点：有图即视为完成（不调 backend）
-    if (node.type === 'product-image') {
-      flowState.updateNode(nodeId, { status: 'done', error: null, lastRunAt: Date.now() });
-      dirty.markUpstreamChanged(nodeId);
-      return;
-    }
 
     this.busy = true;
     try {

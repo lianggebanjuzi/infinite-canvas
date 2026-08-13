@@ -77,16 +77,38 @@ export const Backend = {
     return (await API.loadProviders()) as BackendProviderList;
   },
 
-  async addProvider(name: string, type: string, shortName = ''): Promise<{ status: string; id?: string }> {
+  async addProvider(name: string, type: string, shortName = ''): Promise<{
+    status: string;
+    id?: string;
+    provider_id?: string;
+    provider?: BackendProvider;
+    message?: string;
+  }> {
     return await API.addProvider(name, type, shortName);
   },
 
-  async updateProvider(providerId: string, updates: Record<string, unknown>): Promise<{ status: string }> {
+  async updateProvider(providerId: string, updates: Record<string, unknown>): Promise<{ status: string; message?: string }> {
     return await API.updateProvider(providerId, updates);
   },
 
-  async deleteProvider(providerId: string): Promise<{ status: string }> {
+  async deleteProvider(providerId: string): Promise<{ status: string; message?: string }> {
     return await API.deleteProvider(providerId);
+  },
+
+  async fetchModels(apiUrl: string, apiKey: string): Promise<{ status?: string; message?: string; models?: BackendModel[] }> {
+    return (await API.fetchModels(apiUrl, apiKey)) as { status?: string; message?: string; models?: BackendModel[] };
+  },
+
+  async testConnection(apiUrl: string, apiKey: string): Promise<{ success: boolean; message: string }> {
+    return await API.testConnection(apiUrl, apiKey);
+  },
+
+  async addChatModel(providerId: string, modelId: string, modelName: string): Promise<{ status: string; message?: string }> {
+    return await API.addChatModel(providerId, modelId, modelName);
+  },
+
+  async removeModel(providerId: string, modelId: string): Promise<{ status: string; message?: string }> {
+    return await API.removeModel(providerId, modelId);
   },
 
   async loadSettings(): Promise<BackendSettings> {

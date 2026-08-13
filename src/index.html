@@ -82,20 +82,6 @@
         <span class="ctx-name" id="ctx-name">—</span>
         <span class="ctx-hint" id="ctx-hint"></span>
       </div>
-      <div class="cmd-tabs">
-        <button class="cmd-tab active" data-tab="ref">
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
-          参考
-        </button>
-        <button class="cmd-tab" data-tab="mark">
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="4"/></svg>
-          标记
-        </button>
-        <button class="cmd-tab" data-tab="style">
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="13.5" cy="6.5" r="1.5"/><circle cx="17.5" cy="10.5" r="1.5"/><circle cx="8.5" cy="7.5" r="1.5"/><circle cx="6.5" cy="12.5" r="1.5"/><path d="M12 2a10 10 0 0 0 0 20 2.5 2.5 0 0 0 2.5-2.5c0-.6-.24-1.2-.7-1.6-.4-.5-.7-1-.7-1.6A2.5 2.5 0 0 1 15.6 14H19a3 3 0 0 0 3-3c0-5-4.6-9-10-9Z"/></svg>
-          风格
-        </button>
-      </div>
       <div class="cmd-refs" id="cmd-refs">
         <div class="cmd-ref" id="cmd-ref-main"></div>
         <button class="cmd-ref-add" id="cmd-ref-add" title="添加参考图">
@@ -153,8 +139,8 @@
   <div class="empty-state" id="empty-state">
     <div class="empty-guide">
       <svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><path d="M17.5 14v7M14 17.5h7"/></svg>
-      <div class="empty-title">从一张产品图开始</div>
-      <div class="empty-desc">创建默认工作流：上传产品图，AI 帮你换背景、调风格、出多角度图。<br>也可以直接拖入历史图片，或在画布上右键新建节点。</div>
+      <div class="empty-title">拖入图片或新建生成节点</div>
+      <div class="empty-desc">创建默认工作流：挂载产品图，AI 帮你换背景、调风格、出多角度图。<br>也可以直接拖入历史图片，或在画布上右键新建节点。</div>
       <div class="empty-actions">
         <button class="btn-primary" id="btn-create-template">
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
@@ -192,7 +178,7 @@
 <!-- 大图查看 -->
 <div class="img-modal" id="img-modal"><img id="img-modal-img" alt=""></div>
 
-<!-- 隐藏文件选择（输入节点选图） -->
+<!-- 隐藏文件选择（追加参考图） -->
 <input type="file" id="file-input" accept="image/*" style="display:none;">
 
 <!-- 提示 toast -->

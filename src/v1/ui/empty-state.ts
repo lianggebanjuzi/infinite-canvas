@@ -29,7 +29,7 @@ class EmptyState {
     const model = await resolveDefaultModel();
     if (!model) return;
     flowState.nodes
-      .filter(n => n.type === 'style-transfer' && !(n.params.model as string | undefined))
+      .filter(n => n.type === 'image-gen' && !(n.params.model as string | undefined))
       .forEach(n => flowState.updateNodeParams(n.id, { model }));
   }
 

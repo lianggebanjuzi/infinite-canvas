@@ -1,25 +1,28 @@
 // src/v1/ui/cmd-panel.ts
-// 指令面板：参考/标记/风格 tab + 参考图缩略 + 输入框 + 模型/比例/分辨率/张数 chip + 圆形发送钮
+// 指令面板：单面板 = 参考图区 + 提示词 + 模型/比例/分辨率/张数 chip + 圆形发送钮
 // 仅单选出现，贴卡片下沿，空间不足智能翻到上方（原型行为）
 
 import { flowState } from '../state/flow-state';
 import { selection } from '../state/selection';
+import { dirty } from '../state/dirty';
 import { canvasView, CARD_W } from '../canvas/canvas-view';
 import { cardView } from '../canvas/card-view';
+import { interactions } from '../canvas/interactions';
 import { runEngine } from '../engine/run-engine';
 import { fetchImageModels } from '../api';
 import { showToast } from './toast';
 
-const RATIO_OPTIONS = ['3:4', '1:1', '16:9', 'Auto'];
+const RATIO_OPTIONS = ['3:4', '2:3', '4:5', '9:16', '1:4', '1:8', '1:1', '4:3', '3:2', '5:4', '16:9', '21:9', '4:1', '8:1', 'Auto'];
 const RES_OPTIONS = ['1k', '2k', '4k'];
 const COUNT_OPTIONS = [1, 2, 3, 4];
+
+const DEL_SVG = '<svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>';
 
 class CmdPanel {
   private el: HTMLElement | null = null;
   private ctxThumb!: HTMLElement;
   private ctxName!: HTMLElement;
   private ctxHint!: HTMLElement;
-  private tabs!: NodeListOf<HTMLElement>;
   private refs!: HTMLElement;
   private refMain!: HTMLElement;
   private input!: HTMLTextAreaElement;
@@ -28,9 +31,8 @@ class CmdPanel {
   private chipRatioLabel!: HTMLElement;
   private chipResLabel!: HTMLElement;
   private chipCountLabel!: HTMLElement;
-  private activeTab = 'style';
   private modelOptions: Array<{ id: string; name: string }> = [];
-  /** 动态多缩略图元素（image-gen 参考区，随上游增删重建） */
+  /** 动态参考图缩略元素（随 refImages/上游增删重建） */
   private _multiRefs: HTMLElement[] = [];
 
   init(): void {
@@ -40,7 +42,6 @@ class CmdPanel {
     this.ctxThumb = document.getElementById('ctx-thumb') as HTMLElement;
     this.ctxName = document.getElementById('ctx-name') as HTMLElement;
     this.ctxHint = document.getElementById('ctx-hint') as HTMLElement;
-    this.tabs = this.el.querySelectorAll('.cmd-tab') as unknown as NodeListOf<HTMLElement>;
     this.refs = document.getElementById('cmd-refs') as HTMLElement;
     this.refMain = document.getElementById('cmd-ref-main') as HTMLElement;
     this.input = document.getElementById('cmd-input') as HTMLTextAreaElement;
@@ -58,15 +59,6 @@ class CmdPanel {
   }
 
   private _bindEvents(): void {
-    this.tabs.forEach(tab => {
-      tab.addEventListener('click', () => {
-        this.tabs.forEach(t => t.classList.remove('active'));
-        tab.classList.add('active');
-        this.activeTab = tab.dataset.tab || 'style';
-        this._renderRefs();
-      });
-    });
-
     // 输入框：改自己 → 更新 params（不标 stale）；发送 → 运行
     this.input.addEventListener('input', () => {
       const node = selection.single();
@@ -79,20 +71,26 @@ class CmdPanel {
     document.getElementById('chip-model')?.addEventListener('click', (e: MouseEvent) => {
       const node = selection.single();
       if (!node) return;
-      this._showChipMenu(e, this.modelOptions.map(m => ({ id: m.id, name: m.name })), 'model');
+      e.stopPropagation();
+      void this._openModelMenu(e.currentTarget as HTMLElement);
     });
     document.getElementById('chip-ratio')?.addEventListener('click', (e: MouseEvent) => {
-      this._showChipMenu(e, RATIO_OPTIONS.map(v => ({ id: v, name: v })), 'aspectRatio');
+      e.stopPropagation();
+      this._showChipMenu(e.currentTarget as HTMLElement, RATIO_OPTIONS.map(v => ({ id: v, name: v })), 'aspectRatio');
     });
     document.getElementById('chip-res')?.addEventListener('click', (e: MouseEvent) => {
-      this._showChipMenu(e, RES_OPTIONS.map(v => ({ id: v, name: v })), 'resolution');
+      e.stopPropagation();
+      this._showChipMenu(e.currentTarget as HTMLElement, RES_OPTIONS.map(v => ({ id: v, name: v })), 'resolution');
     });
     document.getElementById('chip-count')?.addEventListener('click', (e: MouseEvent) => {
-      this._showChipMenu(e, COUNT_OPTIONS.map(v => ({ id: String(v), name: `${v}张` })), 'count');
+      e.stopPropagation();
+      this._showChipMenu(e.currentTarget as HTMLElement, COUNT_OPTIONS.map(v => ({ id: String(v), name: `${v}张` })), 'count');
     });
 
     document.getElementById('cmd-ref-add')?.addEventListener('click', () => {
-      showToast('首版参考图由上游自动带入', false);
+      const node = selection.single();
+      if (!node) return;
+      interactions.openFilePickerForRef(node.id);
     });
   }
 
@@ -104,13 +102,17 @@ class CmdPanel {
     void runEngine.run(node.id);
   }
 
-  private _showChipMenu(e: MouseEvent, items: Array<{ id: string; name: string }>, paramType: string): void {
-    e.stopPropagation();
+  /** 模型 chip：打开菜单前重新拉取模型，确保设置里新增/拉取的模型即时可见 */
+  private async _openModelMenu(btn: HTMLElement): Promise<void> {
+    this.modelOptions = await fetchImageModels();
+    this._showChipMenu(btn, this.modelOptions.map(m => ({ id: m.id, name: m.name })), 'model');
+  }
+
+  private _showChipMenu(btn: HTMLElement, items: Array<{ id: string; name: string }>, paramType: string): void {
     document.querySelector('.param-menu')?.remove();
     const node = selection.single();
     if (!node) return;
 
-    const btn = e.currentTarget as HTMLElement;
     const rect = btn.getBoundingClientRect();
     const menu = document.createElement('div');
     menu.className = 'param-menu';
@@ -193,23 +195,9 @@ class CmdPanel {
     }
     this.send.disabled = node.status === 'run';
 
-    // 默认 tab：换风格节点 → 风格；图片生成 → 参考（多上游缩略图）；输入节点 → 参考
-    if (node.type === 'style-transfer' && this.activeTab !== 'style') {
-      this.activeTab = 'style';
-      this.tabs.forEach(t => t.classList.toggle('active', t.dataset.tab === 'style'));
-    }
-    if (node.type === 'image-gen' && this.activeTab !== 'ref') {
-      this.activeTab = 'ref';
-      this.tabs.forEach(t => t.classList.toggle('active', t.dataset.tab === 'ref'));
-    }
-    if (node.type === 'product-image' && this.activeTab !== 'ref') {
-      this.activeTab = 'ref';
-      this.tabs.forEach(t => t.classList.toggle('active', t.dataset.tab === 'ref'));
-    }
-
     this._renderRefs();
     this._renderChips(node);
-    if ((node.type === 'style-transfer' || node.type === 'image-gen') && !(node.params.model as string | undefined)) {
+    if (!(node.params.model as string | undefined)) {
       this._ensureModel(node.id);
     }
     this._position(node);
@@ -217,69 +205,65 @@ class CmdPanel {
 
   private _modelFilling = new Set<string>();
 
-  /** 换风格节点未配置模型时：自动回填默认模型（localStorage 或第一个可用模型） */
+  /** 生成节点未配置模型时：自动回填默认模型（localStorage 或第一个可用模型） */
   private _ensureModel(nodeId: string): void {
     if (this._modelFilling.has(nodeId)) return;
     this._modelFilling.add(nodeId);
+    // 过滤掉 _getImageModels 无模型时返回的占位项 { id:'' }
+    const valid = (): Array<{ id: string; name: string }> => this.modelOptions.filter(m => Boolean(m.id));
     const apply = () => {
       const node = flowState.getNode(nodeId);
       if (!node || (node.params.model as string | undefined)) return;
+      const opts = valid();
       const saved = localStorage.getItem('icv_default_model');
-      const target = saved && this.modelOptions.some(m => m.id === saved)
+      const target = saved && opts.some(m => m.id === saved)
         ? saved
-        : (this.modelOptions[0]?.id || '');
+        : (opts[0]?.id || '');
       if (target) flowState.updateNodeParams(nodeId, { model: target });
     };
-    if (this.modelOptions.length > 0) { apply(); return; }
+    if (valid().length > 0) { apply(); return; }
     void fetchImageModels().then(models => {
-      this.modelOptions = models;
+      this.modelOptions = models.filter(m => Boolean(m.id));
       apply();
     });
   }
 
+  /** 参考图区：展示 getReferenceImages(id)（本节点 refImages + 上游 imageUrl），本节点 refImages 支持删除 */
   private _renderRefs(): void {
     const node = selection.single();
-    if (!node) { this.refs.style.display = 'flex'; return; }
-    const isRefNode = node.type === 'style-transfer' || node.type === 'image-gen';
-    if (this.activeTab !== 'ref' || !isRefNode) {
-      // 非参考 tab：隐藏参考行（保持面板紧凑）
-      this.refs.style.display = 'none';
-      return;
-    }
+    if (!node) { this.refs.style.display = 'none'; return; }
     this.refs.style.display = 'flex';
-    const upstreams = flowState.getUpstreams(node.id).filter(u => u.imageUrl);
-
-    if (node.type === 'image-gen') {
-      // 图片生成：动态显示全部上游缩略图（随上游增删变化）
-      this._renderMultiRefs(upstreams);
-      return;
-    }
-
-    // 换风格：单主参考（保持首图语义，多上游歧义由 image-gen 承接）
-    this._clearMultiRefs();
-    this.refMain.style.display = 'block';
-    this.refMain.style.backgroundImage = upstreams.length > 0
-      ? `url('${upstreams[0].imageUrl!.replace(/'/g, "\\'")}')`
-      : 'none';
-  }
-
-  /** 动态多缩略图：重建参考区子项（保留静态 + 按钮，插到 refMain 之前） */
-  private _renderMultiRefs(upstreams: FlowNode[]): void {
     this._clearMultiRefs();
     this.refMain.style.display = 'none';
-    if (upstreams.length === 0) {
+
+    const refs = flowState.getReferenceImages(node.id);
+    if (refs.length === 0) {
       const hint = document.createElement('div');
       hint.className = 'cmd-ref-hint';
-      hint.textContent = '连接上游后自动带入参考图';
+      hint.textContent = '拖入图片或连接上游节点添加参考图';
       this.refs.insertBefore(hint, this.refMain);
       this._multiRefs.push(hint);
       return;
     }
-    upstreams.forEach(u => {
+
+    refs.forEach(url => {
+      const isOwn = (node.refImages || []).includes(url);
       const t = document.createElement('div');
       t.className = 'cmd-ref';
-      t.style.backgroundImage = `url('${u.imageUrl!.replace(/'/g, "\\'")}')`;
-      t.title = u.title || '上游参考图';
+      t.style.backgroundImage = `url('${url.replace(/'/g, "\\'")}')`;
+      t.title = isOwn ? '参考图（可删除）' : '上游参考图';
+      if (isOwn) {
+        const del = document.createElement('button');
+        del.className = 'cmd-ref-del';
+        del.innerHTML = DEL_SVG;
+        del.title = '删除参考图';
+        del.addEventListener('click', (e: MouseEvent) => {
+          e.stopPropagation();
+          flowState.removeRefImage(node.id, url);
+          dirty.markStale(node.id);
+        });
+        t.appendChild(del);
+      }
       this.refs.insertBefore(t, this.refMain);
       this._multiRefs.push(t);
     });

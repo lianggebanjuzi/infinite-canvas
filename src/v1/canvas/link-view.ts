@@ -9,6 +9,7 @@ import { CARD_W } from './canvas-view';
 import { cardView } from './card-view';
 import { showToast } from '../ui/toast';
 import { applyLinkFlowing } from '../ui/status-visuals';
+import { resolveDefaultModel } from '../api';
 
 const NS = 'http://www.w3.org/2000/svg';
 
@@ -135,12 +136,17 @@ class LinkView {
     return del;
   }
 
-  /** 中点 + 号 → 真插入：断开原连线并在中点插入新 style-transfer 节点 */
+  /** 中点 + 号 → 真插入：断开原连线并在中点插入新「生成节点」 */
   private _insertStep(edgeId: string): void {
     const node = flowState.insertStep(edgeId);
     if (!node) { showToast('插入步骤失败', false); return; }
     dirty.markUpstreamChanged(node.id); // 原下游因上游变化标 stale
     selection.select(node.id);
+    void resolveDefaultModel().then(model => {
+      if (model && !(flowState.getNode(node.id)?.params.model)) {
+        flowState.updateNodeParams(node.id, { model });
+      }
+    });
     showToast('已插入新步骤');
   }
 

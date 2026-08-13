@@ -276,6 +276,10 @@ def build_frontend_for_development():
     npm = 'npm.cmd' if os.name == 'nt' else 'npm'
     npm_path = shutil.which(npm)
     if not npm_path:
+        # 未找到 Node.js/npm 时，若前端已构建过则直接复用，避免因 PATH 缺 npm 阻塞启动
+        if os.path.exists(INDEX_HTML):
+            print('[Infinite Canvas] 未找到 Node.js/npm，但前端已构建，跳过编译，直接使用现有 dist')
+            return
         raise RuntimeError('未找到 Node.js/npm，无法编译 TypeScript 前端')
 
     print('[Infinite Canvas] 正在编译 TypeScript 前端...')

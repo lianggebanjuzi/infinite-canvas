@@ -210,12 +210,11 @@ class Interactions {
 
     if (d.mode === 'node') {
       if (!d.moved) {
-        // 单击：空产品图卡片 → 打开文件选择
+        // 单击：空卡（无输出图）→ 打开文件选择追加参考图
         if (d.nodeId) {
           const n = flowState.getNode(d.nodeId);
-          if (n && n.type === 'product-image' && !n.imageUrl) {
-            this.pendingFileNodeId = n.id;
-            this.fileInput?.click();
+          if (n && !n.imageUrl) {
+            this.openFilePickerForRef(n.id);
           }
         }
       } else {
@@ -243,6 +242,13 @@ class Interactions {
 
   // ───────────────────────── 端口拖拽连线（手动连线 P0） ─────────────────────────
   private _lastDroppable: HTMLElement | null = null;
+
+  /** 打开文件选择器，为指定节点追加参考图（空卡单击 / 指令面板「添加参考图」共用） */
+  openFilePickerForRef(nodeId: string): void {
+    if (!nodeId) return;
+    this.pendingFileNodeId = nodeId;
+    this.fileInput?.click();
+  }
 
   private _startConnectDrag(e: MouseEvent, portEl: HTMLElement): void {
     e.stopPropagation();
@@ -310,9 +316,9 @@ class Interactions {
 
   // ───────────────────────── 拖线松手 → 新建节点菜单（P0） ─────────────────────────
 
-  /** 可作下游的节点类型（产品图不能作下游，canConnect 已有规则） */
+  /** 可作下游的节点类型（统一生成节点：仅 image-gen 一项） */
   private _newNodeCandidates(): NodeDefinition[] {
-    return nodeRegistry.list().filter(d => d.type !== 'product-image');
+    return nodeRegistry.list();
   }
 
   /** 松手处弹「新建节点」菜单：选择类型 → 建节点并自动连上拖出的线 */
@@ -359,15 +365,8 @@ class Interactions {
     });
   }
 
-  private _nodeTypeIcon(type: string): string {
-    switch (type) {
-      case 'style-transfer':
-        return '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="13.5" cy="6.5" r="1.5"/><circle cx="17.5" cy="10.5" r="1.5"/><circle cx="8.5" cy="7.5" r="1.5"/><circle cx="6.5" cy="12.5" r="1.5"/><path d="M12 2a10 10 0 0 0 0 20 2.5 2.5 0 0 0 2.5-2.5c0-.6-.24-1.2-.7-1.6-.4-.5-.7-1-.7-1.6A2.5 2.5 0 0 1 15.6 14H19a3 3 0 0 0 3-3c0-5-4.6-9-10-9Z"/></svg>';
-      case 'image-gen':
-        return '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="m21 15-5-5L5 21"/><path d="M12 9v6M9 12h6"/></svg>';
-      default:
-        return '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/></svg>';
-    }
+  private _nodeTypeIcon(_type: string): string {
+    return '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="m21 15-5-5L5 21"/><path d="M12 9v6M9 12h6"/></svg>';
   }
 
   // ───────────────────────── Shift 框选 ─────────────────────────
@@ -464,41 +463,34 @@ class Interactions {
     });
   }
 
-  /** A4：拖到输入节点上→替换；拖到空白处→新建输入节点（自动接孤儿换风格节点） */
-  private _dropImage(src: string, world: { x: number; y: number }, screenX: number, screenY: number, fileName?: string): void {
+  /** 拖图进画布：命中节点 → 追加参考图；空白处 → 新建「生成节点」（refImages=[src]） */
+  private _dropImage(src: string, world: { x: number; y: number }, screenX: number, screenY: number, _fileName?: string): void {
     const targetNode = this._nodeAt(screenX, screenY);
     const img = new Image();
     img.onload = () => {
-      const ratio = img.naturalHeight / img.naturalWidth;
+      const ratio = img.naturalWidth / img.naturalHeight;
+      const r = ratio > 0 ? ratio : 3 / 4;
 
-      if (targetNode && targetNode.type === 'product-image') {
-        flowState.setNodeImage(targetNode.id, src, ratio);
-        flowState.updateNode(targetNode.id, { status: 'done', error: null, lastRunAt: Date.now() });
-        if (fileName) flowState.updateNodeParams(targetNode.id, { fileName });
-        dirty.markUpstreamChanged(targetNode.id); // 下游 stale
-        showToast('已替换产品图');
+      if (targetNode) {
+        flowState.addRefImage(targetNode.id, src);
+        dirty.markStale(targetNode.id);
+        showToast('已添加参考图');
         return;
       }
 
-      // 新建输入节点
-      const node = flowState.addNode('product-image', world.x - CARD_W / 2, world.y - 40, {
-        imageUrl: src,
-        ratio,
-        status: 'done',
-        lastRunAt: Date.now(),
-        params: fileName ? { fileName } : {},
+      // 空白处：新建统一生成节点，图片作为参考图（不再是输出图）
+      const h = CARD_W / r;
+      const node = flowState.addNode('image-gen', world.x - CARD_W / 2, world.y - h / 2, {
+        refImages: [src],
+        ratio: r,
       });
-      if (fileName) flowState.updateNodeParams(node.id, { fileName });
       selection.select(node.id);
-      // 若存在没有产品图上游的换风格节点 → 自动接入
-      const orphanStyle = flowState.nodes.find(n => n.type === 'style-transfer' && !flowState.getUpstreams(n.id).some(u => u.type === 'product-image'));
-      if (orphanStyle) {
-        flowState.addEdge(node.id, orphanStyle.id);
-        dirty.markUpstreamChanged(node.id);
-        showToast('已新建输入节点并连接');
-      } else {
-        showToast('已新建输入节点');
-      }
+      void resolveDefaultModel().then(model => {
+        if (model && !(flowState.getNode(node.id)?.params.model)) {
+          flowState.updateNodeParams(node.id, { model });
+        }
+      });
+      showToast('已新建生成节点');
     };
     img.onerror = () => showToast('图片加载失败', false);
     img.src = src;
@@ -523,15 +515,16 @@ class Interactions {
         if (!src) { this.pendingFileNodeId = null; return; }
         const img = new Image();
         img.onload = () => {
-          const ratio = img.naturalHeight / img.naturalWidth;
           if (this.pendingFileNodeId) {
             const nodeId = this.pendingFileNodeId;
-            flowState.setNodeImage(nodeId, src, ratio);
-            flowState.updateNode(nodeId, { status: 'done', error: null, lastRunAt: Date.now() });
-            flowState.updateNodeParams(nodeId, { fileName: file.name });
-            dirty.markUpstreamChanged(nodeId);
-            showToast('已选择产品图');
+            flowState.addRefImage(nodeId, src);
+            dirty.markStale(nodeId);
+            showToast('已添加参考图');
           }
+          this.pendingFileNodeId = null;
+        };
+        img.onerror = () => {
+          showToast('图片加载失败', false);
           this.pendingFileNodeId = null;
         };
         img.src = src;
@@ -639,17 +632,9 @@ class Interactions {
     const menu = this._menuEl();
     menu.innerHTML = `
       <div class="ctx-hint">画布操作</div>
-      <div class="ctx-item" data-act="new-product">
-        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="m21 15-5-5L5 21"/></svg>
-        新建输入节点
-      </div>
-      <div class="ctx-item" data-act="new-style">
-        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="13.5" cy="6.5" r="1.5"/><circle cx="17.5" cy="10.5" r="1.5"/><circle cx="8.5" cy="7.5" r="1.5"/><circle cx="6.5" cy="12.5" r="1.5"/><path d="M12 2a10 10 0 0 0 0 20 2.5 2.5 0 0 0 2.5-2.5c0-.6-.24-1.2-.7-1.6-.4-.5-.7-1-.7-1.6A2.5 2.5 0 0 1 15.6 14H19a3 3 0 0 0 3-3c0-5-4.6-9-10-9Z"/></svg>
-        新建换风格节点
-      </div>
-      <div class="ctx-item" data-act="new-image-gen">
+      <div class="ctx-item" data-act="new-node">
         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="m21 15-5-5L5 21"/><path d="M12 9v6M9 12h6"/></svg>
-        图片生成节点
+        新建生成节点
       </div>
       <div class="ctx-sep"></div>
       <div class="ctx-item" data-act="run-selected">
@@ -725,6 +710,11 @@ class Interactions {
         if (node) {
           dirty.markUpstreamChanged(node.id);
           selection.select(node.id);
+          void resolveDefaultModel().then(model => {
+            if (model && !(flowState.getNode(node.id)?.params.model)) {
+              flowState.updateNodeParams(node.id, { model });
+            }
+          });
           showToast('已插入新步骤');
         } else {
           showToast('插入步骤失败', false);
@@ -737,40 +727,10 @@ class Interactions {
         showToast('连线已删除');
         break;
       }
-      case 'new-product': {
+      case 'new-node': {
         const world = canvasView.toWorldCoords(window.innerWidth / 2, window.innerHeight / 2);
-        const node = flowState.addNode('product-image', world.x - CARD_W / 2, world.y - 100);
+        const node = flowState.addNode('image-gen', world.x - CARD_W / 2, world.y - 100);
         selection.select(node.id);
-        this.pendingFileNodeId = node.id;
-        this.fileInput?.click();
-        break;
-      }
-      case 'new-style': {
-        const world = canvasView.toWorldCoords(window.innerWidth / 2, window.innerHeight / 2);
-        const node = flowState.addNode('style-transfer', world.x - CARD_W / 2 + 40, world.y - 100);
-        selection.select(node.id);
-        // 自动接第一个产品图节点（若有）
-        const product = flowState.nodes.find(n => n.type === 'product-image');
-        if (product) flowState.addEdge(product.id, node.id);
-        // 回填默认模型
-        void resolveDefaultModel().then(model => {
-          if (model && !(flowState.getNode(node.id)?.params.model)) {
-            flowState.updateNodeParams(node.id, { model });
-          }
-        });
-        break;
-      }
-      case 'new-image-gen': {
-        const world = canvasView.toWorldCoords(window.innerWidth / 2, window.innerHeight / 2);
-        const node = flowState.addNode('image-gen', world.x - CARD_W / 2 + 40, world.y - 100);
-        selection.select(node.id);
-        // 自动接入所有"带图且尚未连出"的产品图节点（多图参考；与 new-style 接线口径一致）
-        flowState.nodes
-          .filter(n => n.type === 'product-image' && n.imageUrl && flowState.getEdgesFrom(n.id).length === 0)
-          .forEach(p => {
-            if (flowState.canConnect(p.id, node.id) === null) flowState.addEdge(p.id, node.id);
-          });
-        // 回填默认模型
         void resolveDefaultModel().then(model => {
           if (model && !(flowState.getNode(node.id)?.params.model)) {
             flowState.updateNodeParams(node.id, { model });

@@ -68,14 +68,18 @@ class CardView {
     el.style.top = node.y + 'px';
     el.style.width = CARD_W + 'px';
 
+    // 主视觉来源：输出图 imageUrl，无输出图时回退第一张参考图（用户拖入的图）作全图占位
+    const ownRefs = Array.isArray(node.refImages) ? node.refImages : [];
+    const mainSrc = node.imageUrl || (ownRefs.length > 0 ? ownRefs[0] : '');
+
     const img = el.querySelector('.pcard-img') as HTMLElement;
     if (img) {
       img.style.height = this.cardHeight(node) + 'px';
-      // image-gen：底部叠加"已接入上游图"缩略图行（动态随上游增减，叠加不改变卡片尺寸）
-      const upstreamStrip = node.type === 'image-gen' ? this._upstreamStrip(node) : '';
-      img.innerHTML = node.imageUrl
-        ? `<div class="ph" style="background-image:url('${escapeUrl(node.imageUrl)}')"></div><div class="scan"></div>${upstreamStrip}`
-        : `<div class="ph"><div class="ph-empty">${emptyContent(node)}</div></div><div class="scan"></div>${upstreamStrip}`;
+      // 底部叠加参考图缩略行（refImages ∪ 上游 imageUrl，动态增删，叠加不改变卡片尺寸）
+      const refStrip = this._refStrip(node);
+      img.innerHTML = mainSrc
+        ? `<div class="ph" style="background-image:url('${escapeUrl(mainSrc)}')"></div><div class="scan"></div>${refStrip}`
+        : `<div class="ph"><div class="ph-empty">${emptyContent()}</div></div><div class="scan"></div>${refStrip}`;
     }
 
     const tag = el.querySelector('.tag-text') as HTMLElement | null;
@@ -89,7 +93,7 @@ class CardView {
       el.removeAttribute('title');
     }
 
-    el.classList.toggle('empty', !node.imageUrl);
+    el.classList.toggle('empty', !mainSrc);
     el.classList.toggle('selected', selection.isSelected(node.id));
 
     // 查看大图
@@ -97,40 +101,31 @@ class CardView {
     if (act) {
       act.onclick = (e: MouseEvent) => {
         e.stopPropagation();
-        if (node.imageUrl) openImageModal(node.imageUrl);
+        if (mainSrc) openImageModal(mainSrc);
       };
     }
   }
 
-  /** image-gen 卡片底部缩略图行：展示已接入的全部上游图（小图，动态增删） */
-  private _upstreamStrip(node: FlowNode): string {
-    const upstreams = flowState.getUpstreams(node.id).filter(u => u.imageUrl);
-    if (upstreams.length === 0) return '';
-    const thumbs = upstreams
-      .map(u => `<div class="pcard-up-thumb" style="background-image:url('${escapeUrl(u.imageUrl!)}')" title="${escapeAttr(u.title || '')}"></div>`)
+  /** 卡片底部参考图缩略行：展示 getReferenceImages(id)（本节点 refImages + 上游 imageUrl） */
+  private _refStrip(node: FlowNode): string {
+    // 当主视觉正在用 refImages[0] 占位（即无输出图）时，缩略行排除这张占位图，避免重复显示
+    const placeholder = node.imageUrl ? null : (Array.isArray(node.refImages) ? node.refImages[0] : null) || null;
+    const refs = flowState.getReferenceImages(node.id).filter(u => u !== placeholder);
+    if (refs.length === 0) return '';
+    const thumbs = refs
+      .map(u => `<div class="pcard-up-thumb" style="background-image:url('${escapeUrl(u)}')" title="参考图"></div>`)
       .join('');
     return `<div class="pcard-upstreams">${thumbs}</div>`;
   }
 }
 
-function emptyContent(node: FlowNode): string {
+function emptyContent(): string {
   const plus = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>';
-  if (node.type === 'product-image') {
-    return `${plus}<span>点击选择或拖入产品图</span>`;
-  }
-  if (node.type === 'image-gen') {
-    return `${plus}<span>连接多张上游图后生成</span>`;
-  }
-  return `${plus}<span>点「+」或选中上游后生成</span>`;
+  return `${plus}<span>拖入图片或写提示词</span>`;
 }
 
 function escapeUrl(url: string): string {
   return url.replace(/'/g, "\\'").replace(/"/g, '\\"');
-}
-
-/** HTML 属性转义（title 等文本属性） */
-function escapeAttr(value: string): string {
-  return value.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
 /** 大图查看（简单全屏浮层） */

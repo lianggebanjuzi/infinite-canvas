@@ -1,54 +1,58 @@
-```mermaid
 sequenceDiagram
-    actor User as 用户
-    participant UI as CardView/CmdPanel
-    participant FS as FlowState
-    participant DM as DirtyMarker
+    autonumber
+    participant U as 用户
+    participant I as Interactions
+    participant F as FlowState
+    participant D as DirtyMarker
+
+    Note over U,D: 流程一：拖图进画布
+    U->>I: 拖入图片（历史图/文件）
+    I->>I: _dropImage(src, world)
+    alt 命中节点
+        I->>F: addRefImage(nodeId, src)
+        F->>F: refImages 去重追加 + notify
+        I->>D: markStale(nodeId) 标待重跑
+    else 空白处
+        I->>F: addNode('image-gen', x, y, {refImages:[src]})
+        F->>F: 建节点(imageUrl=null) + notify
+        I->>I: selection.select + resolveDefaultModel 回填 model
+    end
+
+    Note over U,D: 流程二：运行（单节点）
+    participant CP as CmdPanel
     participant RE as RunEngine
-    participant PO as Poller
-    participant BA as BackendApi
-    participant BE as backend UnifiedAPI
-
-    %% 场景1：换图（改上游）
-    User->>UI: 拖入新产品图到 n1
-    UI->>FS: updateNode('n1', {imageUrl})
-    FS->>DM: markUpstreamChanged('n1')
-    DM->>FS: n2.status = 'stale'
-    FS-->>UI: 渲染：n2 状态点变橙
-
-    %% 场景2：改 prompt 再跑（分段执行）
-    User->>UI: 选 n2 → 指令面板 → 改 prompt
-    UI->>FS: updateNode('n2', {params.prompt})
-    FS->>DM: markSelfChanged（不标 stale）
-    User->>UI: 点发送
-    UI->>RE: run('n2')
-    RE->>FS: n2.status = 'run'
-    FS-->>UI: 渲染：扫描光 + 上游连线流光
-    RE->>RE: buildOptions(n2)（含 referenceImages=[n1.imageUrl]）
-    RE->>BA: unifiedGenerateImage(prompt, options)
-    BA->>BE: pywebview.api.unified_generate_image(...)
-    BE-->>BA: { success, task_id }
-    BA-->>RE: task_id
-    RE->>PO: poll(task_id)
-    loop 轮询
-        PO->>BE: unified_get_task_result(task_id)
-        BE-->>PO: { status: 'pending' } | { status: 'done', result }
-    end
-    PO-->>RE: result
-    alt 成功
-        RE->>FS: updateNode('n2', {status:'done', imageUrl})
-        RE->>BA: saveImageToLocal(imageUrl)（可选）
-        FS-->>UI: 渲染：深绿点 + 历史图库加入
-    else 失败
-        RE->>FS: updateNode('n2', {status:'fail', error})
-        FS-->>UI: 渲染：红点，hover 显示原因（不自动切供应商）
+    participant Def as NodeDefinition(image-gen)
+    participant B as Backend
+    U->>CP: 点发送 / 右键运行
+    CP->>RE: run(nodeId)
+    RE->>Def: canRun(node, ctx)
+    alt 不满足
+        Def-->>RE: "请输入提示词" / "请先选择绘图模型"
+        RE->>CP: showToast(原因)
+    else 满足
+        RE->>F: status='run'
+        RE->>Def: buildOptions(node, ctx)
+        Def->>F: getReferenceImages(node.id)
+        F-->>Def: refImages ∪ 上游 imageUrl
+        RE->>B: generateImage(prompt, options)
+        B-->>RE: {task_id}
+        RE->>RE: pollTask → {success, imageUrl}
+        RE->>F: setNodeImage(nodeId, imageUrl)
+        RE->>F: status='done'
+        RE->>D: markUpstreamChanged(nodeId) 下游标 stale
     end
 
-    %% 场景3：保存/打开
-    User->>UI: 底部胶囊「保存」
-    UI->>FS: collect()
-    FS-->>UI: FlowProject
-    UI->>BA: saveProject(flowProject)
-    BA->>BE: pywebview.api.save_project(data)
-    BE-->>UI: { status: 'success', path }
-```
+    Note over U,D: 流程三：旧项目加载迁移
+    participant P as Persistence
+    U->>P: open() / restore(raw)
+    P->>P: 校验 format==='icv'
+    P->>P: nodes.map(migrateNode)
+    loop 每个节点
+        alt type==='product-image'
+            P->>P: type='image-gen'; refImages=[imageUrl]; imageUrl=null; status='idle'
+        else style-transfer / image-gen
+            P->>P: type='image-gen'; refImages 保留（空）
+        end
+    end
+    P->>F: replaceAll({nodes, version:'3.1'})
+    F->>F: notify + 全量渲染

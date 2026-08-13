@@ -32,6 +32,33 @@ def normalize_gemini_aspect_ratio(val):
     return None
 
 
+def nearest_aspect_ratio(width, height):
+    """
+    把像素宽高映射到 Gemini 支持的最近宽高比（宽/高）。
+    返回形如 '3:4' 的字符串；宽或高非法（非正数/非数字）时返回 None。
+    """
+    try:
+        target = float(width) / float(height)
+    except (TypeError, ValueError, ZeroDivisionError):
+        return None
+    if target <= 0:
+        return None
+
+    best = None
+    best_diff = None
+    for ar in GEMINI_IMAGE_ASPECT_RATIOS:
+        a, b = ar.split(':')
+        try:
+            val = int(a) / int(b)
+        except (ValueError, ZeroDivisionError):
+            continue
+        diff = abs(val - target)
+        if best_diff is None or diff < best_diff:
+            best_diff = diff
+            best = ar
+    return best
+
+
 def normalize_gemini_image_size(val):
     """确保 imageSize 为 1K / 2K / 4K（大写）。"""
     if val is None:

@@ -7,9 +7,7 @@ import '../bridge';
 import './styles/variables.css';
 import './styles/app.css';
 
-// 注册节点定义（副作用：向 nodeRegistry 注册）
-import './nodes/product-image';
-import './nodes/style-transfer';
+// 注册节点定义（副作用：向 nodeRegistry 注册；统一「生成节点」唯一注册）
 import './nodes/image-gen';
 
 import { flowState } from './state/flow-state';
@@ -81,12 +79,12 @@ function bindKeyboard(): void {
   });
 }
 
-// ───────────────────────── 为换风格/图片生成节点回填默认模型 ─────────────────────────
+// ───────────────────────── 为生成节点回填默认模型 ─────────────────────────
 async function fillDefaultModels(): Promise<void> {
   const model = await resolveDefaultModel();
   if (!model) return;
   flowState.nodes
-    .filter(n => (n.type === 'style-transfer' || n.type === 'image-gen') && !(n.params.model as string | undefined))
+    .filter(n => !(n.params.model as string | undefined))
     .forEach(n => flowState.updateNodeParams(n.id, { model }));
 }
 

@@ -2,8 +2,11 @@
 // ICV v1 流程画布核心类型（ambient 全局类型，无需 import 即可使用）
 // 与架构文档「四、数据结构与接口」保持一致
 
-/** 首版节点类型：产品图输入 / 换风格 / 图片生成（多图参考生成一张），注册式扩展 */
-type NodeType = 'product-image' | 'style-transfer' | 'image-gen';
+/** 统一「生成节点」：多图参考（0~N）→ 生成一张新图，注册式扩展（本期收敛为单一类型） */
+type NodeType = 'image-gen';
+
+/** 旧版节点类型字面量：仅在 persistence 迁移时使用，业务代码禁止引用 */
+type LegacyNodeType = 'product-image' | 'style-transfer' | 'image-gen';
 
 /** 节点状态机五态 */
 type NodeStatus = 'idle' | 'run' | 'done' | 'stale' | 'fail';
@@ -18,7 +21,8 @@ interface FlowNode {
   status: NodeStatus;
   title: string;             // 左上悬浮标签
   params: Record<string, unknown>;  // 节点参数（见 StyleTransferParams）
-  imageUrl: string | null;   // 结果图（输入节点=所选图；生成节点=生成结果）
+  imageUrl: string | null;   // 本节点输出图（卡片主视觉），与 refImages 严格分离
+  refImages: string[];       // 用户主动挂载的参考图（默认 []；上游 imageUrl 运行时派生）
   error: string | null;      // fail 原因（红点 hover/点击展示）
   lastRunAt: number | null;
 }
@@ -37,10 +41,10 @@ interface FlowCanvasState {
   panY: number;
 }
 
-/** .icproj v3 项目格式 */
+/** .icproj 项目格式（3.1：三节点合并为统一生成节点） */
 interface FlowProject {
   format: 'icv';
-  version: '3.0';
+  version: '3.1';
   projectName: string;
   canvas: FlowCanvasState;
   nodes: FlowNode[];
@@ -53,6 +57,7 @@ interface FlowProject {
 interface FlowContext {
   getUpstreams(nodeId: string): FlowNode[];
   getDownstreams(nodeId: string): FlowNode[];
+  getReferenceImages(nodeId: string): string[]; // refImages ∪ 上游 imageUrl（去重保序）
   getImageModels(): Promise<Array<{ id: string; name: string }>>;
 }
 
@@ -67,18 +72,13 @@ interface NodeDefinition {
   buildOptions(node: FlowNode, ctx: FlowContext): Record<string, unknown>; // backend options
 }
 
-/** 换风格节点参数 */
+/** 生成节点参数（统一节点复用） */
 interface StyleTransferParams {
-  prompt: string;             // 换风格指令
+  prompt: string;             // 生成指令
   model: string;              // "provider_id:model_id"
   aspectRatio: string;        // '3:4' | '1:1' | '16:9' | 'Auto'
   resolution: string;         // '1k' | '2k' | '4k'
   count: number;              // 1-4
-}
-
-/** 输入产品图节点参数（空或仅存文件信息） */
-interface ProductImageParams {
-  fileName?: string;
 }
 
 /** 前端统一错误（映射自 backend {success:false,error_code,message}） */

@@ -1,159 +1,74 @@
-```mermaid
 classDiagram
     class FlowNode {
-        +string id
-        +NodeType type
-        +number x
-        +number y
-        +number ratio
-        +NodeStatus status
-        +string title
-        +Record~string,unknown~ params
-        +string imageUrl
-        +string error
-        +number lastRunAt
-    }
-    class FlowEdge {
-        +string id
-        +string from
-        +string to
-    }
-    class FlowProject {
-        +string format
-        +string version
-        +string projectName
-        +Canvas canvas
-        +FlowNode[] nodes
-        +FlowEdge[] edges
-        +number createdAt
-        +number updatedAt
-    }
-    class NodeStatus {
-        <<enumeration>>
-        idle
-        run
-        done
-        stale
-        fail
-    }
-    class NodeDefinition {
-        <<interface>>
-        +NodeType type
-        +string label
-        +string defaultTitle
-        +number defaultRatio
-        +Record~string,unknown~ defaultParams
-        +canRun(node, ctx) bool|string
-        +buildOptions(node, ctx) Record
-    }
-    class NodeRegistry {
-        +register(def) void
-        +get(type) NodeDefinition
-        +list() NodeDefinition[]
-    }
-    class ProductImageNode {
-        +canRun() bool
-        +buildOptions() Record
-    }
-    class StyleTransferNode {
-        +canRun() bool
-        +buildOptions() Record
-    }
-    class FlowState {
-        +FlowNode[] nodes
-        +FlowEdge[] edges
-        +Set~string~ selectedIds
-        +subscribe(fn) void
-        +getNode(id) FlowNode
-        +getDownstream(id) FlowNode[]
-        +updateNode(id, patch) void
-        +addNode(type, pos) FlowNode
-        +removeNode(id) void
-    }
-    class DirtyMarker {
-        +markUpstreamChanged(fromId) void
-        +markStale(nodeId) void
-        +clearStale(nodeId) void
-    }
-    class RunEngine {
-        +run(nodeId) Promise~void~
-        +runSelected() Promise~void~
-        +runAll() Promise~void~
-        -_validate(node) void
-        -_poll(taskId) Promise~Result~
-        -_writeBack(nodeId, result) void
-    }
-    class Poller {
-        +poll(taskId, onDone, onError) void
-    }
-    class Persistence {
-        +collect() FlowProject
-        +restore(proj) void
-        +validate(proj) bool
-    }
-    class BackendApi {
-        +generateImage(prompt, options) taskId
-        +getTaskResult(taskId) Result
-        +saveProject(data) void
-        +openProject() FlowProject
-        +loadProviders() Provider[]
-    }
-    class Templates {
-        +createDefault() FlowProject
-    }
-    class CanvasView {
-        +init() void
-        +render(nodes, edges) void
-        +toWorldCoords(screen) Point
-        +pan/zoom() void
-    }
-    class CardView {
-        +render(node) HTMLElement
-        +updateStatus(node) void
-    }
-    class LinkView {
-        +render(edges) void
-        +setFlowing(from, to, on) void
-    }
-    class CmdPanel {
-        +open(node) void
-        +close() void
-        +onSend() void
-    }
-    class HistoryDrawer {
-        +open() void
-        +close() void
-        +addImage(src) void
-        +clear() void
-    }
-    class BottomBar {
-        +init() void
-    }
-    class EmptyState {
-        +show() void
-        +hide() void
+        +id: string
+        +type: NodeType
+        +x: number
+        +y: number
+        +ratio: number
+        +status: NodeStatus
+        +title: string
+        +params: Record~string,unknown~
+        +imageUrl: string | null
+        +refImages: string[]
+        +error: string | null
+        +lastRunAt: number | null
     }
 
-    FlowProject --> FlowNode
-    FlowProject --> FlowEdge
-    FlowNode --> NodeStatus
-    NodeRegistry --> NodeDefinition
-    ProductImageNode ..|> NodeDefinition
-    StyleTransferNode ..|> NodeDefinition
-    FlowState --> FlowNode
-    FlowState --> FlowEdge
-    DirtyMarker --> FlowState
-    RunEngine --> FlowState
-    RunEngine --> DirtyMarker
-    RunEngine --> BackendApi
-    RunEngine --> Poller
-    Persistence --> FlowState
-    Templates --> FlowProject
-    CanvasView --> FlowState
-    CardView --> FlowState
-    LinkView --> FlowState
-    CmdPanel --> FlowState
-    CmdPanel --> RunEngine
-    HistoryDrawer --> BackendApi
-    EmptyState --> Templates
-```
+    class FlowEdge {
+        +id: string
+        +from: string
+        +to: string
+    }
+
+    class NodeDefinition {
+        +type: NodeType
+        +label: string
+        +defaultTitle: string
+        +defaultRatio: number
+        +defaultParams: Record~string,unknown~
+        +canRun(node, ctx) boolean | string
+        +buildOptions(node, ctx) Record~string,unknown~
+    }
+
+    class FlowContext {
+        +getUpstreams(nodeId) FlowNode[]
+        +getDownstreams(nodeId) FlowNode[]
+        +getReferenceImages(nodeId) string[]
+        +getImageModels() Promise
+    }
+
+    class FlowState {
+        +nodes: FlowNode[]
+        +edges: FlowEdge[]
+        +addNode(type, x, y, extra) FlowNode
+        +getReferenceImages(id) string[]
+        +addRefImage(id, url) void
+        +removeRefImage(id, url) void
+        +canConnect(from, to) string | null
+        +_wouldCycle(from, to) boolean
+        +addEdge(from, to) FlowEdge | null
+        +insertStep(edgeId) FlowNode | null
+        +removeEdge(id) void
+    }
+
+    class RunEngine {
+        +run(nodeId) Promise
+        +runSelected() Promise
+        +runAll(ids?) Promise
+    }
+
+    class Persistence {
+        +collect() FlowProject
+        +restore(raw) boolean
+        +migrateNode(raw) FlowNode | null
+        +save() Promise
+        +open() Promise
+    }
+
+    FlowState "1" *-- "0..N" FlowNode : 持有
+    FlowState "1" *-- "0..N" FlowEdge : 持有
+    FlowContext --> FlowState : 读取
+    RunEngine --> FlowState : 读写
+    RunEngine --> NodeDefinition : canRun/buildOptions
+    Persistence --> FlowState : replaceAll
+    FlowNode ..> NodeDefinition : type 映射到定义

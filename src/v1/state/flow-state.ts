@@ -68,6 +68,48 @@ export class FlowState {
     return result;
   }
 
+  /**
+   * 参考图合并唯一入口：本节点 refImages（用户主动挂载，在前）+ 上游 imageUrl（运行时派生，在后），
+   * 去重保序。卡片缩略行 / buildOptions / 指令面板三处一律调用本方法，禁止各写一份。
+   */
+  getReferenceImages(id: string): string[] {
+    const node = this.getNode(id);
+    if (!node) return [];
+    const result: string[] = [];
+    const seen = new Set<string>();
+    (node.refImages || []).forEach(url => {
+      if (url && !seen.has(url)) { seen.add(url); result.push(url); }
+    });
+    this.getUpstreams(id).forEach(u => {
+      if (u.imageUrl && !seen.has(u.imageUrl)) { seen.add(u.imageUrl); result.push(u.imageUrl); }
+    });
+    return result;
+  }
+
+  /** 追加参考图（去重；仅改本节点 refImages，不改输出图）。调用方按需标 stale。 */
+  addRefImage(id: string, url: string): void {
+    const node = this.getNode(id);
+    if (!node || !url) return;
+    if (!Array.isArray(node.refImages)) node.refImages = [];
+    if (node.refImages.includes(url)) return;
+    node.refImages.push(url);
+    this.updatedAt = Date.now();
+    this.dirty = true;
+    this.notify();
+  }
+
+  /** 删除某张参考图（仅作用于本节点 refImages；上游派生的图不在此列）。调用方按需标 stale。 */
+  removeRefImage(id: string, url: string): void {
+    const node = this.getNode(id);
+    if (!node || !Array.isArray(node.refImages)) return;
+    const next = node.refImages.filter(u => u !== url);
+    if (next.length === node.refImages.length) return;
+    node.refImages = next;
+    this.updatedAt = Date.now();
+    this.dirty = true;
+    this.notify();
+  }
+
   /** 合并更新节点字段（params 需用 updateNodeParams） */
   updateNode(id: string, patch: Partial<FlowNode>): void {
     const node = this.getNode(id);
@@ -112,6 +154,7 @@ export class FlowState {
       title: def.defaultTitle,
       params: { ...def.defaultParams },
       imageUrl: null,
+      refImages: [],
       error: null,
       lastRunAt: null,
       ...extra,
@@ -150,14 +193,29 @@ export class FlowState {
     return edge;
   }
 
-  /** 校验连线是否可建：返回 null=可建，否则为拒绝原因（手动连线 P0） */
+  /** 校验连线是否可建：返回 null=可建，否则为拒绝原因（手动连线 P0；唯一连线校验入口） */
   canConnect(from: string, to: string): string | null {
     if (!this.getNode(from) || !this.getNode(to)) return '节点不存在';
     if (from === to) return '不能连接自己';
     if (this.edges.some(e => e.from === from && e.to === to)) return '已有相同连线';
-    const toNode = this.getNode(to);
-    if (toNode && toNode.type === 'product-image') return '产品图是起点，不能作为下游';
+    if (this._wouldCycle(from, to)) return '不能形成循环';
     return null;
+  }
+
+  /**
+   * 防环：新增 from→to 若成环，当且仅当 to 已是 from 的祖先（从 to 沿下游边 BFS 可到达 from）。
+   */
+  private _wouldCycle(from: string, to: string): boolean {
+    const seen = new Set<string>();
+    const queue: string[] = [to];
+    while (queue.length > 0) {
+      const cur = queue.shift()!;
+      if (cur === from) return true;
+      if (seen.has(cur)) continue;
+      seen.add(cur);
+      this.getDownstreams(cur).forEach(d => { if (!seen.has(d.id)) queue.push(d.id); });
+    }
+    return false;
   }
 
   /** 校验后连线：返回 ok/error（供 UI 直接 toast 提示） */
@@ -169,9 +227,8 @@ export class FlowState {
   }
 
   /**
-   * 在连线中间插入新 style-transfer 节点（中点 + 号升级，手动连线 P0）：
-   * 原 from → 新节点 → 原 to；新节点 status=idle、参数用注册表默认值。
-   * 若原上游是产品图，新节点参考图由 buildOptions 自动取上游图，无需额外赋值。
+   * 在连线中间插入新「生成节点」（中点 + 号升级，手动连线 P0）：
+   * 原 from → 新节点 → 原 to；新节点 status=idle、参数用注册表默认值，模型由调用方回填。
    */
   insertStep(edgeId: string): FlowNode | null {
     const edge = this.edges.find(e => e.id === edgeId);
@@ -179,7 +236,6 @@ export class FlowState {
     const from = this.getNode(edge.from);
     const to = this.getNode(edge.to);
     if (!from || !to) return null;
-    if (to.type === 'product-image') return null; // 产品图不能作为下游（异常连线防御）
 
     const fromX = from.x + CARD_W;
     const fromY = from.y + (CARD_W / from.ratio) / 2;
@@ -188,12 +244,12 @@ export class FlowState {
     const midX = (fromX + toX) / 2;
     const midY = (fromY + toY) / 2;
 
-    const def = nodeRegistry.get('style-transfer');
+    const def = nodeRegistry.get('image-gen');
     const newHeight = CARD_W / def.defaultRatio;
 
     // 断开原连线并重连
     this.edges = this.edges.filter(e => e.id !== edgeId);
-    const node = this.addNode('style-transfer', midX - CARD_W / 2, midY - newHeight / 2);
+    const node = this.addNode('image-gen', midX - CARD_W / 2, midY - newHeight / 2);
     this.edges.push({ id: uid('edge'), from: edge.from, to: node.id });
     this.edges.push({ id: uid('edge'), from: node.id, to: edge.to });
     this.updatedAt = Date.now();
@@ -244,6 +300,7 @@ export class FlowState {
       ...n,
       params: { ...(n.params || {}) },
       imageUrl: n.imageUrl ?? null,
+      refImages: Array.isArray(n.refImages) ? n.refImages : [],
       error: n.error ?? null,
       lastRunAt: n.lastRunAt ?? null,
     }));

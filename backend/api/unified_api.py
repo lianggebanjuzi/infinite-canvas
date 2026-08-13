@@ -14,7 +14,10 @@ import time
 import threading
 import tempfile
 import base64 as b64lib
+import io
 import os
+
+from PIL import Image
 
 from backend.api.errors import (
     AppError, APIKeyError, RateLimitError,
@@ -23,6 +26,7 @@ from backend.api.errors import (
 )
 from backend.api.gemini_compat import (
     extract_image_urls_from_text,
+    nearest_aspect_ratio,
     normalize_gemini_aspect_ratio,
     normalize_gemini_image_size,
 )
@@ -149,6 +153,9 @@ class UnifiedAPIRouter:
         if not provider:
             raise AppError(503, "没有可用的对话模型，请先在设置中配置")
 
+        if not (provider.get('api_url') or '').strip() or not (provider.get('api_key') or '').strip():
+            raise AppError(503, f"供应商「{provider.get('name', '')}」尚未填写 API 地址或密钥，请到设置中补充")
+
         api_url   = provider['api_url'].rstrip('/')
         api_key   = provider['api_key']
         use_proxy = provider.get('use_proxy', True)
@@ -270,6 +277,9 @@ class UnifiedAPIRouter:
         provider, model_entry = self._resolve_drawing_model(options.get('model'))
         if not provider:
             raise AppError(503, "没有可用的图片模型，请先在设置中配置")
+
+        if not (provider.get('api_url') or '').strip() or not (provider.get('api_key') or '').strip():
+            raise AppError(503, f"供应商「{provider.get('name', '')}」尚未填写 API 地址或密钥，请到设置中补充后再生成")
 
         api_url   = provider['api_url'].rstrip('/')
         api_key   = provider['api_key']
@@ -522,6 +532,22 @@ class UnifiedAPIRouter:
 
         raise ModelNotSupportedError(model_id)
 
+    def _infer_aspect_from_ref(self, data_url):
+        """
+        从参考图 data URL 解码出宽高，映射到 Gemini 支持的最近宽高比。
+        任何异常（无有效图片、解码失败等）都返回 None。
+        """
+        try:
+            if not isinstance(data_url, str) or ',' not in data_url:
+                return None
+            encoded = data_url.split(',', 1)[1]
+            raw = b64lib.b64decode(encoded)
+            with Image.open(io.BytesIO(raw)) as im:
+                width, height = im.size
+            return nearest_aspect_ratio(width, height)
+        except Exception:
+            return None
+
     def _build_gemini_payload(self, api_url, model_id, prompt, options):
         """构建 Gemini 原生格式 payload"""
         parts = []
@@ -533,7 +559,7 @@ class UnifiedAPIRouter:
         for img_data in ref_images:
             mime_type = img_data.split(';')[0].split(':')[1]
             base64_data = img_data.split(',')[1]
-            parts.append({"inline_data": {"mime_type": mime_type, "data": base64_data}})
+            parts.append({"inlineData": {"mimeType": mime_type, "data": base64_data}})
 
         parts.append({"text": prompt})
 
@@ -543,6 +569,9 @@ class UnifiedAPIRouter:
         image_size = normalize_gemini_image_size(_RESOLUTION_MAP.get(resolution, '1K'))
 
         aspect_ratio = normalize_gemini_aspect_ratio(options.get('aspectRatio', 'Auto'))
+
+        if aspect_ratio is None and ref_images:
+            aspect_ratio = self._infer_aspect_from_ref(ref_images[0])
 
         image_config = {"imageSize": image_size}
         if aspect_ratio is not None:
@@ -563,7 +592,7 @@ class UnifiedAPIRouter:
                 pass
 
         payload = {
-            "contents": [{"parts": parts}],
+            "contents": [{"role": "user", "parts": parts}],
             "generationConfig": gen_config,
         }
 
