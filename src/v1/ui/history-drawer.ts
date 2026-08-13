@@ -30,11 +30,6 @@ class HistoryDrawer {
     if (!this.open) this.openDrawer(true);
   }
 
-  clear(): void {
-    this.items = [];
-    this.render();
-  }
-
   toggle(): void {
     this.openDrawer(!this.open);
   }

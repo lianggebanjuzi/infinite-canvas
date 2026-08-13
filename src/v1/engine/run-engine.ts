@@ -19,6 +19,35 @@ const ctx: FlowContext = {
   getImageModels: fetchImageModels,
 };
 
+/**
+ * 加载图片并返回实际宽高比（naturalWidth / naturalHeight）。
+ * 后端 image_url 不附带尺寸信息，需前端加载图片获取；加载失败/尺寸无效返回 null。
+ * 带 10s 超时保护，避免加载异常阻塞状态回写。
+ */
+function loadImageRatio(url: string): Promise<number | null> {
+  return new Promise(resolve => {
+    const img = new Image();
+    let settled = false;
+    const timer = setTimeout(() => finish(null), 10000); // 10s 超时保护
+    const finish = (ratio: number | null): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      img.onload = null;
+      img.onerror = null;
+      resolve(ratio);
+    };
+    img.onload = () => {
+      const ratio = img.naturalWidth > 0 && img.naturalHeight > 0
+        ? img.naturalWidth / img.naturalHeight
+        : null;
+      finish(ratio);
+    };
+    img.onerror = () => finish(null);
+    img.src = url;
+  });
+}
+
 class RunEngine {
   /** 全局串行：同一时间只跑一个任务（避免 pywebview 轮询互相干扰） */
   private busy = false;
@@ -53,7 +82,10 @@ class RunEngine {
       const result = await pollTask(created.task_id);
       linkView.setNodeFlowing(nodeId, false);
       if (result.success && result.imageUrl) {
-        flowState.setNodeImage(nodeId, result.imageUrl, undefined);
+        // 先加载图片获取实际宽高比（后端 image_url 不带尺寸信息），再一并回填；
+        // 加载失败/超时返回 null → 传 undefined，node.ratio 保持原值（沿用默认 3/4 或用户之前设置）
+        const ratio = await loadImageRatio(result.imageUrl);
+        flowState.setNodeImage(nodeId, result.imageUrl, ratio ?? undefined);
         flowState.updateNode(nodeId, { status: 'done', error: null, lastRunAt: Date.now() });
         historyDrawer.addImage(result.imageUrl);
         dirty.markUpstreamChanged(nodeId); // 若有下游 → 标 stale

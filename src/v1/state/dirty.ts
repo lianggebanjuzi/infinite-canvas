@@ -36,16 +36,6 @@ class DirtyMarker {
     flowState.dirty = true;
     flowState.notify();
   }
-
-  /** 清除单节点 stale（回到 idle，等待运行） */
-  clearStale(nodeId: string): void {
-    const node = flowState.getNode(nodeId);
-    if (!node || node.status !== 'stale') return;
-    node.status = 'idle';
-    flowState.updatedAt = Date.now();
-    flowState.dirty = true;
-    flowState.notify();
-  }
 }
 
 export const dirty = new DirtyMarker();

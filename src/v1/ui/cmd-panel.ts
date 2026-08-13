@@ -228,7 +228,7 @@ class CmdPanel {
     });
   }
 
-  /** 参考图区：展示 getReferenceImages(id)（本节点 refImages + 上游 imageUrl），本节点 refImages 支持删除 */
+  /** 参考图区：展示 getReferenceImages(id)（本节点 refImages + 上游可作参考图的图），本节点 refImages 支持删除 */
   private _renderRefs(): void {
     const node = selection.single();
     if (!node) { this.refs.style.display = 'none'; return; }

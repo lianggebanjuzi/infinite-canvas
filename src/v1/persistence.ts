@@ -53,8 +53,6 @@ function migrateNode(raw: unknown): FlowNode | null {
 class Persistence {
   private lastPath: string | null = null;
 
-  get path(): string | null { return this.lastPath; }
-
   /** 收集当前画布为 FlowProject */
   collect(): FlowProject {
     return {

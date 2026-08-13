@@ -150,15 +150,6 @@ class LinkView {
     showToast('已插入新步骤');
   }
 
-  /** 开关连线流光（上游 → 目标） */
-  setFlowing(from: string, to: string, on: boolean): void {
-    const edge = flowState.edges.find(e => e.from === from && e.to === to);
-    if (!edge) return;
-    if (on) this.flowing.add(edge.id); else this.flowing.delete(edge.id);
-    const path = this.paths.get(edge.id);
-    applyLinkFlowing(path ?? null, on);
-  }
-
   /** 运行中的节点：上游所有入边亮流光 */
   setNodeFlowing(nodeId: string, on: boolean): void {
     flowState.getEdgesTo(nodeId).forEach(edge => {

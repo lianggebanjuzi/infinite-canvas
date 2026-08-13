@@ -210,10 +210,11 @@ class Interactions {
 
     if (d.mode === 'node') {
       if (!d.moved) {
-        // 单击：空卡（无输出图）→ 打开文件选择追加参考图
+        // 单击：仅"完全没有任何图"的卡（无输出图且无参考图占位）→ 打开文件选择追加参考图；
+        // 已有输出图或参考图占位时单击只选中、不弹框（查看大图走 dblclick / 悬浮展开按钮）
         if (d.nodeId) {
           const n = flowState.getNode(d.nodeId);
-          if (n && !n.imageUrl) {
+          if (n && !n.imageUrl && (!n.refImages || n.refImages.length === 0)) {
             this.openFilePickerForRef(n.id);
           }
         }

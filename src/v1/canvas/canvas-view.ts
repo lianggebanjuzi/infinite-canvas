@@ -75,9 +75,8 @@ class CanvasView {
       this.view.panX = mx - (mx - panX) * (ns / scale);
       this.view.panY = my - (my - panY) * (ns / scale);
       this.view.scale = ns;
+      // 缩放只改 #canvas 的 transform，卡片/连线均用世界坐标自动跟随，无需重建 DOM
       this.applyView();
-      cardView.renderAll();
-      linkView.renderAll();
     }, { passive: false });
 
     // 平移 mousedown 语义统一在 interactions.ts 处理（中键平移），此处只挂全局 move/up

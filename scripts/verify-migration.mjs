@@ -11,7 +11,8 @@ const check = (condition, message) => {
 const sourceIndex = read('src/index.html');
 const mainEntry = read('src/main.ts');
 const pythonEntry = read('main.py');
-const storage = read('src/core/storage.ts');
+// 旧存储层已随 P1 归档（legacy-src），校验仍指向归档副本以保留历史兼容性检查
+const storage = read('archive/legacy-src/src/core/storage.ts');
 
 check(
   /<script\s+type="module"\s+src="\.\/main\.ts"><\/script>/.test(sourceIndex),

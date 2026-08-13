@@ -15,10 +15,6 @@ class NodeRegistry {
     return def;
   }
 
-  has(type: NodeType): boolean {
-    return this.defs.has(type);
-  }
-
   list(): NodeDefinition[] {
     return [...this.defs.values()];
   }

@@ -3,11 +3,28 @@
 // 唯一允许拼接 backend options 的模块（nodes/* 只声明定义，engine 负责调用）
 
 import { API } from '../utils/api';
-import { _getImageModels } from '../cards/ai-draw-api';
 
-/** 拉取可用的绘图模型列表（复用 ai-draw-api 核心资产） */
-export function fetchImageModels(): Promise<Array<{ id: string; name: string }>> {
-  return _getImageModels();
+/** 拉取可用的绘图模型列表（原 src/cards/ai-draw-api._getImageModels 内联：API.loadProviders + enabled/drawing 过滤 + `${providerId}:${modelId}` 拼接） */
+export async function fetchImageModels(): Promise<Array<{ id: string; name: string }>> {
+  try {
+    const result = (await API.loadProviders()) as BackendProviderList;
+    const providers = result?.providers || [];
+    const models: Array<{ id: string; name: string }> = [];
+
+    providers.forEach(p => {
+      if (!p.enabled) return;
+      const displayName = p.short_name || p.name.slice(0, 6);
+      (p.models || [])
+        .filter(m => m.enabled !== false && m.type === 'drawing')
+        .forEach(m => {
+          models.push({ id: `${p.id}:${m.id}`, name: `${displayName} - ${m.name}` });
+        });
+    });
+
+    return models.length ? models : [{ id: '', name: '未找到绘图模型，请先在设置中配置' }];
+  } catch {
+    return [{ id: '', name: '加载失败' }];
+  }
 }
 
 const DEFAULT_MODEL_KEY = 'icv_default_model';
@@ -46,11 +63,6 @@ export const Backend = {
     return (await API.unifiedGetTaskResult(taskId)) as BackendTaskResult;
   },
 
-  // ── 图片落盘 ──
-  async saveImageToLocal(imageData: string): Promise<BackendSaveImageResult> {
-    return (await API.saveImageToLocal(imageData)) as BackendSaveImageResult;
-  },
-
   // ── 项目 ──
   async saveProject(data: unknown): Promise<BackendProjectResult> {
     return (await API.saveProject(data)) as BackendProjectResult;
@@ -62,14 +74,6 @@ export const Backend = {
 
   async openProject(): Promise<BackendProjectResult> {
     return (await API.openProject()) as BackendProjectResult;
-  },
-
-  async loadProject(path: string): Promise<BackendProjectResult> {
-    return (await API.loadProject(path)) as BackendProjectResult;
-  },
-
-  async getCurrentProjectPath(): Promise<{ path?: string }> {
-    return (await API.getCurrentProjectPath()) as { path?: string };
   },
 
   // ── 供应商/设置 ──
@@ -103,19 +107,7 @@ export const Backend = {
     return await API.testConnection(apiUrl, apiKey);
   },
 
-  async addChatModel(providerId: string, modelId: string, modelName: string): Promise<{ status: string; message?: string }> {
-    return await API.addChatModel(providerId, modelId, modelName);
-  },
-
   async removeModel(providerId: string, modelId: string): Promise<{ status: string; message?: string }> {
     return await API.removeModel(providerId, modelId);
-  },
-
-  async loadSettings(): Promise<BackendSettings> {
-    return (await API.loadSettings()) as BackendSettings;
-  },
-
-  async saveSettings(settings: Record<string, unknown>): Promise<{ status: string }> {
-    return await API.saveSettings(settings);
   },
 };

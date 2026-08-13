@@ -22,7 +22,7 @@ interface FlowNode {
   title: string;             // 左上悬浮标签
   params: Record<string, unknown>;  // 节点参数（见 StyleTransferParams）
   imageUrl: string | null;   // 本节点输出图（卡片主视觉），与 refImages 严格分离
-  refImages: string[];       // 用户主动挂载的参考图（默认 []；上游 imageUrl 运行时派生）
+  refImages: string[];       // 用户主动挂载的参考图（默认 []；上游可作参考图的图由 getReferenceImages 派生）
   error: string | null;      // fail 原因（红点 hover/点击展示）
   lastRunAt: number | null;
 }
@@ -57,7 +57,7 @@ interface FlowProject {
 interface FlowContext {
   getUpstreams(nodeId: string): FlowNode[];
   getDownstreams(nodeId: string): FlowNode[];
-  getReferenceImages(nodeId: string): string[]; // refImages ∪ 上游 imageUrl（去重保序）
+  getReferenceImages(nodeId: string): string[]; // refImages ∪ 上游可作参考图的图（imageUrl 优先，无则回退其 refImages；去重保序）
   getImageModels(): Promise<Array<{ id: string; name: string }>>;
 }
 

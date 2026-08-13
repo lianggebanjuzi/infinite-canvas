@@ -69,8 +69,9 @@ export class FlowState {
   }
 
   /**
-   * 参考图合并唯一入口：本节点 refImages（用户主动挂载，在前）+ 上游 imageUrl（运行时派生，在后），
-   * 去重保序。卡片缩略行 / buildOptions / 指令面板三处一律调用本方法，禁止各写一份。
+   * 参考图合并唯一入口：本节点 refImages（用户主动挂载，在前）+ 上游可作参考图的图（imageUrl 优先、
+   * 无输出图时回退其 refImages，可为多张；在后），去重保序。仍只取直接上游一层，不做 BFS 传播。
+   * 卡片缩略行 / buildOptions / 指令面板三处一律调用本方法，禁止各写一份。
    */
   getReferenceImages(id: string): string[] {
     const node = this.getNode(id);
@@ -81,7 +82,11 @@ export class FlowState {
       if (url && !seen.has(url)) { seen.add(url); result.push(url); }
     });
     this.getUpstreams(id).forEach(u => {
-      if (u.imageUrl && !seen.has(u.imageUrl)) { seen.add(u.imageUrl); result.push(u.imageUrl); }
+      // 上游贡献 = 该节点的输出图 imageUrl；尚未生成输出图时回退其用户挂载的 refImages（展开全部）。
+      const upstreamRefs = u.imageUrl ? [u.imageUrl] : (u.refImages || []);
+      upstreamRefs.forEach(url => {
+        if (url && !seen.has(url)) { seen.add(url); result.push(url); }
+      });
     });
     return result;
   }
@@ -187,6 +192,17 @@ export class FlowState {
     if (this.edges.some(e => e.from === from && e.to === to)) return null;
     const edge: FlowEdge = { id: uid('edge'), from, to };
     this.edges.push(edge);
+
+    // 连线后数据流已变化：to 及其所有下游子孙的结果不可信 → 标 stale（与 removeEdge 口径一致：
+    // idle/done 转 stale，run 中不覆盖，stale 保持 stale）
+    const toNode = this.getNode(to);
+    if (toNode) {
+      const affected = [toNode, ...this.getAllDownstreams(to)];
+      affected.forEach(n => {
+        if (n.status !== 'run' && n.status !== 'stale') n.status = 'stale';
+      });
+    }
+
     this.updatedAt = Date.now();
     this.dirty = true;
     this.notify();
@@ -282,17 +298,6 @@ export class FlowState {
     this.notify();
   }
 
-  /** 把 from 的连线出口改接到新节点（A4：拖入新建输入后重连） */
-  redirectEdge(from: string, oldTo: string, newTo: string): void {
-    const edge = this.edges.find(e => e.from === from && e.to === oldTo);
-    if (edge) {
-      edge.to = newTo;
-      this.updatedAt = Date.now();
-      this.dirty = true;
-      this.notify();
-    }
-  }
-
   // ───────────────────────── 项目 ─────────────────────────
   /** 用新项目整体替换（restore/新建模板） */
   replaceAll(project: FlowProject): void {
@@ -313,18 +318,6 @@ export class FlowState {
     this.createdAt = project.createdAt || Date.now();
     this.updatedAt = project.updatedAt || Date.now();
     this.selectedIds.clear();
-    this.dirty = false;
-    this.notify();
-  }
-
-  clear(): void {
-    this.nodes = [];
-    this.edges = [];
-    this.selectedIds.clear();
-    this.projectName = '未命名项目';
-    this.canvas = { scale: 1, panX: 60, panY: 40 };
-    this.createdAt = Date.now();
-    this.updatedAt = Date.now();
     this.dirty = false;
     this.notify();
   }

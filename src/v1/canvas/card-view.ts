@@ -11,6 +11,8 @@ const ICON_EXPAND = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none"
 class CardView {
   private container: HTMLElement | null = null;
   private els = new Map<string, HTMLElement>();
+  /** 内容指纹缓存：主图/缩略行/标题/状态变化时才重建 img.innerHTML（避免高频调用反复重建大图 DOM） */
+  private _contentFingerprint = new Map<string, { mainSrc: string; refStrip: string; title: string; status: string }>();
 
   init(): void {
     this.container = document.getElementById('canvas');
@@ -34,6 +36,7 @@ class CardView {
       if (!ids.has(id)) {
         el.remove();
         this.els.delete(id);
+        this._contentFingerprint.delete(id);
       }
     });
 
@@ -74,16 +77,31 @@ class CardView {
 
     const img = el.querySelector('.pcard-img') as HTMLElement;
     if (img) {
-      img.style.height = this.cardHeight(node) + 'px';
-      // 底部叠加参考图缩略行（refImages ∪ 上游 imageUrl，动态增删，叠加不改变卡片尺寸）
-      const refStrip = this._refStrip(node);
-      img.innerHTML = mainSrc
-        ? `<div class="ph" style="background-image:url('${escapeUrl(mainSrc)}')"></div><div class="scan"></div>${refStrip}`
-        : `<div class="ph"><div class="ph-empty">${emptyContent()}</div></div><div class="scan"></div>${refStrip}`;
+      img.style.height = this.cardHeight(node) + 'px'; // 高度随 ratio 每次照常更新（开销极小）
     }
 
-    const tag = el.querySelector('.tag-text') as HTMLElement | null;
-    if (tag) tag.textContent = node.title || '节点';
+    // 内容指纹：仅当主图/缩略行/标题/状态变化时才重建 img.innerHTML 与标签文本。
+    // 位置/选中态/状态视觉每次照常更新；避免滚轮缩放等高频调用反复重建大图 DOM（dataURL 大字符串）。
+    const refStrip = this._refStrip(node);
+    const title = node.title || '节点';
+    const fp = { mainSrc, refStrip, title, status: node.status };
+    const prev = this._contentFingerprint.get(node.id);
+    const changed = !prev
+      || prev.mainSrc !== fp.mainSrc
+      || prev.refStrip !== fp.refStrip
+      || prev.title !== fp.title
+      || prev.status !== fp.status;
+    if (changed) {
+      this._contentFingerprint.set(node.id, fp);
+      if (img) {
+        // 底部叠加参考图缩略行（本节点 refImages ∪ 上游可作参考图的图，动态增删，叠加不改变卡片尺寸）
+        img.innerHTML = mainSrc
+          ? `<div class="ph" style="background-image:url('${escapeUrl(mainSrc)}')"></div><div class="scan"></div>${refStrip}`
+          : `<div class="ph"><div class="ph-empty">${emptyContent()}</div></div><div class="scan"></div>${refStrip}`;
+      }
+      const tag = el.querySelector('.tag-text') as HTMLElement | null;
+      if (tag) tag.textContent = title;
+    }
 
     // 状态视觉 + 红点原因（hover title）
     applyCardStatus(el, node.status);
@@ -106,7 +124,7 @@ class CardView {
     }
   }
 
-  /** 卡片底部参考图缩略行：展示 getReferenceImages(id)（本节点 refImages + 上游 imageUrl） */
+  /** 卡片底部参考图缩略行：展示 getReferenceImages(id)（本节点 refImages + 上游可作参考图的图） */
   private _refStrip(node: FlowNode): string {
     // 当主视觉正在用 refImages[0] 占位（即无输出图）时，缩略行排除这张占位图，避免重复显示
     const placeholder = node.imageUrl ? null : (Array.isArray(node.refImages) ? node.refImages[0] : null) || null;

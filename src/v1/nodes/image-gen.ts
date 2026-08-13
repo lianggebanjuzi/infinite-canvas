@@ -1,5 +1,5 @@
 // src/v1/nodes/image-gen.ts
-// 统一「生成节点」定义：多张参考图（refImages ∪ 上游 imageUrl）+ 提示词 → 生成一张新图
+// 统一「生成节点」定义：多张参考图（refImages ∪ 上游可作参考图的图）+ 提示词 → 生成一张新图
 // 参考图 0~N 可选（0 张时为纯文生图），参考图合并统一走 FlowContext.getReferenceImages
 
 import { nodeRegistry } from './node-registry';

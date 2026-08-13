@@ -158,7 +158,7 @@ body { font-family: var(--font); background: var(--bg-app); color: var(--text-1)
 .pcard:hover .pcard-act { opacity:1; }
 .pcard-act:hover { background: #FFFDFA; }
 
-/* 卡片：底部参考图缩略行（refImages ∪ 上游 imageUrl，动态增删，叠加不改变卡片尺寸） */
+/* 卡片：底部参考图缩略行（本节点 refImages ∪ 上游可作参考图的图，动态增删，叠加不改变卡片尺寸） */
 .pcard-upstreams {
   position:absolute; left:6px; right:6px; bottom:6px;
   display:flex; gap:4px; flex-wrap:wrap; z-index:3; pointer-events:none;
