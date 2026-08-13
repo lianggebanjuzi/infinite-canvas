@@ -43,6 +43,12 @@ const RESULT_GAP_X = 48;
 /** 结果卡纵向间距（卡片高之外额外 28px） */
 const RESULT_GAP_Y = 28;
 
+/** 结果卡布局游标（批次共享）：x 固定，y 按已放置卡片的累计底部递增，保证并发下任意比例组合不重叠 */
+interface ResultLayout {
+  x: number;
+  cursorY: number;
+}
+
 /**
  * 加载图片并返回实际宽高比（naturalWidth / naturalHeight）。
  * 后端 image_url 不附带尺寸信息，需前端加载图片获取；加载失败/尺寸无效返回 null。
@@ -134,9 +140,11 @@ class RunEngine {
     this._createdCardIds.clear();
     flowState.notify(); // 面板立即显示「生成中 0/total」
 
-    // 5. 并发 N 个 worker（Promise.allSettled：互不阻塞，任一失败不影响兄弟）
+    // 5. 并发 N 个 worker（Promise.allSettled：互不阻塞，任一失败不影响兄弟）。
+    //    布局游标在批次开始时快照生成节点位置，之后只随已放置卡片累计，完成顺序不定也不重叠。
+    const layout: ResultLayout = { x: node.x + CARD_W + RESULT_GAP_X, cursorY: node.y };
     const jobs = Array.from({ length: total }, (_, i) =>
-      this.runOneWorker(nodeId, prompt, options, i, progress));
+      this.runOneWorker(nodeId, prompt, options, layout, progress));
     await Promise.allSettled(jobs);
 
     linkView.setNodeFlowing(nodeId, false);
@@ -167,7 +175,7 @@ class RunEngine {
     genId: string,
     prompt: string,
     options: Record<string, unknown>,
-    slotIndex: number,
+    layout: ResultLayout,
     progress: BatchProgress,
   ): Promise<void> {
     try {
@@ -178,7 +186,7 @@ class RunEngine {
       const result = await pollTask(created.task_id);
       if (result.success && result.imageUrl) {
         // 出一张建一张（不等兄弟）：立即创建结果卡并自动连线
-        const card = await this.createResultCard(genId, result.imageUrl, slotIndex);
+        const card = await this.createResultCard(genId, result.imageUrl, layout);
         this._createdCardIds.add(card.id);
         progress.done += 1;
       } else {
@@ -193,20 +201,20 @@ class RunEngine {
   }
 
   /**
-   * 创建一张结果卡（image-result）：生成节点右侧纵向排列，第 i 张
-   * x=gen.x+CARD_W+48，y=gen.y + i*(cardH+28)；自动连线（suppressStale）；入历史图库。
-   * 槽位 slotIndex 固定（0..N-1），并发完成顺序不定也不重叠。
+   * 创建一张结果卡（image-result）：x=批次快照的 gen.x+CARD_W+48，y=累计底部游标 cursorY
+   * （每建一张 cursorY 递增该卡高+28，从下往上紧密排布，任何比例组合都不重叠）；自动连线（suppressStale）；入历史图库。
+   * 原子占用：读取 cursorY 与写回之间无 await 间隙，并发 worker 不会读到同一 y。
    */
-  private async createResultCard(genId: string, imageUrl: string, slotIndex: number): Promise<FlowNode> {
+  private async createResultCard(genId: string, imageUrl: string, layout: ResultLayout): Promise<FlowNode> {
     const gen = flowState.getNode(genId);
     if (!gen) throw new Error('生成节点已删除，结果卡创建失败');
     const ratio = await loadImageRatio(imageUrl);
     const r = ratio && ratio > 0 ? ratio : 3 / 4;
     const cardH = Math.round(CARD_W / r);
-    const x = gen.x + CARD_W + RESULT_GAP_X;
-    const y = gen.y + slotIndex * (cardH + RESULT_GAP_Y);
+    const y = layout.cursorY;
+    layout.cursorY = y + cardH + RESULT_GAP_Y;
 
-    const node = flowState.addNode('image-result', x, y, {
+    const node = flowState.addNode('image-result', layout.x, y, {
       parentId: genId,
       imageUrl,
       ratio: r,
