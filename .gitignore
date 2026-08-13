@@ -22,10 +22,14 @@ __pycache__/
 .cursor/
 .lingma/
 .reasonix/
-.workbuddy/
 .codegraph/
 .agents/
 .cursorrules
+
+# WorkBuddy 本地状态：默认排除，但放行项目开发日志（跨设备同步）
+.workbuddy/*
+!.workbuddy/memory/
+!.workbuddy/memory/**
 
 # Local archives and generated logs
 *.rar
