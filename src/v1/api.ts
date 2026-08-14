@@ -3,6 +3,7 @@
 // 唯一允许拼接 backend options 的模块（nodes/* 只声明定义，engine 负责调用）
 
 import { API } from '../utils/api';
+import { DEFAULT_CHAT_MODEL_KEY } from './nodes/text-gen';
 
 /** 拉取可用的绘图模型列表（原 src/cards/ai-draw-api._getImageModels 内联：API.loadProviders + enabled/drawing 过滤 + `${providerId}:${modelId}` 拼接） */
 export async function fetchImageModels(): Promise<Array<{ id: string; name: string }>> {
@@ -27,6 +28,29 @@ export async function fetchImageModels(): Promise<Array<{ id: string; name: stri
   }
 }
 
+/** 拉取可用的对话模型列表（text-gen 专用：与 fetchImageModels 同构，过滤 type==='chat'） */
+export async function fetchChatModels(): Promise<Array<{ id: string; name: string }>> {
+  try {
+    const result = (await API.loadProviders()) as BackendProviderList;
+    const providers = result?.providers || [];
+    const models: Array<{ id: string; name: string }> = [];
+
+    providers.forEach(p => {
+      if (!p.enabled) return;
+      const displayName = p.short_name || p.name.slice(0, 6);
+      (p.models || [])
+        .filter(m => m.enabled !== false && m.type === 'chat')
+        .forEach(m => {
+          models.push({ id: `${p.id}:${m.id}`, name: `${displayName} - ${m.name}` });
+        });
+    });
+
+    return models.length ? models : [{ id: '', name: '未找到对话模型，请先在设置中配置' }];
+  } catch {
+    return [{ id: '', name: '加载失败' }];
+  }
+}
+
 const DEFAULT_MODEL_KEY = 'icv_default_model';
 
 /** 解析默认绘图模型：优先 localStorage，否则取第一个可用模型并记忆 */
@@ -36,6 +60,18 @@ export async function resolveDefaultModel(): Promise<string> {
   const models = await fetchImageModels();
   if (models.length > 0 && models[0].id) {
     localStorage.setItem(DEFAULT_MODEL_KEY, models[0].id);
+    return models[0].id;
+  }
+  return '';
+}
+
+/** 解析默认对话模型（text-gen 专用）：优先 localStorage（icv_default_chat_model），否则取第一个可用 chat 模型并记忆 */
+export async function resolveDefaultChatModel(): Promise<string> {
+  const saved = localStorage.getItem(DEFAULT_CHAT_MODEL_KEY);
+  if (saved) return saved;
+  const models = await fetchChatModels();
+  if (models.length > 0 && models[0].id) {
+    localStorage.setItem(DEFAULT_CHAT_MODEL_KEY, models[0].id);
     return models[0].id;
   }
   return '';
@@ -61,6 +97,33 @@ export const Backend = {
 
   async getTaskResult(taskId: string): Promise<BackendTaskResult> {
     return (await API.unifiedGetTaskResult(taskId)) as BackendTaskResult;
+  },
+
+  // ── 对话链路（text-gen 专用：同步阻塞，无 task 轮询） ──
+  /**
+   * 统一对话（chat_v2）：同步调用，直接返回反推文本。
+   * 成功响应 {success:true, text}；失败响应 {success:false, error_code, message} 抛 Error(message)。
+   * images 只传 data:image 前缀（后端 chat_v2 会静默丢弃其它引用，前端防御性过滤）。
+   */
+  async chatV2(userInput: string, options: Record<string, unknown> = {}): Promise<{ success: boolean; text: string }> {
+    try {
+      const safeOptions: Record<string, unknown> = { ...options };
+      if (Array.isArray(safeOptions.images)) {
+        safeOptions.images = (safeOptions.images as unknown[]).filter(
+          img => typeof img === 'string' && img.startsWith('data:image'),
+        );
+      }
+      const res = await API.unifiedChatV2(userInput, safeOptions);
+      if (res && (res as { success?: boolean }).success === false) {
+        const err = res as { error_code?: number; message?: string; error?: string };
+        throw new Error(err.message || err.error || '对话请求失败');
+      }
+      const text = ((res as { text?: unknown } | undefined)?.text as string) || '';
+      return { success: true, text };
+    } catch (e) {
+      const err = e as { error_code?: number; message?: string; error?: string };
+      throw new Error(err.message || err.error || (e as Error).message || '对话请求失败');
+    }
   },
 
   // ── 项目 ──

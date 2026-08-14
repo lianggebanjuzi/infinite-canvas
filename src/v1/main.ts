@@ -11,6 +11,8 @@ import './styles/app.css';
 import './nodes/image-gen';
 // 结果卡：只读结果载体（引擎自动创建，不进新建菜单）；必须在 image-gen 之后注册（菜单过滤依赖 creatable）
 import './nodes/image-result';
+// 文本反推：chat 模型反推参考图提示词，输出文本（outputText）；同步调 chat_v2
+import './nodes/text-gen';
 
 import { flowState } from './state/flow-state';
 import { selection } from './state/selection';
@@ -25,7 +27,7 @@ import { bottomBar } from './ui/bottom-bar';
 // import { emptyState } from './ui/empty-state';
 import { settingsPanel } from './ui/settings-panel';
 import { persistence } from './persistence';
-import { resolveDefaultModel } from './api';
+import { resolveDefaultModel, resolveDefaultChatModel } from './api';
 
 // ───────────────────────── pywebview 就绪等待 ─────────────────────────
 function waitForPywebview(): Promise<void> {
@@ -82,12 +84,27 @@ function bindKeyboard(): void {
 }
 
 // ───────────────────────── 为生成节点回填默认模型 ─────────────────────────
+// 类型感知：text-gen 回填 chat 默认模型（icv_default_chat_model），其余回填绘图默认模型（icv_default_model）
 async function fillDefaultModels(): Promise<void> {
-  const model = await resolveDefaultModel();
-  if (!model) return;
-  flowState.nodes
-    .filter(n => !(n.params.model as string | undefined))
-    .forEach(n => flowState.updateNodeParams(n.id, { model }));
+  const needsChat = flowState.nodes.some(n => n.type === 'text-gen' && !(n.params.model as string | undefined));
+  const needsDraw = flowState.nodes.some(n => n.type !== 'text-gen' && !(n.params.model as string | undefined));
+
+  if (needsChat) {
+    const chatModel = await resolveDefaultChatModel();
+    if (chatModel) {
+      flowState.nodes
+        .filter(n => n.type === 'text-gen' && !(n.params.model as string | undefined))
+        .forEach(n => flowState.updateNodeParams(n.id, { model: chatModel }));
+    }
+  }
+  if (needsDraw) {
+    const drawModel = await resolveDefaultModel();
+    if (drawModel) {
+      flowState.nodes
+        .filter(n => n.type !== 'text-gen' && !(n.params.model as string | undefined))
+        .forEach(n => flowState.updateNodeParams(n.id, { model: drawModel }));
+    }
+  }
 }
 
 // ───────────────────────── 启动 ─────────────────────────

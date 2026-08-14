@@ -105,9 +105,56 @@ class RunEngine {
 
     this.busy = true;
     try {
-      await this.runBatch(nodeId);
+      if (node.type === 'text-gen') {
+        await this.runTextGen(nodeId);
+      } else {
+        await this.runBatch(nodeId);
+      }
     } finally {
       this.busy = false;
+    }
+  }
+
+  /**
+   * 文本反推执行（text-gen 专用）：同步调 chat_v2，无批次/无轮询/无结果卡。
+   * 成功分支：写 outputText → pushTextHistory → 覆盖直接 image-gen 下游 prompt → dirty.markUpstreamChanged（stale 统一入口）→ toast。
+   * 失败/空文本：fail + error，不覆盖下游、不写历史。
+   * 前置：canRun 已通过；busy 锁已持有。
+   */
+  private async runTextGen(nodeId: string): Promise<void> {
+    const node = flowState.getNode(nodeId);
+    if (!node) return;
+
+    // 1. 启动时快照指令与 options（buildOptions 只取一次）
+    const params = node.params as unknown as TextGenParams;
+    const instruction = (params.instruction || '').trim();
+    const def = nodeRegistry.get(node.type);
+    const options = def.buildOptions(node, ctx);
+
+    // 2. 置 run + 上游连线流光
+    flowState.updateNode(nodeId, { status: 'run', error: null });
+    linkView.setNodeFlowing(nodeId, true);
+
+    try {
+      // 3. 同步阻塞调用 chat_v2
+      const res = await Backend.chatV2(instruction, options);
+      const text = (res.text || '').trim();
+      if (!text) throw new Error('反推结果为空');
+
+      // 4. 成功：写回输出文本 + 历史 + 覆盖直接 image-gen 下游 prompt + 标 stale
+      flowState.updateNode(nodeId, { status: 'done', outputText: text, error: null, lastRunAt: Date.now() });
+      flowState.pushTextHistory(nodeId, text);
+      const downstreams = flowState.getDownstreams(nodeId).filter(d => d.type === 'image-gen');
+      downstreams.forEach(d => flowState.updateNodeParams(d.id, { prompt: text })); // 覆盖动作本身不标 stale
+      dirty.markUpstreamChanged(nodeId);
+      showToast('反推成功');
+    } catch (e) {
+      // 5. 失败：fail + 原因；不覆盖下游、不写历史
+      const message = (e as Error).message || '反推失败';
+      flowState.updateNode(nodeId, { status: 'fail', error: message });
+      showToast(message, false);
+    } finally {
+      linkView.setNodeFlowing(nodeId, false);
     }
   }
 
