@@ -75,6 +75,7 @@ const { persistence } = require(`${BASE}/persistence.js`);
 const { runEngine } = require(`${BASE}/engine/run-engine.js`);
 const { Backend, fetchChatModels, fetchImageModels, resolveDefaultChatModel } = require(`${BASE}/api.js`);
 const { cmdPanel } = require(`${BASE}/ui/cmd-panel.js`);
+const { interactions } = require(`${BASE}/canvas/interactions.js`);
 
 // ───────────────────────── 用例 ─────────────────────────
 async function main() {
@@ -313,6 +314,14 @@ async function main() {
     check(shown === true, '有历史 → 列表显示');
     check(appended === 2, `渲染 2 条历史条目 (${appended})`);
     check(fakeHistoryEl.innerHTML.includes('历史反推结果'), '历史标题渲染');
+  });
+
+  await section('T04: 右键菜单候选遍历（自动含 text-gen）', () => {
+    const candidates = interactions['_newNodeCandidates']();
+    const types = candidates.map(d => d.type);
+    check(types.includes('text-gen'), `菜单候选含 text-gen (${types.join(',')})`);
+    check(types.includes('image-gen'), '菜单候选含 image-gen');
+    check(!types.includes('image-result'), '菜单候选不含 image-result（creatable=false）');
   });
 
   console.log(`\n══════════════════════════════════`);

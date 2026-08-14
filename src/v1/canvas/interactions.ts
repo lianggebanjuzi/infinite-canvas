@@ -11,7 +11,7 @@ import { cardView, openImageModal } from './card-view';
 import { linkView } from './link-view';
 import { runEngine } from '../engine/run-engine';
 import { showToast } from '../ui/toast';
-import { resolveDefaultModel } from '../api';
+import { resolveDefaultModel, resolveDefaultChatModel } from '../api';
 
 const DRAG_THRESHOLD = 3;
 
@@ -359,10 +359,18 @@ class Interactions {
       flowState.addEdge(fromId, node.id);
       showToast(`已新建「${def.label}」并连接`);
     }
-    // 模型回填（与 new-style/new-image-gen 口径一致）
-    void resolveDefaultModel().then(model => {
-      if (model && !(flowState.getNode(node.id)?.params.model)) {
-        flowState.updateNodeParams(node.id, { model });
+    this._fillDefaultModelFor(node.id);
+  }
+
+  /** 新节点默认模型回填（类型感知：text-gen → chat 默认模型，其余 → 绘图默认模型） */
+  private _fillDefaultModelFor(nodeId: string): void {
+    const node = flowState.getNode(nodeId);
+    if (!node) return;
+    const resolver = node.type === 'text-gen' ? resolveDefaultChatModel : resolveDefaultModel;
+    void resolver().then(model => {
+      const cur = flowState.getNode(nodeId);
+      if (model && cur && !(cur.params.model as string | undefined)) {
+        flowState.updateNodeParams(nodeId, { model });
       }
     });
   }
@@ -492,11 +500,7 @@ class Interactions {
         ratio: r,
       });
       selection.select(node.id);
-      void resolveDefaultModel().then(model => {
-        if (model && !(flowState.getNode(node.id)?.params.model)) {
-          flowState.updateNodeParams(node.id, { model });
-        }
-      });
+      this._fillDefaultModelFor(node.id);
       showToast('已新建生成节点');
     };
     img.onerror = () => showToast('图片加载失败', false);
@@ -647,13 +651,15 @@ class Interactions {
   }
 
   private _showCanvasMenu(x: number, y: number): void {
+    const candidates = this._newNodeCandidates();
     const menu = this._menuEl();
     menu.innerHTML = `
       <div class="ctx-hint">画布操作</div>
-      <div class="ctx-item" data-act="new-node">
-        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="m21 15-5-5L5 21"/><path d="M12 9v6M9 12h6"/></svg>
-        新建生成节点
-      </div>
+      ${candidates.map(d => `
+      <div class="ctx-item" data-act="new-node" data-node-type="${d.type}">
+        ${this._nodeTypeIcon(d.type)}
+        新建${d.label}
+      </div>`).join('')}
       <div class="ctx-sep"></div>
       <div class="ctx-item" data-act="run-selected">
         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 3l14 9-14 9V3Z"/></svg>
@@ -734,11 +740,7 @@ class Interactions {
         if (node) {
           dirty.markUpstreamChanged(node.id);
           selection.select(node.id);
-          void resolveDefaultModel().then(model => {
-            if (model && !(flowState.getNode(node.id)?.params.model)) {
-              flowState.updateNodeParams(node.id, { model });
-            }
-          });
+          this._fillDefaultModelFor(node.id);
           showToast('已插入新步骤');
         } else {
           showToast('插入步骤失败', false);
@@ -752,14 +754,15 @@ class Interactions {
         break;
       }
       case 'new-node': {
+        // 画布右键「新建」：按菜单选中类型创建（遍历 creatable candidates，自动含 text-gen）
+        const menu = this._menuEl();
+        const type = menu.dataset.newType || 'image-gen';
         const world = canvasView.toWorldCoords(window.innerWidth / 2, window.innerHeight / 2);
-        const node = flowState.addNode('image-gen', world.x - CARD_W / 2, world.y - 100);
+        const def = nodeRegistry.get(type as NodeType);
+        const h = CARD_W / (def.defaultRatio > 0 ? def.defaultRatio : 3 / 4);
+        const node = flowState.addNode(type as NodeType, world.x - CARD_W / 2, world.y - h / 2);
         selection.select(node.id);
-        void resolveDefaultModel().then(model => {
-          if (model && !(flowState.getNode(node.id)?.params.model)) {
-            flowState.updateNodeParams(node.id, { model });
-          }
-        });
+        this._fillDefaultModelFor(node.id);
         break;
       }
       case 'create-node': {
