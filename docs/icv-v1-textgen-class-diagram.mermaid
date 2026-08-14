@@ -1,0 +1,116 @@
+classDiagram
+    class FlowNode {
+        +string id
+        +NodeType type
+        +number x
+        +number y
+        +number ratio
+        +NodeStatus status
+        +string title
+        +Record~string,unknown~ params
+        +string imageUrl
+        +string outputText
+        +TextGenHistoryItem[] textHistory
+        +string[] refImages
+        +string error
+        +number lastRunAt
+        +string parentId
+    }
+    class NodeType {
+        <<enumeration>>
+        image-gen
+        image-result
+        text-gen
+    }
+    class TextGenParams {
+        +string instruction
+        +string model
+    }
+    class TextGenHistoryItem {
+        +string text
+        +number ts
+    }
+    class FlowProject {
+        +string format
+        +string version  "3.3"
+        +string projectName
+        +FlowCanvasState canvas
+        +FlowNode[] nodes
+        +FlowEdge[] edges
+        +number createdAt
+        +number updatedAt
+    }
+    class NodeDefinition {
+        <<interface>>
+        +NodeType type
+        +string label
+        +string defaultTitle
+        +number defaultRatio
+        +Record~string,unknown~ defaultParams
+        +canRun(node, ctx) bool|string
+        +buildOptions(node, ctx) Record
+    }
+    class TextGenNode {
+        +type = "text-gen"
+        +canRun(node, ctx) bool|string
+        +buildOptions(node, ctx) Record
+    }
+    class FlowState {
+        +FlowNode[] nodes
+        +FlowEdge[] edges
+        +getDownstreams(id) FlowNode[]
+        +getReferenceImages(id) string[]
+        +updateNode(id, patch) void
+        +updateNodeParams(id, patch) void
+        +pushTextHistory(id, text) void
+        +getTextHistory(id) TextGenHistoryItem[]
+        +addNode(type, x, y, extra) FlowNode
+        +replaceAll(project) void
+    }
+    class RunEngine {
+        +run(nodeId) Promise~void~
+        +runSelected() Promise~void~
+        +runAll() Promise~void~
+        -runBatch(nodeId) Promise~void~
+        -runTextGen(nodeId) Promise~void~
+        -busy boolean
+    }
+    class DirtyMarker {
+        +markUpstreamChanged(fromId) void
+        +markStale(nodeId) void
+    }
+    class BackendApi {
+        +fetchImageModels() Promise~Model[]
+        +fetchChatModels() Promise~Model[]
+        +resolveDefaultChatModel() Promise~string~
+        +chatV2(userInput, options) Promise~{success, text}~
+    }
+    class CmdPanel {
+        +sync() void
+        -chatModelOptions Model[]
+        -renderTextHistory(node) void
+        -refillHistoryItem(nodeId, item) void
+    }
+    class CardView {
+        +updateCard(el, node) void
+        -isTextGen boolean
+    }
+    class Persistence {
+        +collect() FlowProject
+        +restore(raw) boolean
+        -migrateNode(raw) FlowNode
+    }
+
+    FlowNode --> NodeType
+    FlowNode --> TextGenHistoryItem
+    TextGenNode ..|> NodeDefinition
+    FlowProject --> FlowNode
+    FlowProject --> FlowEdge
+    FlowState --> FlowNode
+    RunEngine --> FlowState
+    RunEngine --> DirtyMarker
+    RunEngine --> BackendApi
+    CmdPanel --> FlowState
+    CardView --> FlowState
+    Persistence --> FlowState
+    TextGenNode ..> FlowContext : uses getReferenceImages

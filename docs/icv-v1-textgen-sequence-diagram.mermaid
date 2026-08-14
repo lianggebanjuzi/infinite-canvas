@@ -1,0 +1,40 @@
+sequenceDiagram
+    actor User as 用户
+    participant CP as CmdPanel
+    participant FS as FlowState
+    participant DM as DirtyMarker
+    participant RE as RunEngine
+    participant BA as BackendApi
+    participant BE as backend UnifiedAPI
+
+    User->>CP: 选中 text-gen 节点 → 编辑反推指令 → 点发送
+    CP->>FS: updateNodeParams(nodeId, { instruction })
+    CP->>RE: run(nodeId)
+    RE->>RE: canRun 校验（instruction 非空 + model 已选）
+    RE->>FS: updateNode(nodeId, { status:'run', error:null })
+    RE->>RE: runTextGen(nodeId)：快照 instruction/model<br/>options = buildOptions(node, ctx) = { model, images: ctx.getReferenceImages(node.id) }
+    RE->>BA: Backend.chatV2(instruction, options)
+    BA->>BE: pywebview.api.unified_chat_v2(userInput, options)
+    BE-->>BA: { success:true, text } | { success:false, error_code, message }
+    alt 成功（text 非空）
+        RE->>FS: updateNode(nodeId, { status:'done', outputText:text, error:null, lastRunAt:Date.now() })
+        RE->>FS: pushTextHistory(nodeId, text)（去重/上限 20）
+        loop 直接下游 image-gen
+            RE->>FS: updateNodeParams(downId, { prompt: text })（静默写参，不标 stale）
+        end
+        RE->>DM: dirty.markUpstreamChanged(nodeId)（下游标 stale，含被覆盖 prompt 的 image-gen）
+        RE-->>CP: toast「反推成功」
+    else 失败 / 文本为空
+        RE->>FS: updateNode(nodeId, { status:'fail', error: message })
+        RE-->>CP: toast 失败原因（不覆盖下游、不写历史）
+    end
+    FS-->>CP: 渲染：卡片显示 outputText；面板历史 +1；下游橙点 stale
+
+    %% 历史回填
+    User->>CP: 选中 text-gen 节点 → 历史列表点击某条
+    CP->>FS: updateNode(nodeId, { outputText: item.text })
+    loop 直接下游 image-gen
+        CP->>FS: updateNodeParams(downId, { prompt: item.text })
+    end
+    CP->>DM: dirty.markUpstreamChanged(nodeId)
+    CP-->>User: toast「已回填历史反推文本」；卡片文本更新、下游 stale
