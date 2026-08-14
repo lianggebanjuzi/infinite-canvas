@@ -180,6 +180,19 @@ body { font-family: var(--font); background: var(--bg-app); color: var(--text-1)
   box-shadow: 0 1px 4px rgba(60,50,40,.25); pointer-events:none;
 }
 
+/* ═══════════ 文本反推卡（text-gen，文本为主视觉，内部滚动） ═══════════ */
+.pcard.textgen { border-color: rgba(192,133,82,.45); }
+.pcard.textgen .pcard-img { background: var(--bg-panel); }
+.pcard-text {
+  position:absolute; inset:0; padding:14px; font-size:13px; line-height:1.7;
+  color: var(--text-1); overflow-y:auto; word-break:break-word; white-space:pre-wrap;
+  user-select:text; cursor:text;
+}
+.pcard-text::-webkit-scrollbar { width:6px; }
+.pcard-text.empty { display:flex; align-items:center; justify-content:center; }
+.pcard-text-empty { color: var(--text-3); font-size:12px; text-align:center; line-height:1.6; }
+.pcard[data-status="run"] .pcard-text { filter: blur(1.5px); opacity:.8; }
+
 /* 端口：视觉小、热区大（::after 扩展到 25px）；支持拖线（手动连线 P0） */
 .port {
   position:absolute; width:11px; height:11px; border-radius:50%;
@@ -317,6 +330,28 @@ body { font-family: var(--font); background: var(--bg-app); color: var(--text-1)
 }
 .cmd-send:hover { background: var(--warm); transform: scale(1.05); }
 .cmd-send:disabled { background: var(--border-strong); cursor:default; transform:none; }
+
+/* text-gen 面板：隐藏绘图参数 chips（比例/分辨率/张数），保留模型 chip 与参考图区 */
+.cmd-panel.textgen #chip-ratio,
+.cmd-panel.textgen #chip-res,
+.cmd-panel.textgen #chip-count { display:none; }
+
+/* text-gen 历史反推结果列表 */
+.cmd-text-history {
+  display:none; flex-direction:column; max-height:180px; overflow-y:auto;
+  border-top:1px solid var(--border-soft); padding:8px 14px 6px;
+}
+.cmd-text-history.show { display:flex; }
+.cmd-text-history-title { font-size:11px; color: var(--text-3); margin-bottom:6px; letter-spacing:.04em; flex-shrink:0; }
+.cmd-text-history-item {
+  display:flex; align-items:center; gap:8px; padding:6px 8px; border-radius: var(--r-sm);
+  cursor:pointer; transition: background .12s; font-size:12px; flex-shrink:0;
+}
+.cmd-text-history-item:hover { background: var(--bg-hover); }
+.cmd-text-history-time { flex-shrink:0; font-size:10.5px; color: var(--text-3); }
+.cmd-text-history-summary {
+  flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color: var(--text-1);
+}
 
 /* 参数下拉菜单 */
 .param-menu {

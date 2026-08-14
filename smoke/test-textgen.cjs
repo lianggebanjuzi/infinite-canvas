@@ -74,6 +74,7 @@ const { dirty } = require(`${BASE}/state/dirty.js`);
 const { persistence } = require(`${BASE}/persistence.js`);
 const { runEngine } = require(`${BASE}/engine/run-engine.js`);
 const { Backend, fetchChatModels, fetchImageModels, resolveDefaultChatModel } = require(`${BASE}/api.js`);
+const { cmdPanel } = require(`${BASE}/ui/cmd-panel.js`);
 
 // ───────────────────────── 用例 ─────────────────────────
 async function main() {
@@ -289,6 +290,29 @@ async function main() {
     check(flowState.getNode('tg').outputText === 'B', '回填更新节点 outputText');
     check(flowState.getNode('dg').params.prompt === 'B', '回填同步覆盖下游 prompt');
     check(flowState.getNode('dg').status === 'stale', '回填后下游 stale');
+  });
+
+  await section('T03: cmd-panel 历史列表渲染（show + 标题 + 条目数）', () => {
+    flowState.replaceAll({
+      format: 'icv', version: '3.3', projectName: '渲染',
+      canvas: { scale: 1, panX: 0, panY: 0 },
+      nodes: [
+        { id: 'tg', type: 'text-gen', x: 0, y: 0, ratio: 0.75, status: 'done', title: 't', params: { instruction: '反推', model: 'p:m' }, imageUrl: null, outputText: 'B', textHistory: [{ text: '历史B', ts: 2000 }, { text: '历史A', ts: 1000 }], refImages: [], error: null, lastRunAt: 2, parentId: null },
+      ],
+      edges: [], createdAt: 0, updatedAt: 0,
+    });
+    let shown = false;
+    let appended = 0;
+    const fakeHistoryEl = {
+      classList: { add() { shown = true; }, remove() {} },
+      innerHTML: '',
+      appendChild() { appended += 1; },
+    };
+    cmdPanel['historyEl'] = fakeHistoryEl;
+    cmdPanel['_renderTextHistory'](flowState.getNode('tg'));
+    check(shown === true, '有历史 → 列表显示');
+    check(appended === 2, `渲染 2 条历史条目 (${appended})`);
+    check(fakeHistoryEl.innerHTML.includes('历史反推结果'), '历史标题渲染');
   });
 
   console.log(`\n══════════════════════════════════`);

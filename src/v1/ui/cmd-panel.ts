@@ -9,7 +9,8 @@ import { canvasView, CARD_W } from '../canvas/canvas-view';
 import { cardView } from '../canvas/card-view';
 import { interactions } from '../canvas/interactions';
 import { runEngine } from '../engine/run-engine';
-import { fetchImageModels } from '../api';
+import { fetchImageModels, fetchChatModels } from '../api';
+import { DEFAULT_CHAT_MODEL_KEY } from '../nodes/text-gen';
 import { showToast } from './toast';
 
 const RATIO_OPTIONS = ['3:4', '2:3', '4:5', '9:16', '1:4', '1:8', '1:1', '4:3', '3:2', '5:4', '16:9', '21:9', '4:1', '8:1', 'Auto'];
@@ -31,7 +32,9 @@ class CmdPanel {
   private chipRatioLabel!: HTMLElement;
   private chipResLabel!: HTMLElement;
   private chipCountLabel!: HTMLElement;
+  private historyEl!: HTMLElement;
   private modelOptions: Array<{ id: string; name: string }> = [];
+  private chatModelOptions: Array<{ id: string; name: string }> = [];
   /** 动态参考图缩略元素（随 refImages/上游增删重建） */
   private _multiRefs: HTMLElement[] = [];
 
@@ -50,9 +53,11 @@ class CmdPanel {
     this.chipRatioLabel = document.getElementById('chip-ratio-label') as HTMLElement;
     this.chipResLabel = document.getElementById('chip-res-label') as HTMLElement;
     this.chipCountLabel = document.getElementById('chip-count-label') as HTMLElement;
+    this.historyEl = document.getElementById('cmd-text-history') as HTMLElement;
 
-    // 预取模型列表（用于 chip 菜单与默认模型回填）
+    // 预取模型列表（绘图 + 对话，供 chip 菜单与默认模型回填）
     void fetchImageModels().then(models => { this.modelOptions = models; });
+    void fetchChatModels().then(models => { this.chatModelOptions = models; });
 
     this._bindEvents();
     flowState.subscribe(() => this.sync());
@@ -63,7 +68,11 @@ class CmdPanel {
     this.input.addEventListener('input', () => {
       const node = selection.single();
       if (!node) return;
-      flowState.updateNodeParams(node.id, { prompt: this.input.value });
+      if (node.type === 'text-gen') {
+        flowState.updateNodeParams(node.id, { instruction: this.input.value });
+      } else {
+        flowState.updateNodeParams(node.id, { prompt: this.input.value });
+      }
     });
 
     this.send.addEventListener('click', () => this._onSend());
@@ -97,15 +106,27 @@ class CmdPanel {
   private _onSend(): void {
     const node = selection.single();
     if (!node) return;
-    const prompt = this.input.value.trim();
-    flowState.updateNodeParams(node.id, { prompt });
+    if (node.type === 'text-gen') {
+      const instruction = this.input.value.trim();
+      flowState.updateNodeParams(node.id, { instruction });
+    } else {
+      const prompt = this.input.value.trim();
+      flowState.updateNodeParams(node.id, { prompt });
+    }
     void runEngine.run(node.id);
   }
 
-  /** 模型 chip：打开菜单前重新拉取模型，确保设置里新增/拉取的模型即时可见 */
+  /** 模型 chip：打开菜单前重新拉取模型（text-gen → chat 模型，其余 → 绘图模型），确保设置里新增/拉取的模型即时可见 */
   private async _openModelMenu(btn: HTMLElement): Promise<void> {
-    this.modelOptions = await fetchImageModels();
-    this._showChipMenu(btn, this.modelOptions.map(m => ({ id: m.id, name: m.name })), 'model');
+    const node = selection.single();
+    if (!node) return;
+    if (node.type === 'text-gen') {
+      this.chatModelOptions = await fetchChatModels();
+      this._showChipMenu(btn, this.chatModelOptions.map(m => ({ id: m.id, name: m.name })), 'model');
+    } else {
+      this.modelOptions = await fetchImageModels();
+      this._showChipMenu(btn, this.modelOptions.map(m => ({ id: m.id, name: m.name })), 'model');
+    }
   }
 
   private _showChipMenu(btn: HTMLElement, items: Array<{ id: string; name: string }>, paramType: string): void {
@@ -160,7 +181,10 @@ class CmdPanel {
     if (!node) return;
     if (paramType === 'model') {
       flowState.updateNodeParams(nodeId, { model: value });
-      if (value) localStorage.setItem('icv_default_model', value);
+      if (value) {
+        // text-gen 记 chat 默认模型（与绘图默认模型互不污染）
+        localStorage.setItem(node.type === 'text-gen' ? DEFAULT_CHAT_MODEL_KEY : 'icv_default_model', value);
+      }
     } else if (paramType === 'aspectRatio') {
       flowState.updateNodeParams(nodeId, { aspectRatio: value });
     } else if (paramType === 'resolution') {
@@ -175,7 +199,7 @@ class CmdPanel {
     if (!this.el) return;
     const node = selection.single();
     if (!node) {
-      this.el.classList.remove('show', 'pos-above', 'readonly');
+      this.el.classList.remove('show', 'pos-above', 'readonly', 'textgen');
       return;
     }
 
@@ -187,34 +211,48 @@ class CmdPanel {
     if (node.type === 'image-result') {
       this.el.classList.add('readonly');
       this.ctxHint.textContent = '· 结果卡（只读）';
+      this._renderTextHistory(node); // 结果卡无历史，隐藏
       this._position(node);
       return;
     }
     this.el.classList.remove('readonly');
 
+    // text-gen 面板：隐藏绘图参数 chips（比例/分辨率/张数），模型 chip 切到对话模型
+    const isTextGen = node.type === 'text-gen';
+    this.el.classList.toggle('textgen', isTextGen);
+
     this.ctxHint.textContent =
       node.status === 'stale' ? '· 上游已改，待重跑' :
-      node.status === 'done' ? '· 已完成' :
+      node.status === 'done' ? (isTextGen ? '· 已完成反推' : '· 已完成') :
       node.status === 'run' ? this._runHint(node.id) :
-      node.status === 'fail' ? '· 生成失败' : '';
+      node.status === 'fail' ? (isTextGen ? '· 反推失败' : '· 生成失败') : '';
 
-    // 输入框（用户未聚焦时回填）
+    // 输入框（用户未聚焦时回填）：text-gen 绑定 instruction，其余绑定 prompt
     if (document.activeElement !== this.input) {
-      const p = node.params as unknown as StyleTransferParams;
-      this.input.value = p.prompt || '';
+      if (isTextGen) {
+        const tp = node.params as unknown as TextGenParams;
+        this.input.value = tp.instruction || '';
+      } else {
+        const p = node.params as unknown as StyleTransferParams;
+        this.input.value = p.prompt || '';
+      }
     }
     this.send.disabled = node.status === 'run';
 
     this._renderRefs();
     this._renderChips(node);
     if (!(node.params.model as string | undefined)) {
-      this._ensureModel(node.id);
+      if (isTextGen) this._ensureChatModel(node.id);
+      else this._ensureModel(node.id);
     }
+    this._renderTextHistory(node);
     this._position(node);
   }
 
-  /** run 状态提示：批次进度「生成中 done/total」（无批次时退化为「生成中」） */
+  /** run 状态提示：text-gen「反推中」；批次「生成中 done/total」（无批次时退化为「生成中」） */
   private _runHint(nodeId: string): string {
+    const node = flowState.getNode(nodeId);
+    if (node && node.type === 'text-gen') return '· 反推中';
     const p = runEngine.getBatchProgress(nodeId);
     if (p && p.total > 0) return `· 生成中 ${p.done}/${p.total}`;
     return '· 生成中';
@@ -243,6 +281,60 @@ class CmdPanel {
       this.modelOptions = models.filter(m => Boolean(m.id));
       apply();
     });
+  }
+
+  /** text-gen 未配置模型时：自动回填默认对话模型（localStorage icv_default_chat_model 或第一个可用 chat 模型） */
+  private _ensureChatModel(nodeId: string): void {
+    if (this._modelFilling.has(nodeId)) return;
+    this._modelFilling.add(nodeId);
+    const valid = (): Array<{ id: string; name: string }> => this.chatModelOptions.filter(m => Boolean(m.id));
+    const apply = () => {
+      const node = flowState.getNode(nodeId);
+      if (!node || (node.params.model as string | undefined)) return;
+      const opts = valid();
+      const saved = localStorage.getItem(DEFAULT_CHAT_MODEL_KEY);
+      const target = saved && opts.some(m => m.id === saved)
+        ? saved
+        : (opts[0]?.id || '');
+      if (target) flowState.updateNodeParams(nodeId, { model: target });
+    };
+    if (valid().length > 0) { apply(); return; }
+    void fetchChatModels().then(models => {
+      this.chatModelOptions = models.filter(m => Boolean(m.id));
+      apply();
+    });
+  }
+
+  /** 历史反推结果列表：最新在前、单行截断 + 时间；点击回填（=恢复该历史输出，联动覆盖下游 prompt + 标 stale） */
+  private _renderTextHistory(node: FlowNode): void {
+    if (!this.historyEl) return;
+    const history = flowState.getTextHistory(node.id);
+    if (history.length === 0) {
+      this.historyEl.classList.remove('show');
+      this.historyEl.innerHTML = '';
+      return;
+    }
+    this.historyEl.classList.add('show');
+    this.historyEl.innerHTML = '<div class="cmd-text-history-title">历史反推结果</div>';
+    history.forEach(item => {
+      const div = document.createElement('div');
+      div.className = 'cmd-text-history-item';
+      div.title = item.text;
+      const time = new Date(item.ts).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
+      div.innerHTML = `<span class="cmd-text-history-time">${time}</span><span class="cmd-text-history-summary">${escapeHtml(item.text)}</span>`;
+      div.addEventListener('click', () => this._refillHistoryItem(node.id, item));
+      this.historyEl!.appendChild(div);
+    });
+  }
+
+  /** 历史回填动作（与运行成功时的覆盖动作完全一致）：写 outputText + 覆盖直接 image-gen 下游 prompt + 标 stale */
+  private _refillHistoryItem(nodeId: string, item: TextGenHistoryItem): void {
+    flowState.updateNode(nodeId, { outputText: item.text });
+    flowState.getDownstreams(nodeId)
+      .filter(d => d.type === 'image-gen')
+      .forEach(d => flowState.updateNodeParams(d.id, { prompt: item.text }));
+    dirty.markUpstreamChanged(nodeId);
+    showToast('已回填历史反推文本');
   }
 
   /** 参考图区：展示 getReferenceImages(id)（本节点 refImages + 上游可作参考图的图），本节点 refImages 支持删除 */
@@ -293,7 +385,9 @@ class CmdPanel {
 
   private _renderChips(node: FlowNode): void {
     const p = node.params as unknown as StyleTransferParams;
-    const model = this.modelOptions.find(m => m.id === p.model);
+    // 模型 chip 名称按节点类型查对应模型列表（text-gen → chat 模型）
+    const options = node.type === 'text-gen' ? this.chatModelOptions : this.modelOptions;
+    const model = options.find(m => m.id === p.model);
     this.chipModelLabel.textContent = model ? model.name : (p.model || '选择模型');
     this.chipRatioLabel.textContent = p.aspectRatio || '3:4';
     this.chipResLabel.textContent = (p.resolution || '2k').toUpperCase();
@@ -321,6 +415,16 @@ class CmdPanel {
     this.el.style.top = (flip ? topY : botY) + 'px';
     this.el.classList.add('show');
   }
+}
+
+/** HTML 转义（历史列表展示反推文本用，防注入） */
+function escapeHtml(text: string): string {
+  return String(text)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 }
 
 export const cmdPanel = new CmdPanel();

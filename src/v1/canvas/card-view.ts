@@ -11,8 +11,8 @@ const ICON_EXPAND = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none"
 class CardView {
   private container: HTMLElement | null = null;
   private els = new Map<string, HTMLElement>();
-  /** 内容指纹缓存：主图/缩略行/标题/状态变化时才重建 img.innerHTML（避免高频调用反复重建大图 DOM） */
-  private _contentFingerprint = new Map<string, { mainSrc: string; refStrip: string; title: string; status: string }>();
+  /** 内容指纹缓存：主图/缩略行/标题/状态/文本变化时才重建 img.innerHTML（避免高频调用反复重建大图 DOM） */
+  private _contentFingerprint = new Map<string, { mainSrc: string; refStrip: string; title: string; status: string; text: string }>();
 
   init(): void {
     this.container = document.getElementById('canvas');
@@ -57,12 +57,14 @@ class CardView {
     el.id = `node-${node.id}`;
     el.dataset.nodeId = node.id;
     const isResult = node.type === 'image-result';
+    const isTextGen = node.type === 'text-gen';
     if (isResult) el.classList.add('result');
+    if (isTextGen) el.classList.add('textgen');
     el.innerHTML = `
       <div class="pcard-img"></div>
       <div class="pcard-tag"><span class="dot"></span><span class="tag-text"></span></div>
       ${isResult ? '<span class="pcard-badge">结果</span>' : ''}
-      <button class="pcard-act" title="查看大图">${ICON_EXPAND}</button>
+      ${isResult || isTextGen ? '' : `<button class="pcard-act" title="查看大图">${ICON_EXPAND}</button>`}
       ${isResult ? '' : '<div class="port in"></div>'}
       <div class="port out"></div>
     `;
@@ -76,36 +78,49 @@ class CardView {
 
     // 主视觉来源：输出图 imageUrl，无输出图时回退第一张参考图（用户拖入的图）作全图占位。
     // 结果卡只读：只取 imageUrl（无 refImages 回退，恒以自身输出图为主视觉）。
+    // 文本反推卡：主视觉为文本（outputText），无图。
     const ownRefs = Array.isArray(node.refImages) ? node.refImages : [];
     const isResult = node.type === 'image-result';
+    const isTextGen = node.type === 'text-gen';
     const mainSrc = isResult
       ? (node.imageUrl || '')
-      : (node.imageUrl || (ownRefs.length > 0 ? ownRefs[0] : ''));
+      : isTextGen
+        ? ''
+        : (node.imageUrl || (ownRefs.length > 0 ? ownRefs[0] : ''));
 
     const img = el.querySelector('.pcard-img') as HTMLElement;
     if (img) {
       img.style.height = this.cardHeight(node) + 'px'; // 高度随 ratio 每次照常更新（开销极小）
     }
 
-    // 内容指纹：仅当主图/缩略行/标题/状态变化时才重建 img.innerHTML 与标签文本。
+    // 内容指纹：仅当主图/缩略行/标题/状态/文本变化时才重建 img.innerHTML 与标签文本。
     // 位置/选中态/状态视觉每次照常更新；避免滚轮缩放等高频调用反复重建大图 DOM（dataURL 大字符串）。
     const refStrip = this._refStrip(node);
     const title = node.title || '节点';
-    const fp = { mainSrc, refStrip, title, status: node.status };
+    const fp = { mainSrc, refStrip, title, status: node.status, text: node.outputText || '' };
     const prev = this._contentFingerprint.get(node.id);
     const changed = !prev
       || prev.mainSrc !== fp.mainSrc
       || prev.refStrip !== fp.refStrip
       || prev.title !== fp.title
-      || prev.status !== fp.status;
+      || prev.status !== fp.status
+      || prev.text !== fp.text;
     if (changed) {
       this._contentFingerprint.set(node.id, fp);
       if (img) {
         // 底部叠加参考图缩略行（本节点 refImages ∪ 上游可作参考图的图，动态增删，叠加不改变卡片尺寸）；
         // 结果卡无参考图缩略行
-        img.innerHTML = mainSrc
-          ? `<div class="ph" style="background-image:url('${escapeUrl(mainSrc)}')"></div><div class="scan"></div>${refStrip}`
-          : `<div class="ph"><div class="ph-empty">${emptyContent(isResult)}</div></div><div class="scan"></div>${refStrip}`;
+        if (isTextGen) {
+          // 文本为主视觉：白底文本区（内部滚动），空态显示占位文案
+          const text = node.outputText || '';
+          img.innerHTML = text
+            ? `<div class="pcard-text">${escapeHtml(text)}</div><div class="scan"></div>${refStrip}`
+            : `<div class="pcard-text empty"><span class="pcard-text-empty">运行后显示反推文本</span></div><div class="scan"></div>${refStrip}`;
+        } else if (mainSrc) {
+          img.innerHTML = `<div class="ph" style="background-image:url('${escapeUrl(mainSrc)}')"></div><div class="scan"></div>${refStrip}`;
+        } else {
+          img.innerHTML = `<div class="ph"><div class="ph-empty">${emptyContent(isResult)}</div></div><div class="scan"></div>${refStrip}`;
+        }
       }
       const tag = el.querySelector('.tag-text') as HTMLElement | null;
       if (tag) tag.textContent = title;
@@ -119,7 +134,7 @@ class CardView {
       el.removeAttribute('title');
     }
 
-    el.classList.toggle('empty', !mainSrc);
+    el.classList.toggle('empty', !mainSrc && !isTextGen);
     el.classList.toggle('selected', selection.isSelected(node.id));
 
     // 查看大图
@@ -134,10 +149,13 @@ class CardView {
 
   /** 卡片底部参考图缩略行：展示 getReferenceImages(id)（本节点 refImages + 上游可作参考图的图） */
   private _refStrip(node: FlowNode): string {
-    // 结果卡只读：无参考图缩略行
+    // 结果卡只读：无参考图缩略行；文本反推卡保留缩略行（其主视觉是文本，无需排除占位图）
     if (node.type === 'image-result') return '';
+    const isTextGen = node.type === 'text-gen';
     // 当主视觉正在用 refImages[0] 占位（即无输出图）时，缩略行排除这张占位图，避免重复显示
-    const placeholder = node.imageUrl ? null : (Array.isArray(node.refImages) ? node.refImages[0] : null) || null;
+    const placeholder = !isTextGen && !node.imageUrl
+      ? (Array.isArray(node.refImages) ? node.refImages[0] : null) || null
+      : null;
     const refs = flowState.getReferenceImages(node.id).filter(u => u !== placeholder);
     if (refs.length === 0) return '';
     const thumbs = refs
@@ -155,6 +173,16 @@ function emptyContent(isResult: boolean): string {
 
 function escapeUrl(url: string): string {
   return url.replace(/'/g, "\\'").replace(/"/g, '\\"');
+}
+
+/** HTML 转义（文本卡展示 outputText 用，防注入） */
+function escapeHtml(text: string): string {
+  return String(text)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 }
 
 /** 大图查看（简单全屏浮层） */
