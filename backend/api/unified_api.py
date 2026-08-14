@@ -30,6 +30,10 @@ from backend.api.gemini_compat import (
     normalize_gemini_aspect_ratio,
     normalize_gemini_image_size,
 )
+from backend.api.model_rules import (
+    detect_model_type as detect_model_type_str,
+    detect_model_format_name,
+)
 
 
 # ─────────────────────────────────────────
@@ -82,38 +86,16 @@ class ProviderConfig:
 
 
 # ─────────────────────────────────────────
-# 绘图模型识别规则
-# 关键字（不区分大小写） -> API 格式
+# 模型识别规则
+# 分类规则（关键字 -> API 格式）统一收敛到公共模块 model_rules，
+# 与 provider_api.fetch_models 共用同一份规则，避免重复定义导致语义漂移。
+# 本文件仅保留「格式名 -> ApiFormat 枚举」的本地映射。
 # ─────────────────────────────────────────
-_DRAWING_RULES = [
-    ('gemini',       ApiFormat.GEMINI_NATIVE),
-    ('nano-banana',  ApiFormat.GEMINI_NATIVE),
-    ('seedream',     ApiFormat.GEMINI_NATIVE),
-    ('dall-e',       ApiFormat.OPENAI_IMAGE),
-    ('dall-e-',      ApiFormat.OPENAI_IMAGE),
-    ('gpt-image',    ApiFormat.OPENAI_IMAGE),
-    ('dalle',        ApiFormat.OPENAI_IMAGE),
-]
-
-# 对话模型识别规则
-_CHAT_RULES = [
-    ('gpt-',        ApiFormat.OPENAI_CHAT),
-    ('claude-',     ApiFormat.OPENAI_CHAT),
-    ('o1-',         ApiFormat.OPENAI_CHAT),
-    ('o2-',         ApiFormat.OPENAI_CHAT),
-    ('o3-',         ApiFormat.OPENAI_CHAT),
-    ('o4-',         ApiFormat.OPENAI_CHAT),
-    ('deepseek',    ApiFormat.OPENAI_CHAT),
-    ('qwen',        ApiFormat.OPENAI_CHAT),
-    ('yi-',         ApiFormat.OPENAI_CHAT),
-    ('moonshot',    ApiFormat.OPENAI_CHAT),
-    ('glm-',        ApiFormat.OPENAI_CHAT),
-    ('gemini',      ApiFormat.OPENAI_CHAT),
-    ('llama',       ApiFormat.OPENAI_CHAT),
-    ('mistral',     ApiFormat.OPENAI_CHAT),
-    ('qwq',         ApiFormat.OPENAI_CHAT),
-    ('r1-',         ApiFormat.OPENAI_CHAT),
-]
+_API_FORMAT_MAP = {
+    'openai_chat':   ApiFormat.OPENAI_CHAT,
+    'openai_image':  ApiFormat.OPENAI_IMAGE,
+    'gemini_native': ApiFormat.GEMINI_NATIVE,
+}
 
 # 分辨率后缀映射（用于 Gemini 图片模型）
 _RES_SUFFIX = {'1k': '', '2k': '-2k', '4k': '-4k'}
@@ -353,19 +335,16 @@ class UnifiedAPIRouter:
     def _detect_model_type(self, model_id):
         """
         根据模型 ID 关键字推断模型类型和 API 格式
+        分类规则复用公共模块 model_rules（与 provider_api.fetch_models 语义一致）
         返回: (ModelType, ApiFormat)
         """
-        lower = model_id.lower()
+        m_type_str  = detect_model_type_str(model_id)
+        fmt_name    = detect_model_format_name(model_id)
+        fmt         = _API_FORMAT_MAP.get(fmt_name, ApiFormat.OPENAI_CHAT)
 
-        for kw, fmt in _DRAWING_RULES:
-            if kw in lower:
-                return ModelType.DRAWING, fmt
-
-        for kw, fmt in _CHAT_RULES:
-            if kw in lower:
-                return ModelType.CHAT, fmt
-
-        return ModelType.CHAT, ApiFormat.OPENAI_CHAT
+        if m_type_str == ModelType.DRAWING.value:
+            return ModelType.DRAWING, fmt
+        return ModelType.CHAT, fmt
 
     def _resolve_chat_model(self, model_str=None):
         """

@@ -514,23 +514,37 @@ class SettingsPanel {
           showToast(res.message || '拉取模型失败', false);
           return;
         }
-        // 合并逻辑：保留手动添加的 chat 模型，用拉取的 drawing 模型替换旧的 drawing
+        // 合并逻辑：按后端返回的 type 字段分类合并（chat 归 chat、drawing 归 drawing），
+        // 不再把拉回结果无条件标 drawing。同 ID 保留旧 enabled 状态；旧列表里拉回未出现的模型保留（含手动添加）。
         const existingMap: Record<string, BackendModel> = {};
         models.forEach(m => { existingMap[m.id] = m; });
-        const chatModels = models.filter(m => m.type === 'chat');
-        const mergedDrawing: BackendModel[] = (res.models || []).map(m => ({
-          id: m.id,
-          name: m.name || m.id,
-          type: 'drawing',
-          enabled: existingMap[m.id]?.enabled ?? true,
-        }));
-        const merged: BackendModel[] = [...chatModels, ...mergedDrawing];
+
+        const chatById: Record<string, BackendModel> = {};
+        const drawingById: Record<string, BackendModel> = {};
+        models.forEach(m => {
+          if (m.type === 'chat') chatById[m.id] = m;
+          else drawingById[m.id] = m;
+        });
+
+        (res.models || []).forEach(m => {
+          const isChat = m.type === 'chat';
+          const entry: BackendModel = {
+            id: m.id,
+            name: m.name || m.id,
+            type: isChat ? 'chat' : 'drawing',
+            enabled: existingMap[m.id]?.enabled ?? true,
+          };
+          if (isChat) chatById[m.id] = entry;
+          else drawingById[m.id] = entry;
+        });
+
+        const merged: BackendModel[] = [...Object.values(chatById), ...Object.values(drawingById)];
         const upd = await Backend.updateProvider(providerId, { models: merged });
         if (upd.status === 'success') {
           models = merged;
           syncProviderModels(merged);
           renderModelRows();
-          showToast(`已拉取 ${mergedDrawing.length} 个绘图模型`);
+          showToast(`已拉取 ${Object.keys(chatById).length} 个对话模型、${Object.keys(drawingById).length} 个绘图模型`);
         } else {
           showToast('模型保存失败', false);
         }

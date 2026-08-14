@@ -5,27 +5,21 @@
 from backend.api.errors import (
     AppError, UpstreamError, UpstreamTimeoutError, UnknownError
 )
+from backend.api.model_rules import (
+    DRAWING_MODEL_RULES,
+    MODEL_TYPE_DRAWING,
+    MODEL_TYPE_CHAT,
+    detect_model_type,
+)
 import json
 import os
 import uuid
 import requests
 
-# ─────────────────────────────────────────
-# 绘图模型识别规则
-# 格式：匹配关键词（模型 ID 包含此字符串）-> 显示名称
-# 大小写不敏感，从上到下优先匹配第一条
-# ─────────────────────────────────────────
-DRAWING_MODEL_RULES = [
-    # Nano Banana Pro
-    ('gemini-3-pro-image-preview', 'Nano Banana Pro'),
-    # Nano Banana 2
-    ('gemini-3.1-flash-image-preview', 'Nano Banana 2'),
-]
-
 
 def _match_drawing_model(model_id: str):
     """
-    尝试匹配模型 ID 是否为已知绘图模型
+    尝试匹配模型 ID 是否为已知绘图模型（显示名规则，来自公共模块 model_rules）
     返回显示名称，匹配不到返回 None
     """
     lower = model_id.lower().strip()
@@ -128,8 +122,11 @@ class ProviderAPI:
     def fetch_models(self, api_url, api_key):
         """
         拉取模型列表
-        只保留能匹配到绘图规则的模型，按显示名称去重
-        每个显示名称只保留第一个匹配到的模型 ID 作为代表
+
+        同时收集绘图模型与对话模型：
+        - 绘图模型：按显示名去重（带 -2k/-4k 后缀的直接过滤，由前端分辨率选择器控制）
+        - 对话模型：按模型 ID 去重（对话模型通常 ID 唯一，保留全部，一个不漏）
+        每个模型带正确的 type 字段（'drawing' / 'chat'），分类规则复用公共模块 model_rules。
         """
         print(f"正在从 {api_url} 拉取模型列表...")
         try:
@@ -147,36 +144,48 @@ class ProviderAPI:
             if response.status_code == 200:
                 data = response.json()
 
-                # 第一步：匹配所有绘图模型（全部收集，不去重）
-                all_matched = []
+                # 第一步：按类型收集全部模型（不去重）
+                all_drawing = []
+                all_chat    = []
                 seen_ids    = set()
 
                 if 'data' in data:
                     for model in data['data']:
-                        model_id     = model.get('id', '')
-                        display_name = _match_drawing_model(model_id)
-
-                        if display_name is None:
+                        model_id = model.get('id', '')
+                        if not model_id:
                             continue
                         if model_id in seen_ids:
                             print(f"跳过重复 ID: {model_id}")
                             continue
-
                         seen_ids.add(model_id)
-                        all_matched.append({
-                            'id':      model_id,
-                            'name':    display_name,
-                            'type':    'drawing',
-                            'enabled': True
-                        })
-                        print(f"匹配到: {model_id} -> {display_name}")
 
-                # 第二步：按显示名去重，每个名称只保留第一个
+                        m_type = detect_model_type(model_id)
+
+                        if m_type == MODEL_TYPE_DRAWING:
+                            display_name = _match_drawing_model(model_id) or model_id
+                            all_drawing.append({
+                                'id':      model_id,
+                                'name':    display_name,
+                                'type':    MODEL_TYPE_DRAWING,
+                                'enabled': True
+                            })
+                            print(f"匹配到绘图模型: {model_id} -> {display_name}")
+                        else:
+                            # 对话模型没有显示名规则，name 直接用模型 ID（前端可再加工）
+                            all_chat.append({
+                                'id':      model_id,
+                                'name':    model_id,
+                                'type':    MODEL_TYPE_CHAT,
+                                'enabled': True
+                            })
+                            print(f"匹配到对话模型: {model_id}")
+
+                # 第二步：绘图模型按显示名去重，每个名称只保留第一个
                 # 带 -2k / -4k 后缀的直接过滤掉，不进入最终列表
                 seen_names     = {}
-                deduped_models = []
+                deduped_drawing = []
 
-                for model in all_matched:
+                for model in all_drawing:
                     mid  = model['id']
                     name = model['name']
 
@@ -188,15 +197,16 @@ class ProviderAPI:
 
                     if name not in seen_names:
                         seen_names[name] = True
-                        deduped_models.append(model)
+                        deduped_drawing.append(model)
                         print(f"保留代表模型: {mid} 作为 [{name}]")
                     else:
                         print(f"去重跳过: {mid} (已有 [{name}] 的代表)")
 
-                print(f"去重后共 {len(deduped_models)} 个绘图模型")
+                # 对话模型按 ID 去重已在第一步完成，无需再处理
+                print(f"共 {len(deduped_drawing)} 个绘图模型、{len(all_chat)} 个对话模型")
                 return {
                     "status": "success",
-                    "models": deduped_models
+                    "models": deduped_drawing + all_chat
                 }
             else:
                 error_msg = f"HTTP {response.status_code}: {response.text}"
