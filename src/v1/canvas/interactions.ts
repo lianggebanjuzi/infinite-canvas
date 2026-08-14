@@ -215,7 +215,7 @@ class Interactions {
         // 结果卡只读：不弹文件选择
         if (d.nodeId) {
           const n = flowState.getNode(d.nodeId);
-          if (n && n.type !== 'image-result' && !n.imageUrl && (!n.refImages || n.refImages.length === 0)) {
+          if (n && n.type !== 'image-result' && n.type !== 'text-gen' && !n.imageUrl && (!n.refImages || n.refImages.length === 0)) {
             this.openFilePickerForRef(n.id);
           }
         }
