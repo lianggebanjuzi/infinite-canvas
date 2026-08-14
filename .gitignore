@@ -38,3 +38,6 @@ __pycache__/
 *.log
 tsc-check.txt
 tsc-errors*.txt
+
+# 本地实验目录（含内嵌 git 仓库，禁止入库）
+/deepseek harness/

@@ -5,9 +5,6 @@
 /** 统一「生成节点」：多图参考（0~N）→ 生成 N 张新图（每张一张结果卡），注册式扩展 */
 type NodeType = 'image-gen' | 'image-result';
 
-/** 旧版节点类型字面量：仅在 persistence 迁移时使用，业务代码禁止引用 */
-type LegacyNodeType = 'product-image' | 'style-transfer' | 'image-gen';
-
 /** 节点状态机五态 */
 type NodeStatus = 'idle' | 'run' | 'done' | 'stale' | 'fail';
 

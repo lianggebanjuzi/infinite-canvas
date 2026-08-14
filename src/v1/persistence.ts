@@ -1,23 +1,22 @@
 // src/v1/persistence.ts
 // .icproj 序列化/反序列化 —— 只有本模块可以读写 .icproj（共享约定第 5 条）
-// restore 校验 format==='icv'（A9：非 icv 拒绝），3.0/3.1 统一走 migrateNode 归一迁移
+// restore 校验 format==='icv' 且 version==='3.2'（A9：非 icv 拒绝；旧版项目不支持，请新建）
 
 import { flowState } from './state/flow-state';
 import { Backend } from './api';
 import { showToast } from './ui/toast';
 
 /**
- * 旧节点归一迁移为统一「生成节点」/「结果卡」。
- * - product-image：旧输入图 → refImages=[imageUrl]，imageUrl 置空、status 重置 idle（旧 done 无输出图，避免 done+空卡矛盾）。
- * - style-transfer / image-gen：type 统一 image-gen，refImages 保留（缺省补空）。
- * - image-result：透传（type 保持、title 默认'生成结果'、params 恒 {}、imageUrl string|null、refImages []、parentId string|null 校验）。
+ * 当前格式节点归一（仅接受 image-gen / image-result，其余类型——含 3.0/3.1 旧类型——返回 null 被过滤）。
+ * - image-gen：字段校验，refImages 缺省补空；type 保持 image-gen。
+ * - image-result：只读透传（type 保持、title 默认'生成结果'、params 恒 {}、imageUrl string|null、refImages []、parentId string|null 校验）。
  * 连线 / 标题 / 参数保留。
  */
 function migrateNode(raw: unknown): FlowNode | null {
   if (!raw || typeof raw !== 'object') return null;
   const r = raw as Record<string, unknown>;
   const t = r.type as string;
-  if (t !== 'product-image' && t !== 'style-transfer' && t !== 'image-gen' && t !== 'image-result') return null;
+  if (t !== 'image-gen' && t !== 'image-result') return null;
   if (typeof r.id !== 'string') return null;
 
   const rawParams = r.params && typeof r.params === 'object'
@@ -26,7 +25,7 @@ function migrateNode(raw: unknown): FlowNode | null {
 
   const parentId = typeof r.parentId === 'string' && r.parentId ? r.parentId : null;
 
-  // 结果卡：只读透传（3.1 及更早版本不存在，此分支面向 3.2 及未来回读）
+  // 结果卡：只读透传（3.2 当前格式）
   if (t === 'image-result') {
     return {
       id: r.id,
@@ -61,15 +60,9 @@ function migrateNode(raw: unknown): FlowNode | null {
     parentId,
   };
 
-  if (t === 'product-image') {
-    node.refImages = typeof r.imageUrl === 'string' ? [r.imageUrl] : [];
-    node.imageUrl = null;
-    node.status = 'idle';
-  } else {
-    node.refImages = Array.isArray(r.refImages)
-      ? (r.refImages as unknown[]).filter((u): u is string => typeof u === 'string')
-      : [];
-  }
+  node.refImages = Array.isArray(r.refImages)
+    ? (r.refImages as unknown[]).filter((u): u is string => typeof u === 'string')
+    : [];
   return node;
 }
 
@@ -95,14 +88,14 @@ class Persistence {
     };
   }
 
-  /** 校验并恢复项目（A9：format!=='icv' → 提示不支持；3.0/3.1/3.2 均接受并迁移，不校验版本号） */
+  /** 校验并恢复项目（A9：仅接受 format==='icv' 且 version==='3.2'；旧版项目不支持，请新建） */
   restore(raw: unknown): boolean {
     if (!raw || typeof raw !== 'object') {
       showToast('项目文件格式错误', false);
       return false;
     }
     const p = raw as Partial<FlowProject>;
-    if (p.format !== 'icv') {
+    if (p.format !== 'icv' || p.version !== '3.2') {
       showToast('旧版项目不支持，请新建', false);
       return false;
     }
