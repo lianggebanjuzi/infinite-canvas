@@ -1,22 +1,44 @@
 // src/v1/persistence.ts
 // .icproj 序列化/反序列化 —— 只有本模块可以读写 .icproj（共享约定第 5 条）
-// restore 校验 format==='icv' 且 version==='3.2'（A9：非 icv 拒绝；旧版项目不支持，请新建）
+// restore 校验 format==='icv' 且 version==='3.3'；兼容读取 3.2 旧文件（节点缺 outputText/textHistory 由 migrateNode 兜底）
 
 import { flowState } from './state/flow-state';
 import { Backend } from './api';
+import { TEXT_HISTORY_LIMIT, DEFAULT_INSTRUCTION } from './nodes/text-gen';
 import { showToast } from './ui/toast';
 
 /**
- * 当前格式节点归一（仅接受 image-gen / image-result，其余类型——含 3.0/3.1 旧类型——返回 null 被过滤）。
+ * 文本历史归一：只接受 {text: string, ts: number} 条目，过滤非法、按 TEXT_HISTORY_LIMIT 裁尾。
+ */
+function normalizeTextHistory(raw: unknown): TextGenHistoryItem[] {
+  if (!Array.isArray(raw)) return [];
+  const items: TextGenHistoryItem[] = [];
+  raw.forEach(h => {
+    if (!h || typeof h !== 'object') return;
+    const text = typeof (h as { text?: unknown }).text === 'string'
+      ? (h as { text: string }).text.trim()
+      : '';
+    if (!text) return;
+    const ts = typeof (h as { ts?: unknown }).ts === 'number'
+      ? (h as { ts: number }).ts
+      : 0;
+    items.push({ text, ts });
+  });
+  return items.slice(0, TEXT_HISTORY_LIMIT);
+}
+
+/**
+ * 当前格式节点归一（接受 image-gen / image-result / text-gen；其余类型——含 3.0/3.1 旧类型——返回 null 被过滤）。
  * - image-gen：字段校验，refImages 缺省补空；type 保持 image-gen。
  * - image-result：只读透传（type 保持、title 默认'生成结果'、params 恒 {}、imageUrl string|null、refImages []、parentId string|null 校验）。
+ * - text-gen：params 归一 { instruction, model }，outputText/textHistory 归一（3.2 旧文件缺字段时补默认值）。
  * 连线 / 标题 / 参数保留。
  */
 function migrateNode(raw: unknown): FlowNode | null {
   if (!raw || typeof raw !== 'object') return null;
   const r = raw as Record<string, unknown>;
   const t = r.type as string;
-  if (t !== 'image-gen' && t !== 'image-result') return null;
+  if (t !== 'image-gen' && t !== 'image-result' && t !== 'text-gen') return null;
   if (typeof r.id !== 'string') return null;
 
   const rawParams = r.params && typeof r.params === 'object'
@@ -37,10 +59,35 @@ function migrateNode(raw: unknown): FlowNode | null {
       title: typeof r.title === 'string' ? r.title : '生成结果',
       params: {},
       imageUrl: typeof r.imageUrl === 'string' ? r.imageUrl : null,
+      outputText: null,
+      textHistory: [],
       refImages: [],
       error: typeof r.error === 'string' ? r.error : null,
       lastRunAt: typeof r.lastRunAt === 'number' ? r.lastRunAt : null,
       parentId,
+    };
+  }
+
+  // 文本反推：3.3 新增（兼容 3.2 文件无 outputText/textHistory）
+  if (t === 'text-gen') {
+    return {
+      id: r.id,
+      type: 'text-gen',
+      x: typeof r.x === 'number' ? r.x : 0,
+      y: typeof r.y === 'number' ? r.y : 0,
+      ratio: typeof r.ratio === 'number' && r.ratio > 0 ? r.ratio : 3 / 4,
+      status: (['idle', 'run', 'done', 'stale', 'fail'] as NodeStatus[]).includes(r.status as NodeStatus) ? r.status as NodeStatus : 'idle',
+      title: typeof r.title === 'string' ? r.title : '文本反推',
+      params: { instruction: DEFAULT_INSTRUCTION, model: '', ...rawParams },
+      imageUrl: null,
+      outputText: typeof r.outputText === 'string' ? r.outputText : null,
+      textHistory: normalizeTextHistory(r.textHistory),
+      refImages: Array.isArray(r.refImages)
+        ? (r.refImages as unknown[]).filter((u): u is string => typeof u === 'string')
+        : [],
+      error: typeof r.error === 'string' ? r.error : null,
+      lastRunAt: typeof r.lastRunAt === 'number' ? r.lastRunAt : null,
+      parentId: null,
     };
   }
 
@@ -54,6 +101,8 @@ function migrateNode(raw: unknown): FlowNode | null {
     title: typeof r.title === 'string' ? r.title : '图片生成',
     params: { prompt: '', model: '', aspectRatio: '3:4', resolution: '2k', count: 1, ...rawParams },
     imageUrl: typeof r.imageUrl === 'string' ? r.imageUrl : null,
+    outputText: null,
+    textHistory: [],
     refImages: [],
     error: typeof r.error === 'string' ? r.error : null,
     lastRunAt: typeof r.lastRunAt === 'number' ? r.lastRunAt : null,
@@ -73,13 +122,14 @@ class Persistence {
   collect(): FlowProject {
     return {
       format: 'icv',
-      version: '3.2',
+      version: '3.3',
       projectName: flowState.projectName,
       canvas: { ...flowState.canvas },
       nodes: flowState.nodes.map(n => ({
         ...n,
         params: { ...(n.params || {}) },
         refImages: [...(n.refImages || [])],
+        textHistory: [...(n.textHistory || [])],
         parentId: n.parentId ?? null,
       })),
       edges: flowState.edges.map(e => ({ ...e })),
@@ -88,14 +138,14 @@ class Persistence {
     };
   }
 
-  /** 校验并恢复项目（A9：仅接受 format==='icv' 且 version==='3.2'；旧版项目不支持，请新建） */
+  /** 校验并恢复项目（format==='icv'；version 接受 3.3 与兼容读取 3.2；更旧版本不支持） */
   restore(raw: unknown): boolean {
     if (!raw || typeof raw !== 'object') {
       showToast('项目文件格式错误', false);
       return false;
     }
     const p = raw as Partial<FlowProject>;
-    if (p.format !== 'icv' || p.version !== '3.2') {
+    if (p.format !== 'icv' || (p.version !== '3.3' && p.version !== '3.2')) {
       showToast('旧版项目不支持，请新建', false);
       return false;
     }
@@ -115,7 +165,7 @@ class Persistence {
 
     flowState.replaceAll({
       format: 'icv',
-      version: '3.2',
+      version: '3.3',
       projectName: typeof p.projectName === 'string' ? p.projectName : '未命名项目',
       canvas: {
         scale: typeof p.canvas?.scale === 'number' ? p.canvas.scale : 1,

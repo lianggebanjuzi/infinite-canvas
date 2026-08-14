@@ -3,10 +3,22 @@
 // 与架构文档「四、数据结构与接口」保持一致
 
 /** 统一「生成节点」：多图参考（0~N）→ 生成 N 张新图（每张一张结果卡），注册式扩展 */
-type NodeType = 'image-gen' | 'image-result';
+type NodeType = 'image-gen' | 'image-result' | 'text-gen';
 
 /** 节点状态机五态 */
 type NodeStatus = 'idle' | 'run' | 'done' | 'stale' | 'fail';
+
+/** text-gen 参数：反推指令（用户可编辑）+ chat 模型 */
+interface TextGenParams {
+  instruction: string;   // 反推指令，默认 DEFAULT_INSTRUCTION
+  model: string;         // "provider_id:model_id"（chat 模型）
+}
+
+/** 节点级文本历史条目（text-gen 专属；不存图片信息，见架构决策） */
+interface TextGenHistoryItem {
+  text: string;          // 反推结果全文
+  ts: number;            // 运行完成时间戳（Date.now()）
+}
 
 /** 画布节点：宽固定 260，高 = 260 / ratio */
 interface FlowNode {
@@ -17,8 +29,10 @@ interface FlowNode {
   ratio: number;             // 高/宽 比例；卡片高 = CARD_W / ratio
   status: NodeStatus;
   title: string;             // 左上悬浮标签
-  params: Record<string, unknown>;  // 节点参数（见 StyleTransferParams）
+  params: Record<string, unknown>;  // 节点参数（见 StyleTransferParams / TextGenParams）
   imageUrl: string | null;   // 本节点输出图（卡片主视觉），与 refImages 严格分离
+  outputText: string | null; // 新增：text-gen 输出文本；其余类型恒 null
+  textHistory: TextGenHistoryItem[]; // 新增：节点级文本历史；非 text-gen 恒 []
   refImages: string[];       // 用户主动挂载的参考图（默认 []；上游可作参考图的图由 getReferenceImages 派生）
   error: string | null;      // fail 原因（红点 hover/点击展示）
   lastRunAt: number | null;
@@ -39,10 +53,10 @@ interface FlowCanvasState {
   panY: number;
 }
 
-/** .icproj 项目格式（3.2：新增 image-result 结果卡，节点带 parentId） */
+/** .icproj 项目格式（3.3：新增 text-gen 文本反推节点，节点带 outputText/textHistory） */
 interface FlowProject {
   format: 'icv';
-  version: '3.2';
+  version: '3.3';
   projectName: string;
   canvas: FlowCanvasState;
   nodes: FlowNode[];

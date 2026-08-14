@@ -3,6 +3,7 @@
 
 import { uid } from '../../utils/uid';
 import { nodeRegistry } from '../nodes/node-registry';
+import { TEXT_HISTORY_LIMIT } from '../nodes/text-gen';
 import { showToast } from '../ui/toast';
 
 /** 卡片固定宽度（与 canvas-view.CARD_W 同值；数据层不依赖视图层） */
@@ -122,6 +123,33 @@ export class FlowState {
     return result;
   }
 
+  /**
+   * 节点级文本历史写入唯一入口（run-engine 与 cmd-panel 回填共用）：
+   * 最新在前（unshift）；与头条 trim 后相同则忽略；超 TEXT_HISTORY_LIMIT 裁尾；notify 触发。
+   */
+  pushTextHistory(id: string, text: string): void {
+    const node = this.getNode(id);
+    if (!node) return;
+    const trimmed = (text || '').trim();
+    if (!trimmed) return;
+    if (!Array.isArray(node.textHistory)) node.textHistory = [];
+    const head = node.textHistory[0];
+    if (head && head.text && head.text.trim() === trimmed) return; // 连续重复忽略
+    node.textHistory.unshift({ text: trimmed, ts: Date.now() });
+    if (node.textHistory.length > TEXT_HISTORY_LIMIT) {
+      node.textHistory = node.textHistory.slice(0, TEXT_HISTORY_LIMIT);
+    }
+    this.updatedAt = Date.now();
+    this.dirty = true;
+    this.notify();
+  }
+
+  /** 读取节点级文本历史（最新在前；无历史返回 []） */
+  getTextHistory(id: string): TextGenHistoryItem[] {
+    const node = this.getNode(id);
+    return node && Array.isArray(node.textHistory) ? node.textHistory : [];
+  }
+
   /** 追加参考图（去重；仅改本节点 refImages，不改输出图）。调用方按需标 stale。 */
   addRefImage(id: string, url: string): void {
     const node = this.getNode(id);
@@ -190,6 +218,8 @@ export class FlowState {
       title: def.defaultTitle,
       params: { ...def.defaultParams },
       imageUrl: null,
+      outputText: null,
+      textHistory: [],
       refImages: [],
       error: null,
       lastRunAt: null,
@@ -349,6 +379,13 @@ export class FlowState {
       ...n,
       params: { ...(n.params || {}) },
       imageUrl: n.imageUrl ?? null,
+      outputText: typeof n.outputText === 'string' ? n.outputText : null,
+      textHistory: Array.isArray(n.textHistory)
+        ? n.textHistory.map(h => ({
+            text: String(h?.text ?? '').trim(),
+            ts: Number(h?.ts) || 0,
+          })).filter(h => h.text !== '')
+        : [],
       refImages: Array.isArray(n.refImages) ? n.refImages : [],
       error: n.error ?? null,
       lastRunAt: n.lastRunAt ?? null,
