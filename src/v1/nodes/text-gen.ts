@@ -8,7 +8,7 @@ import { nodeRegistry } from './node-registry';
 /** 节点级文本历史上限（跨文件共享约定：不硬编码） */
 export const TEXT_HISTORY_LIMIT = 20;
 
-/** 默认反推指令（用户可编辑） */
+/** 默认反推指令示例文案：仅作输入框占位提示用途（不再作为新建节点的默认值预填，见 defaultParams.instruction=''） */
 export const DEFAULT_INSTRUCTION = '反推这张图的提示词，中文，输出可直接用于生图';
 
 /** chat 默认模型 localStorage key（与绘图 icv_default_model 区分，互不污染） */
@@ -20,7 +20,7 @@ const def: NodeDefinition = {
   defaultTitle: '文本反推',
   defaultRatio: 3 / 4,
   defaultParams: {
-    instruction: DEFAULT_INSTRUCTION,
+    instruction: '', // 新建为空：用户按需填写，不再预填 DEFAULT_INSTRUCTION（避免"先删再填"）
     model: '',
   },
 

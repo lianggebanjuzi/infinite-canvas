@@ -10,7 +10,7 @@ import { cardView } from '../canvas/card-view';
 import { interactions } from '../canvas/interactions';
 import { runEngine } from '../engine/run-engine';
 import { fetchImageModels, fetchChatModels } from '../api';
-import { DEFAULT_CHAT_MODEL_KEY } from '../nodes/text-gen';
+import { DEFAULT_CHAT_MODEL_KEY, DEFAULT_INSTRUCTION } from '../nodes/text-gen';
 import { showToast } from './toast';
 
 const RATIO_OPTIONS = ['3:4', '2:3', '4:5', '9:16', '1:4', '1:8', '1:1', '4:3', '3:2', '5:4', '16:9', '21:9', '4:1', '8:1', 'Auto'];
@@ -18,6 +18,10 @@ const RES_OPTIONS = ['1k', '2k', '4k'];
 const COUNT_OPTIONS = [1, 2, 3, 4];
 
 const DEL_SVG = '<svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>';
+
+/** 指令输入框占位提示：text-gen 用反推指令示例（DEFAULT_INSTRUCTION 仅作文案，不预填节点），其余用通用编辑指令 */
+const PROMPT_INPUT_PLACEHOLDER = '输入指令编辑这张图，如：把背景换成浅灰水泥墙，加一盆绿萝';
+const TEXT_GEN_INPUT_PLACEHOLDER = `输入反推指令，如：${DEFAULT_INSTRUCTION}`;
 
 class CmdPanel {
   private el: HTMLElement | null = null;
@@ -220,6 +224,9 @@ class CmdPanel {
     // text-gen 面板：隐藏绘图参数 chips（比例/分辨率/张数），模型 chip 切到对话模型
     const isTextGen = node.type === 'text-gen';
     this.el.classList.toggle('textgen', isTextGen);
+
+    // 输入框占位提示跟随节点类型：text-gen 反推指令示例，其余通用编辑指令（切换选中节点时同步变化）
+    this.input.placeholder = isTextGen ? TEXT_GEN_INPUT_PLACEHOLDER : PROMPT_INPUT_PLACEHOLDER;
 
     this.ctxHint.textContent =
       node.status === 'stale' ? '· 上游已改，待重跑' :

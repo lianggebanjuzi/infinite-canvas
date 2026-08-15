@@ -8,6 +8,9 @@ import { linkView } from './link-view';
 /** 卡片固定宽度（原型 CARD_W=260） */
 export const CARD_W = 260;
 
+/** 点阵间距（px）：与 app.css .canvas-wrap background-size 同步，缩放时按 scale 联动 */
+const DOT_SPACING = 28;
+
 class CanvasView {
   wrap: HTMLElement | null = null;
   canvasEl: HTMLElement | null = null;
@@ -38,6 +41,12 @@ class CanvasView {
     if (!this.canvasEl) return;
     const { panX, panY, scale } = this.view;
     this.canvasEl.style.transform = `translate(${panX}px, ${panY}px) scale(${scale})`;
+    // 点阵背景在 wrap（视口，无 transform）上按屏幕空间平铺：position=pan 使网格原点与世界原点（经 transform 后位于 pan）对齐，网格随世界移动；
+    // size 乘 scale → 密度随缩放联动；视口裁剪 → 永不露白
+    if (this.wrap) {
+      this.wrap.style.backgroundPosition = `${panX}px ${panY}px`;
+      this.wrap.style.backgroundSize = `${DOT_SPACING * scale}px ${DOT_SPACING * scale}px`;
+    }
   }
 
   /** 屏幕坐标 → 世界坐标（画布坐标系） */

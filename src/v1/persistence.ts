@@ -4,7 +4,7 @@
 
 import { flowState } from './state/flow-state';
 import { Backend } from './api';
-import { TEXT_HISTORY_LIMIT, DEFAULT_INSTRUCTION } from './nodes/text-gen';
+import { TEXT_HISTORY_LIMIT } from './nodes/text-gen';
 import { showToast } from './ui/toast';
 
 /**
@@ -31,7 +31,7 @@ function normalizeTextHistory(raw: unknown): TextGenHistoryItem[] {
  * 当前格式节点归一（接受 image-gen / image-result / text-gen；其余类型——含 3.0/3.1 旧类型——返回 null 被过滤）。
  * - image-gen：字段校验，refImages 缺省补空；type 保持 image-gen。
  * - image-result：只读透传（type 保持、title 默认'生成结果'、params 恒 {}、imageUrl string|null、refImages []、parentId string|null 校验）。
- * - text-gen：params 归一 { instruction, model }，outputText/textHistory 归一（3.2 旧文件缺字段时补默认值）。
+ * - text-gen：params 归一 { instruction, model }（instruction 缺省置空，不预填），outputText/textHistory 归一（3.2 旧文件缺字段时补默认值）。
  * 连线 / 标题 / 参数保留。
  */
 function migrateNode(raw: unknown): FlowNode | null {
@@ -78,7 +78,8 @@ function migrateNode(raw: unknown): FlowNode | null {
       ratio: typeof r.ratio === 'number' && r.ratio > 0 ? r.ratio : 3 / 4,
       status: (['idle', 'run', 'done', 'stale', 'fail'] as NodeStatus[]).includes(r.status as NodeStatus) ? r.status as NodeStatus : 'idle',
       title: typeof r.title === 'string' ? r.title : '文本反推',
-      params: { instruction: DEFAULT_INSTRUCTION, model: '', ...rawParams },
+      // instruction 缺省置空（不预填 DEFAULT_INSTRUCTION；旧文件已有值由 rawParams 覆盖保留）
+      params: { instruction: '', model: '', ...rawParams },
       imageUrl: null,
       outputText: typeof r.outputText === 'string' ? r.outputText : null,
       textHistory: normalizeTextHistory(r.textHistory),

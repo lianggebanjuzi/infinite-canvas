@@ -10,7 +10,7 @@ type NodeStatus = 'idle' | 'run' | 'done' | 'stale' | 'fail';
 
 /** text-gen 参数：反推指令（用户可编辑）+ chat 模型 */
 interface TextGenParams {
-  instruction: string;   // 反推指令，默认 DEFAULT_INSTRUCTION
+  instruction: string;   // 反推指令；新建为空、用户自填（DEFAULT_INSTRUCTION 仅作占位提示）
   model: string;         // "provider_id:model_id"（chat 模型）
 }
 

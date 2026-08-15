@@ -95,9 +95,11 @@ class CardView {
 
     // 内容指纹：仅当主图/缩略行/标题/状态/文本变化时才重建 img.innerHTML 与标签文本。
     // 位置/选中态/状态视觉每次照常更新；避免滚轮缩放等高频调用反复重建大图 DOM（dataURL 大字符串）。
+    // 文本：运行结果优先；text-gen 未运行时回退显示用户填写的指令（所见即所得），其余节点无 instruction 恒为空。
     const refStrip = this._refStrip(node);
     const title = node.title || '节点';
-    const fp = { mainSrc, refStrip, title, status: node.status, text: node.outputText || '' };
+    const text = node.outputText || (node.params as unknown as TextGenParams).instruction || '';
+    const fp = { mainSrc, refStrip, title, status: node.status, text };
     const prev = this._contentFingerprint.get(node.id);
     const changed = !prev
       || prev.mainSrc !== fp.mainSrc
@@ -111,11 +113,10 @@ class CardView {
         // 底部叠加参考图缩略行（本节点 refImages ∪ 上游可作参考图的图，动态增删，叠加不改变卡片尺寸）；
         // 结果卡无参考图缩略行
         if (isTextGen) {
-          // 文本为主视觉：白底文本区（内部滚动），空态显示占位文案
-          const text = node.outputText || '';
+          // 文本为主视觉：白底文本区（内部滚动），未运行时显示用户填写的指令，空态显示占位文案
           img.innerHTML = text
             ? `<div class="pcard-text">${escapeHtml(text)}</div><div class="scan"></div>${refStrip}`
-            : `<div class="pcard-text empty"><span class="pcard-text-empty">运行后显示反推文本</span></div><div class="scan"></div>${refStrip}`;
+            : `<div class="pcard-text empty"><span class="pcard-text-empty">点击下方输入框填写指令</span></div><div class="scan"></div>${refStrip}`;
         } else if (mainSrc) {
           img.innerHTML = `<div class="ph" style="background-image:url('${escapeUrl(mainSrc)}')"></div><div class="scan"></div>${refStrip}`;
         } else {
