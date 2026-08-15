@@ -1,6 +1,8 @@
 // src/v1/main.ts
 // v1 应用启动编排：等待 pywebview → 注册节点 → 渲染画布 → 绑定 UI → 键盘/错误处理
 // A1：启动为空画布 + 空态引导（不自动加载模板）
+// 无边框窗口拖动说明：顶栏拖动由 pywebview 官方 drag-region 机制接管（不再手写 ctypes），
+// 前端只负责拦截交互元素防止误触发（详见 bindWindowControls）。
 
 import '../bridge';
 
@@ -107,6 +109,38 @@ async function fillDefaultModels(): Promise<void> {
   }
 }
 
+// ───────────────────────── 无边框窗口控制（自绘标题栏） ─────────────────────────
+// 窗口拖动由 pywebview 官方 drag-region 机制接管（不再手写 ctypes）：
+// pywebview 6.x 注入的 customize.js 在 document.body 上监听 mousedown（冒泡阶段），
+// 命中 '.pywebview-drag-region'（即本顶栏）后走内部桥接 pywebviewMoveWindow，
+// 由 WinForms 后端 move() 移动窗口（带 DPI 缩放；不经用户 js_api 异步层，稳定不抽搐）。
+// 前端只需：① 捕获阶段拦截"交互元素"上的 mousedown（stopPropagation），
+// 防止官方冒泡监听把点击项目名/窗口按钮误判为拖动；② 保留窗口控制按钮与双击最大化。
+function bindWindowControls(): void {
+  // 三个窗口按钮
+  document.getElementById('win-min')!.addEventListener('click', () => { window.pywebview.api.win_minimize(); });
+  document.getElementById('win-max')!.addEventListener('click', () => { window.pywebview.api.win_toggle_maximize(); });
+  document.getElementById('win-close')!.addEventListener('click', () => { window.pywebview.api.win_close(); });
+
+  const topbar = document.querySelector('.topbar') as HTMLElement;
+
+  // 捕获阶段（capture: true）拦截：交互元素（输入框/按钮/顶栏右侧窗口按钮区）不触发官方拖动。
+  // 只 stopPropagation、不 preventDefault：不影响 input 聚焦与按钮点击（click 是独立事件，不受影响）。
+  topbar.addEventListener('mousedown', (e: MouseEvent) => {
+    const t = e.target as HTMLElement;
+    if (t.closest('input, button, select, textarea, .topbar-right')) {
+      e.stopPropagation();
+    }
+  }, true);
+
+  // 双击顶栏空白 = 最大化/还原
+  topbar.addEventListener('dblclick', (e: MouseEvent) => {
+    const t = e.target as HTMLElement;
+    if (t.closest('input, button, select, textarea, .topbar-right')) return;
+    window.pywebview.api.win_toggle_maximize();
+  });
+}
+
 // ───────────────────────── 启动 ─────────────────────────
 async function init(): Promise<void> {
   installGlobalErrorHandler();
@@ -125,6 +159,7 @@ async function init(): Promise<void> {
   settingsPanel.init();
 
   bindKeyboard();
+  bindWindowControls();
 
   // 初始渲染（空画布 → 空态引导）
   flowState.notify();

@@ -66,6 +66,35 @@ def init_user_data():
 
 
 # ─────────────────────────────────────────
+# 窗口句柄工具（无边框窗口专用）
+# ─────────────────────────────────────────
+def _get_window_hwnd():
+    """获取当前顶层窗口的 Win32 句柄（HWND）。
+
+    优先取 pywebview 暴露的 native 句柄（Windows 下为 WinForms 窗体对象，
+    其 .Handle 即 HWND），不再依赖 FindWindowW 对窗口标题的耦合。失败返回 0。
+    当前仅用于 _apply_rounded_corners（圆角补偿）；窗口拖动已由 pywebview
+    官方 drag-region 机制接管，不再需要手写 ctypes。
+    """
+    try:
+        win = webview.windows[0]
+        if win is None:
+            return 0
+        native = win.native
+        if native is None:
+            return 0
+        # 兼容 native 直接暴露整数句柄的极端情况；常规路径为 .Handle（IntPtr）
+        handle = getattr(native, 'Handle', None)
+        if handle is None:
+            return native if isinstance(native, int) else 0
+        if isinstance(handle, int):
+            return handle
+        return int(handle.ToInt32())
+    except Exception:
+        return 0
+
+
+# ─────────────────────────────────────────
 # 统一 API 类（所有 AI 逻辑统一走 UnifiedAPIRouter）
 # ─────────────────────────────────────────
 class InfiniteCanvasAPI:
@@ -77,6 +106,8 @@ class InfiniteCanvasAPI:
         self.image     = ImageAPI(self.settings, self.unified)
         self.clipboard = ClipboardAPI()
         self.project   = ProjectAPI()
+        # 无边框窗口状态（自绘标题栏）
+        self._win_maximized = False  # 最大化状态标志（win_toggle_maximize 切换用）
 
     # ─────────────────────────────────────────
     # 供应商管理
@@ -267,6 +298,27 @@ class InfiniteCanvasAPI:
     def save_prompts_library(self, data):
         return self.settings.save_prompts_library(data)
 
+    # ─────────────────────────────────────────
+    # 窗口控制（无边框自绘标题栏）
+    # ─────────────────────────────────────────
+    def win_minimize(self):
+        """最小化窗口"""
+        webview.windows[0].minimize()
+
+    def win_toggle_maximize(self):
+        """最大化 / 还原切换（pywebview 的 maximize()/restore() 是两个方法，用一个标志位切换）"""
+        win = webview.windows[0]
+        if self._win_maximized:
+            win.restore()
+            self._win_maximized = False
+        else:
+            win.maximize()
+            self._win_maximized = True
+
+    def win_close(self):
+        """关闭窗口"""
+        webview.windows[0].destroy()
+
 
 # ─────────────────────────────────────────
 # 启动应用
@@ -292,6 +344,23 @@ def build_frontend_for_development():
         raise RuntimeError('TypeScript 前端编译失败，请查看上方错误')
 
 
+def _apply_rounded_corners():
+    """Windows 11 无边框窗口圆角补偿：用 DWM 接口把圆角要回来（无边框窗口可能变直角 + 丢阴影）。
+
+    句柄取自 pywebview native（_get_window_hwnd），不再依赖 FindWindowW 标题匹配。
+    Win10 等不支持的环境会被 try/except 静默跳过（直角属可接受差异）。
+    """
+    try:
+        import ctypes
+        hwnd = _get_window_hwnd()
+        if hwnd:
+            pref = ctypes.c_int(2)  # DWMWCP_ROUND：强制圆角
+            # 33 = DWMWA_WINDOW_CORNER_PREFERENCE
+            ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, 33, ctypes.byref(pref), 4)
+    except Exception:
+        pass  # Win10 等不支持的环境静默跳过
+
+
 def main():
     if not getattr(sys, 'frozen', False):
         build_frontend_for_development()
@@ -309,8 +378,17 @@ def main():
         width     = 1400,
         height    = 900,
         resizable = True,
-        min_size  = (800, 600)
+        min_size  = (800, 600),
+        frameless = True,      # 新增：去掉 Windows 原生标题栏，改由前端自绘顶栏
+        easy_drag = False      # 必须关掉：默认会在"按住任意位置"时拖动整个窗口，
+                               # 会和画布平移/框选冲突；拖拽改由 pywebview 官方
+                               # drag-region 机制接管（顶栏 .pywebview-drag-region）
     )
+
+    # Win11 无边框窗口圆角补偿：start 前 hwnd 可能尚未生成，直接调用未必生效，
+    # 因此注册 shown 事件（窗口显示后再设置，可靠路径），并提前尝试一次（hwnd 已存在时立即生效）。
+    window.events.shown += _apply_rounded_corners
+    _apply_rounded_corners()
 
     webview.start(debug=getattr(sys, 'frozen', False) == False)
 

@@ -12,7 +12,7 @@ body { font-family: var(--font); background: var(--bg-app); color: var(--text-1)
 /* ═══════════ 顶部栏（极简） ═══════════ */
 .topbar {
   height:44px; display:flex; align-items:center; padding:0 16px; gap:12px;
-  border-bottom:1px solid var(--border-soft); background: var(--bg-panel);
+  border-bottom:1px solid var(--border-soft); background: var(--bg-app);
   position:relative; z-index:20;
 }
 .logo { display:flex; align-items:center; gap:8px; font-weight:600; font-size:13px; letter-spacing:.02em; }
@@ -28,6 +28,15 @@ body { font-family: var(--font); background: var(--bg-app); color: var(--text-1)
 .save-dot { width:6px; height:6px; border-radius:50%; background: var(--warm); opacity:0; transition: opacity .2s; flex-shrink:0; }
 .save-dot.show { opacity:1; }
 .topbar-right { margin-left:auto; display:flex; gap:4px; align-items:center; }
+
+/* ═══════════ 自绘窗口控制按钮（无边框窗口；关闭钮悬停用状态色 --st-fail，不引入新颜色） ═══════════ */
+.win-btn {
+  width:38px; height:30px; display:flex; align-items:center; justify-content:center;
+  border:none; background:transparent; border-radius: var(--r-sm);
+  color: var(--text-2); cursor:pointer; transition: all .15s;
+}
+.win-btn:hover { background: var(--bg-hover); color: var(--text-1); }
+.win-btn.win-close:hover { background: var(--st-fail); color:#fff; }
 .icon-btn {
   width:30px; height:30px; display:flex; align-items:center; justify-content:center;
   border:none; background:transparent; border-radius: var(--r-sm); color: var(--text-2);
@@ -78,7 +87,7 @@ body { font-family: var(--font); background: var(--bg-app); color: var(--text-1)
 .canvas-wrap { flex:1; position:relative; overflow:hidden; background: var(--bg-app); }
 .canvas {
   position:absolute; inset:0; transform-origin: 0 0;
-  background-image: radial-gradient(var(--canvas-dot) 1px, transparent 1px);
+  background-image: radial-gradient(var(--canvas-dot) 1.5px, transparent 1.5px);
   background-size: 28px 28px;
 }
 #link-layer { position:absolute; inset:0; width:100%; height:100%; overflow:visible; pointer-events:none; }
