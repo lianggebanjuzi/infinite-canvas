@@ -120,6 +120,7 @@ const { canvasView } = require(`${BASE}/canvas/canvas-view.js`);
 const apiMod = require(`${BASE}/api.js`);
 const toastMod = require(`${BASE}/ui/toast.js`);
 const { cmdPanel } = require(`${BASE}/ui/cmd-panel.js`);
+const { floatingPanels } = require(`${BASE}/ui/floating-panels.js`);
 
 // 依赖打桩（在 cmd-panel require 后、调用前替换运行时访问）
 apiMod.fetchImageModels = async () => [];
@@ -201,12 +202,13 @@ async function main() {
   console.log('\n▶ C1: image-gen（含引擎产出节点）面板完整可用（readonly 已移除）');
   {
     reset();
+    floatingPanels.show(); // Tab 化：先呼出面板（选中不再自动显示），再验证显示态下的面板能力
     const n = flowState.addNode('image-gen', 0, 0, { parentId: 'some-gen', title: '生成结果', imageUrl: 'data:image/png;base64,x' });
     selection.select(n.id);
     panelClasses.clear();
     cmdPanel.sync();
     check(!panelClasses.has('readonly'), '引擎产出 image-gen 面板不进入 readonly（双卡模型）');
-    check(panelClasses.has('show'), '引擎产出 image-gen 面板正常显示');
+    check(panelClasses.has('show'), '引擎产出 image-gen 面板正常显示（Tab 呼出后）');
     check(inputEl.value === '', 'image-gen 无 prompt → 输入框为空（可编辑）');
     check(sendEl.disabled === false, 'image-gen 非运行态 → 发送钮可用');
   }
@@ -214,6 +216,7 @@ async function main() {
   console.log('\n▶ C2: image-gen 文本反推节点取消选中 → reverse class 清理（P3 修复守护）');
   {
     reset();
+    floatingPanels.show(); // Tab 化：先呼出面板，验证显示态下的 reverse 语义
     panelClasses.clear();
     const n = flowState.addNode('image-gen', 0, 0, {
       params: { prompt: '', model: 'p:draw', aspectRatio: '3:4', resolution: '2k', count: 1, modelType: 'text' },

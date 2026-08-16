@@ -34,7 +34,8 @@
       <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M5 12h14"/></svg>
     </button>
     <button class="win-btn" id="win-max" title="最大化 / 还原">
-      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="5" y="5" width="14" height="14" rx="2"/></svg>
+      <svg class="win-max-ico" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="5" y="5" width="14" height="14" rx="2"/></svg>
+      <svg class="win-restore-ico" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="9" width="10" height="10" rx="1.5"/><path d="M9 5v4h10v10h-4"/></svg>
     </button>
     <button class="win-btn win-close" id="win-close" title="关闭">
       <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
@@ -45,7 +46,7 @@
 <div class="main">
   <!-- 左侧：历史图库（悬浮抽屉 + 把手） -->
   <div class="left-drawer" id="left-drawer">
-    <button class="drawer-handle" id="drawer-handle" title="历史图库">
+    <button class="drawer-handle" id="drawer-handle" title="收起历史图库">
       <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m9 6 6 6-6 6"/></svg>
     </button>
     <aside class="sidebar-left" id="sidebar-left">
@@ -62,6 +63,32 @@
       <div class="history-grid" id="history-grid"></div>
       <div class="history-empty" id="history-empty" style="display:none;"></div>
     </aside>
+  </div>
+
+  <!-- 左侧第二抽屉：资产库（与历史图库并列把手，互斥开抽屉；互斥由 main.ts 编排） -->
+  <div class="left-drawer asset-drawer" id="asset-drawer">
+    <button class="drawer-handle" id="asset-handle" title="收起资产库">
+      <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m9 6 6 6-6 6"/></svg>
+    </button>
+    <aside class="sidebar-left" id="asset-sidebar">
+      <div class="side-head"><span>资产库</span><span class="asset-count" id="asset-count"></span></div>
+      <div class="history-search" id="asset-search-wrap">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
+        <input class="history-search-input" id="asset-search" placeholder="搜 prompt / 模型 / 标签…" spellcheck="false">
+      </div>
+      <div class="history-grid" id="asset-grid"></div>
+      <div class="history-empty" id="asset-empty" style="display:none;"></div>
+    </aside>
+  </div>
+
+  <!-- 左侧胶囊调（改版）：历史图库 / 资产库两个图标入口；点图标抽屉滑出，再点收起/切换（互斥由 main.ts 编排） -->
+  <div class="left-capsule" id="left-capsule">
+    <button class="capsule-btn" id="capsule-history" title="历史图库">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></svg>
+    </button>
+    <button class="capsule-btn" id="capsule-assets" title="资产库">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m12 3 2.7 5.5 6.1.9-4.4 4.3 1 6.1-5.4-2.9-5.4 2.9 1-6.1L3.2 9.4l6.1-.9L12 3Z"/></svg>
+    </button>
   </div>
 
   <!-- 画布 -->

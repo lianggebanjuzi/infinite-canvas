@@ -17,6 +17,8 @@ import base64 as b64lib
 import io
 import os
 
+from urllib.parse import urlparse
+
 from PIL import Image
 
 from backend.api.errors import (
@@ -34,6 +36,33 @@ from backend.api.model_rules import (
     detect_model_type as detect_model_type_str,
     detect_model_format_name,
 )
+
+
+# ─────────────────────────────────────────
+# 图片扩展名推断（下载链路用）
+# ─────────────────────────────────────────
+_IMAGE_EXT_MAP = {
+    'jpeg': 'jpg', 'jpg': 'jpg', 'png': 'png', 'webp': 'webp',
+    'gif': 'gif', 'bmp': 'bmp', 'svg': 'svg', 'tiff': 'tiff',
+}
+
+
+def _guess_image_ext(content_type, content):
+    """
+    根据响应 Content-Type 与文件魔数推断图片扩展名（用于 data URL 的 mime 类型）。
+    优先信任 Content-Type；缺失或非图片类型（如 application/octet-stream）时，
+    用 PIL 读取魔数兜底；仍无法识别则默认 png。
+    """
+    ct = (content_type or '').lower()
+    for key, ext in _IMAGE_EXT_MAP.items():
+        if key in ct:
+            return ext
+    try:
+        with Image.open(io.BytesIO(content)) as im:
+            fmt = (im.format or '').lower()
+            return _IMAGE_EXT_MAP.get(fmt, 'png')
+    except Exception:
+        return 'png'
 
 
 # ─────────────────────────────────────────
@@ -109,8 +138,9 @@ _RESOLUTION_MAP = {'1k': '1K', '2k': '2K', '4k': '4K'}
 # ─────────────────────────────────────────
 class UnifiedAPIRouter:
 
-    def __init__(self, provider_api):
+    def __init__(self, provider_api, settings_api=None):
         self.provider_api = provider_api
+        self.settings_api = settings_api  # 注入 SettingsAPI（读 image_save_path，P2 主生成链路落盘用）
         self._providers_cache = []
         self._cache_time = 0
         self._cache_ttl = 30
@@ -286,12 +316,28 @@ class UnifiedAPIRouter:
                 if result.get('success'):
                     result = self._save_images_to_local(result)
                 return result
+            elif response.status_code == 202:
+                # FluxPort 等中转站对 Gemini 图片走「异步任务」模式：
+                # POST generateContent 立即返回 202 + 任务对象，需按 poll_url 轮询直到出图。
+                try:
+                    task_data = response.json()
+                except ValueError:
+                    task_data = {}
+                origin = self._get_api_origin(api_url)
+                result = self._poll_async_image_task(task_data, origin, headers, proxies)
+                if result.get('success'):
+                    result = self._save_images_to_local(result)
+                return result
             else:
                 self._handle_http_error(response)
         except requests.exceptions.ConnectionError:
             raise UpstreamError(503, "无法连接到服务器，请检查网络或代理设置")
         except requests.exceptions.Timeout:
             raise UpstreamTimeoutError()
+        except AppError:
+            # 保持既有 AppError 语义（401/429/5xx/轮询失败/超时等），
+            # 避免被下方通用兜底转成 UnknownError 丢失错误码
+            raise
         except Exception as e:
             print(f"[UnifiedAPI] 图片生成异常: {e}")
             raise UnknownError(str(e))
@@ -602,6 +648,223 @@ class UnifiedAPIRouter:
         return url, payload
 
     # ─────────────────────────────────────────
+    # 内部方法：异步任务轮询（HTTP 202 -> 轮询出图）
+    # ─────────────────────────────────────────
+    def _get_api_origin(self, api_url):
+        """
+        从 api_url 提取 origin（scheme://host[:port]）。
+        api_url 可能带 /v1 路径（如 https://api.ai-media.vip/v1），需剥掉路径只留 origin。
+        """
+        parsed = urlparse(api_url)
+        if parsed.scheme and parsed.netloc:
+            return f"{parsed.scheme}://{parsed.netloc}"
+        return api_url.rstrip('/')
+
+    def _join_origin_path(self, origin, path):
+        """把相对路径拼到 origin 上，保证 origin 与 path 之间只保留一个斜杠"""
+        origin = origin.rstrip('/')
+        path = path if path.startswith('/') else '/' + path
+        return origin + path
+
+    def _parse_expires_at(self, expires_at):
+        """
+        解析任务 expires_at 时间戳（如 2026-08-17T00:19:36+08:00），返回 epoch 秒；
+        解析失败返回 None（调用方回退到固定 120s 超时上限）。
+        """
+        if not isinstance(expires_at, str) or not expires_at.strip():
+            return None
+        try:
+            from datetime import datetime
+            dt = datetime.fromisoformat(expires_at.strip().replace('Z', '+00:00'))
+            return dt.timestamp()
+        except Exception:
+            return None
+
+    def _extract_task_error(self, data):
+        """从异步任务响应中提取人类可读的错误信息"""
+        if not isinstance(data, dict):
+            return "未知错误"
+        error = data.get('error')
+        if isinstance(error, dict):
+            return error.get('message') or str(error)
+        if error:
+            return str(error)
+        error_code = data.get('error_code')
+        if error_code:
+            return f"error_code={error_code}"
+        return "未知错误"
+
+    def _extract_async_image_urls(self, result, origin):
+        """
+        从异步任务完成响应中提取图片 URL 列表。
+        返回 (images, kind)：
+          - kind='url'：data[].url 完整 URL，可直接下载
+          - kind='fileuri'：candidates[].content.parts[].fileData.fileUri 相对路径，
+            已拼 origin，需带 Authorization 下载
+          - 未出图返回 ([], None)
+        """
+        if not isinstance(result, dict):
+            return [], None
+
+        # 优先 data 数组（完整 URL，直接可用）
+        data = result.get('data')
+        if isinstance(data, list):
+            url_images = []
+            for item in data:
+                if not isinstance(item, dict):
+                    continue
+                raw = item.get('url')
+                if not raw:
+                    continue
+                raw = str(raw).strip()
+                if raw.startswith(('http://', 'https://')):
+                    url_images.append(raw)
+                else:
+                    url_images.append(self._join_origin_path(origin, raw))
+            if url_images:
+                return url_images, 'url'
+
+        # candidates[].content.parts[].fileData.fileUri（相对路径，需拼 origin）
+        candidates = result.get('candidates')
+        if isinstance(candidates, list):
+            file_images = []
+            for candidate in candidates:
+                if not isinstance(candidate, dict):
+                    continue
+                content = candidate.get('content')
+                parts = content.get('parts') if isinstance(content, dict) else None
+                if not isinstance(parts, list):
+                    continue
+                for part in parts:
+                    if not isinstance(part, dict):
+                        continue
+                    file_data = part.get('fileData') or part.get('file_data')
+                    if not isinstance(file_data, dict):
+                        continue
+                    file_uri = file_data.get('fileUri')
+                    if not file_uri:
+                        continue
+                    file_uri = str(file_uri).strip()
+                    if file_uri.startswith(('http://', 'https://')):
+                        file_images.append(file_uri)
+                    else:
+                        file_images.append(self._join_origin_path(origin, file_uri))
+            if file_images:
+                return file_images, 'fileuri'
+
+        return [], None
+
+    def _download_authed_image_to_base64(self, url, headers, proxies):
+        """
+        带 Authorization 下载图片并转 base64 data URL。
+        fileUri 指向的资源是受保护资产，必须带 Bearer key 才能下载。
+        """
+        try:
+            resp = requests.get(url, headers=headers, timeout=60, proxies=proxies)
+            if resp.status_code != 200:
+                print(f"[UnifiedAPI] 异步任务图片下载失败: HTTP {resp.status_code} | {url[:80]}")
+                return None
+            content_type = resp.headers.get('Content-Type', 'image/png')
+            ext = _guess_image_ext(content_type, resp.content)
+            b64_data = b64lib.b64encode(resp.content).decode('utf-8')
+            return f"data:image/{ext};base64,{b64_data}"
+        except Exception as e:
+            print(f"[UnifiedAPI] 异步任务图片下载异常: {e}")
+            return None
+
+    def _poll_async_image_task(self, task_data, origin, headers, proxies):
+        """
+        轮询 FluxPort 风格异步图片任务（HTTP 202 -> 任务对象 -> 轮询直到出图）。
+        返回 {"success": True, "image_url": ..., "images": [...]}；
+        失败/超时抛 AppError 子类（UpstreamError / UpstreamTimeoutError）。
+        """
+        if not isinstance(task_data, dict):
+            task_data = {}
+
+        # 确定轮询 URL：poll_url -> result_url -> /v1/images/tasks/{task_id}
+        poll_url = task_data.get('poll_url') or task_data.get('result_url') or ''
+        task_id = task_data.get('task_id') or task_data.get('id') or ''
+        if not poll_url and task_id:
+            poll_url = f"/v1/images/tasks/{task_id}"
+        if not poll_url:
+            raise UpstreamError(502, "异步任务响应缺少 poll_url / result_url / task_id，无法轮询")
+        if not poll_url.startswith(('http://', 'https://')):
+            poll_url = self._join_origin_path(origin, poll_url)
+
+        # 轮询间隔：poll_after_ms（默认 2000ms），下限 0.5s 防死循环
+        poll_after_ms = task_data.get('poll_after_ms')
+        try:
+            poll_interval = float(poll_after_ms) / 1000.0 if poll_after_ms else 2.0
+        except (TypeError, ValueError):
+            poll_interval = 2.0
+        poll_interval = max(0.5, poll_interval)
+
+        # 总超时上限：默认 120s；若有 expires_at 且更早，则取较小者
+        timeout_limit = 120.0
+        expires_ts = self._parse_expires_at(task_data.get('expires_at'))
+        if expires_ts is not None:
+            remaining = expires_ts - time.time()
+            if remaining > 0:
+                timeout_limit = min(timeout_limit, remaining)
+        deadline = time.time() + timeout_limit
+
+        print(f"[UnifiedAPI] 异步任务已接受(202) | task_id={task_id or '-'} | poll_url={poll_url} | "
+              f"间隔={poll_interval:.1f}s | 超时={timeout_limit:.0f}s")
+
+        while time.time() < deadline:
+            try:
+                resp = requests.get(poll_url, headers=headers, timeout=60, proxies=proxies)
+            except requests.exceptions.ConnectionError:
+                raise UpstreamError(503, "无法连接到服务器，请检查网络或代理设置")
+            except requests.exceptions.Timeout:
+                raise UpstreamTimeoutError()
+
+            if resp.status_code != 200:
+                self._handle_http_error(resp)
+
+            try:
+                data = resp.json()
+            except ValueError:
+                print("[UnifiedAPI] 异步任务轮询响应非 JSON，稍后重试...")
+                time.sleep(poll_interval)
+                continue
+
+            # 失败状态 / 错误字段
+            status = data.get('status') if isinstance(data, dict) else None
+            if isinstance(status, str) and status.lower() in (
+                'failed', 'error', 'canceled', 'cancelled', 'timeout'
+            ):
+                raise UpstreamError(502, f"异步任务失败: {self._extract_task_error(data)}")
+
+            if isinstance(data, dict) and (data.get('error') or data.get('error_code')):
+                raise UpstreamError(502, f"异步任务错误: {self._extract_task_error(data)}")
+
+            # 提取图片
+            images, kind = self._extract_async_image_urls(data, origin)
+            if images:
+                print(f"[UnifiedAPI] 异步任务完成 | task_id={task_id or '-'} | 图片 {len(images)} 张")
+                if kind == 'fileuri':
+                    # fileUri 为受保护资源，需带 Authorization 下载转 base64
+                    converted = [
+                        u for u in (
+                            self._download_authed_image_to_base64(u, headers, proxies)
+                            for u in images
+                        )
+                        if u
+                    ]
+                    if converted:
+                        images = converted
+                return {
+                    "success":   True,
+                    "image_url": images[0],
+                    "images":    images
+                }
+
+            time.sleep(poll_interval)
+
+        raise UpstreamTimeoutError("图片生成超时，请稍后重试")
+
+    # ─────────────────────────────────────────
     # 内部方法：响应解析
     # ─────────────────────────────────────────
     def _parse_chat_response(self, result):
@@ -869,7 +1132,13 @@ class UnifiedAPIRouter:
         将图片保存到本地做持久化，但始终保留 base64 格式返回给前端。
         - base64 → 解码保存，前端仍收到原始 base64
         - URL    → 下载保存后转换为 base64 返回给前端
+        返回结果增加 saved_to_disk: bool —— 是否写入用户配置目录（P2/P3；
+        tempfile 兜底为 false，前端据此 toast「图片保存路径未设置…」且不阻断）。
         """
+        configured_dir = self._configured_image_save_dir()
+        # 本次保存目标：显式传入目录优先；否则用户配置目录；都无 → 内部 _get_save_dir 回退 tempfile（saved_to_disk=false）
+        target = save_dir if (save_dir and os.path.isdir(save_dir)) else configured_dir
+        saved_to_disk = bool(target)
 
         def process(img):
             if not isinstance(img, str):
@@ -902,11 +1171,35 @@ class UnifiedAPIRouter:
                 parsed['images'][0] if parsed.get('images')
                 else parsed['image_url']
             )
+        parsed['saved_to_disk'] = saved_to_disk
         return parsed
 
+    def _configured_image_save_dir(self):
+        """读取用户配置的图片保存目录；未配置/读取失败返回 None（P2 主生成链路落盘用）"""
+        if self.settings_api is None:
+            return None
+        try:
+            settings = self.settings_api.load_settings() or {}
+            path = (settings.get('image_save_path') or '').strip()
+            return path or None
+        except Exception:
+            return None
+
     def _get_save_dir(self, save_dir=''):
+        """解析图片落盘目录（P2）：
+        显式传入且存在 → 用之；否则读 settings.image_save_path（makedirs 兜底创建）；
+        仅配置缺失/非法才回退 tempfile（保证 base64 仍可用）。
+        """
         if save_dir and os.path.isdir(save_dir):
             return save_dir
+        configured = self._configured_image_save_dir()
+        if configured:
+            try:
+                os.makedirs(configured, exist_ok=True)
+                if os.path.isdir(configured):
+                    return configured
+            except Exception:
+                pass
         return tempfile.gettempdir()
 
     def _make_filename(self, ext='png'):
@@ -980,19 +1273,7 @@ class UnifiedAPIRouter:
                 return None
 
             content_type = resp.headers.get('Content-Type', 'image/png')
-            ext = 'png'
-            if 'jpeg' in content_type or 'jpg' in content_type:
-                ext = 'jpg'
-            elif 'webp' in content_type:
-                ext = 'webp'
-            elif 'gif' in content_type:
-                ext = 'gif'
-            elif 'bmp' in content_type:
-                ext = 'bmp'
-            elif 'svg' in content_type:
-                ext = 'svg'
-            elif 'tiff' in content_type:
-                ext = 'tiff'
+            ext = _guess_image_ext(content_type, resp.content)
 
             base64_data = b64lib.b64encode(resp.content).decode('utf-8')
             data_url = f"data:image/{ext};base64,{base64_data}"

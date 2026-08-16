@@ -15,8 +15,10 @@ from backend.api.utils import atomic_write_json, append_json_line, get_tk_root
 class ProjectAPI:
     """项目文件管理类"""
 
-    def __init__(self):
+    def __init__(self, settings_api=None, fallback_dir=None):
         self.current_project_path = None  # 当前项目文件路径
+        self.settings_api = settings_api  # 注入 SettingsAPI（读 image_save_path 推导资产索引落点；可为 None）
+        self.fallback_dir = fallback_dir  # 降级目录（未配置图片保存路径时资产索引写这里；main.py 传 APP_DIR）
         self.lock = threading.Lock()      # 保存互斥兜底（防御性；pywebview js_api 本就在 GUI 线程串行）
 
     def save_project(self, data, path=None):
@@ -156,11 +158,31 @@ class ProjectAPI:
             return {"status": "error", "message": str(e)}
 
     def _assets_path(self):
-        """推导 <项目名>.assets.json 落点（与 .history.jsonl 同目录兄弟；复用 _history_path 模式）。
+        """资产索引主落点（A1：不再依赖 current_project_path，未保存项目也可写）。
 
-        可变资产索引（采纳/锁定/tags/category）独立于 append-only history.jsonl 与 .icproj 大文件；
-        无路径返回 None。
+        读盘/写盘双级解析：用户配置了图片保存目录 → `<保存目录>/assets.json`；
+        未配置 → 降级 `fallback_dir/assets.json`（与 settings.json 同处，可写）。
+        **永不返回 None**（根因修复：旧实现未保存项目返回 None → no_path 报错）。
         """
+        configured = self._configured_image_save_dir()
+        if configured:
+            return os.path.join(configured, 'assets.json')
+        fallback = self.fallback_dir or os.path.expanduser('~')
+        return os.path.join(fallback, 'assets.json')
+
+    def _configured_image_save_dir(self):
+        """读取用户配置的图片保存目录；未配置/读取失败返回 None"""
+        if self.settings_api is None:
+            return None
+        try:
+            settings = self.settings_api.load_settings() or {}
+            path = (settings.get('image_save_path') or '').strip()
+            return path or None
+        except Exception:
+            return None
+
+    def _legacy_assets_path(self):
+        """旧项目迁移落点（A4）：项目文件同目录 `<项目名>.assets.json`（incremental-2 布局）；无项目路径返回 None"""
         if not self.current_project_path:
             return None
         base = self.current_project_path
@@ -168,31 +190,118 @@ class ProjectAPI:
             base = base[:-len('.icproj')]
         return base + '.assets.json'
 
+    def _read_records(self, path):
+        """读取资产索引文件的 records 列表；文件缺失/损坏返回 []（容错，兼容 version 1/2 两种格式）"""
+        try:
+            if not path or not os.path.exists(path):
+                return []
+            with open(path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            if isinstance(data, list):
+                # version 1 旧格式：顶层即记录数组
+                return [r for r in data if isinstance(r, dict)]
+            if isinstance(data, dict) and isinstance(data.get('records'), list):
+                # version 2 新格式：{"version": 2, "records": [...]}
+                return [r for r in data['records'] if isinstance(r, dict)]
+            return []
+        except Exception as e:
+            print(f"读取资产索引失败({path}): {e}")
+            return []
+
+    def _merge_records(self, main, legacy):
+        """按 key 合并两条记录列表：主索引优先，仅补主索引缺失的 key（A4 迁移，幂等去重）"""
+        by_key = {}
+        for r in main:
+            key = r.get('key')
+            if key:
+                by_key[key] = r
+        for r in legacy:
+            key = r.get('key')
+            if key and key not in by_key:
+                by_key[key] = r
+        return list(by_key.values())
+
     def save_assets(self, records):
-        """保存可变资产索引到 <项目名>.assets.json（原子写；采纳/锁定/tags/category 高频小变更独立落盘）"""
+        """保存可变资产索引到主落点（<图片保存目录>/assets.json；未配置降级 fallback_dir/assets.json，原子写）。
+
+        返回（接口契约）：
+        - {status:'success'} 正常落盘到用户配置目录
+        - {status:'success', degraded:true, message:'请先在设置中配置图片保存路径'} 降级落盘（A2：数据已保存但提示配置路径）
+        - {status:'error', message} IO 失败（人话）
+        """
         try:
             assets_path = self._assets_path()
-            if not assets_path:
-                return {"status": "error", "message": "no_path"}
+            directory = os.path.dirname(assets_path)
+            if directory:
+                os.makedirs(directory, exist_ok=True)
             with self.lock:
-                atomic_write_json(assets_path, {"records": records if isinstance(records, list) else []})
+                atomic_write_json(assets_path, {
+                    "version": 2,
+                    "records": records if isinstance(records, list) else []
+                })
+            if not self._configured_image_save_dir():
+                # 降级：数据已写入 fallback_dir，但路径未配置 → 人话提示（不得出现 no_path 等开发话术）
+                return {"status": "success", "degraded": True, "message": "请先在设置中配置图片保存路径"}
             return {"status": "success"}
         except Exception as e:
             print(f"保存资产索引失败: {e}")
             return {"status": "error", "message": str(e)}
 
     def load_assets(self):
-        """读取可变资产索引；文件缺失返回 empty（旧项目默认全未采纳/未锁定）；损坏容错回退空索引"""
+        """读取资产索引（A3/A4）：
+        主索引读盘顺序 = 图片保存目录 → fallback_dir（找第一个存在的文件；都不存在 → empty）。
+        旧项目迁移：current_project_path 存在且旧位置 `<项目名>.assets.json` 有数据 → 按 key 合并
+        （主索引优先，仅补缺失 key）→ 合并结果写回主索引 → best-effort 删旧文件。
+        额外收敛：配置了图片保存目录但该处尚无 assets.json、且 fallback_dir 有降级期文件时，
+        读 fallback 后同样写回主索引 + 删 fallback 文件（防「取消采纳」被旧文件复活）。
+        """
         try:
-            assets_path = self._assets_path()
-            if not assets_path or not os.path.exists(assets_path):
+            main_path = self._assets_path()
+            configured_dir = self._configured_image_save_dir()
+
+            # 主索引读盘顺序：图片保存目录 → fallback_dir
+            read_path = main_path
+            migrated_from_fallback = False
+            if configured_dir and not os.path.exists(main_path):
+                fallback_candidate = os.path.join(self.fallback_dir or os.path.expanduser('~'), 'assets.json')
+                if os.path.exists(fallback_candidate):
+                    read_path = fallback_candidate
+                    migrated_from_fallback = True
+
+            main_records = self._read_records(read_path)
+
+            legacy_path = self._legacy_assets_path()
+            legacy_records = []
+            legacy_exists = False
+            if (legacy_path and legacy_path != main_path and legacy_path != read_path
+                    and os.path.exists(legacy_path)):
+                legacy_exists = True
+                legacy_records = self._read_records(legacy_path)
+
+            if not main_records and not legacy_records:
                 return {"status": "empty"}
-            with open(assets_path, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-            records = data.get("records", []) if isinstance(data, dict) else []
-            if not isinstance(records, list):
-                records = []
-            return {"status": "success", "records": records}
+
+            # 迁移/收敛场景：合并后写回主索引 + 删旧文件
+            if legacy_exists or migrated_from_fallback:
+                merged = self._merge_records(main_records, legacy_records)
+                try:
+                    directory = os.path.dirname(main_path)
+                    if directory:
+                        os.makedirs(directory, exist_ok=True)
+                    atomic_write_json(main_path, {"version": 2, "records": merged})
+                except Exception as e:
+                    print(f"资产索引迁移写回失败: {e}")
+                # best-effort 删除旧文件（旧位置不再作为事实源）
+                stale_paths = {legacy_path, read_path if migrated_from_fallback else None}
+                for stale in stale_paths:
+                    if stale and stale != main_path and os.path.exists(stale):
+                        try:
+                            os.remove(stale)
+                        except OSError:
+                            pass
+                return {"status": "success", "records": merged}
+
+            return {"status": "success", "records": main_records}
         except Exception as e:
             print(f"读取资产索引失败: {e}")
             return {"status": "empty"}

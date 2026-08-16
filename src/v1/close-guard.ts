@@ -1,8 +1,9 @@
 // src/v1/close-guard.ts
 // 关闭保护 + 打开前 dirty 检查：共用同一套三选一弹窗（保存 / 放弃 / 取消）。
-// 关闭保护链路（跨进程边界）：
-//   OS 点 X → pywebview `closing` 事件 → main.py 用 evaluate_js 同步查 `window.__icvIsDirty()`；
-//   dirty=true → 返回 False 阻止关闭 → evaluate_js 触发 `window.__icvRequestClose()` → 本模块 requestClose()；
+// 关闭保护链路（跨进程边界，未响应修复后）：
+//   OS 点 X → pywebview `closing` 事件 → main.py 读前端上报的 dirty 缓存（不再同步 evaluate_js，
+//   避免 GUI 线程等待 JS 渲染大图卡死窗口）；dirty=true → 返回 False 阻止关闭 → 后台线程
+//   evaluate_js 触发 `window.__icvRequestClose()` → 本模块 requestClose()（内部再校验真实 dirty）；
 //   用户三选一：保存并关闭 → saveForClose() 成功后调 win_close()（_closing_forced 强制 destroy，不再触发 closing）；
 //   不保存 → win_close()；取消 → 不关。
 // 自绘关闭按钮（顶栏 X）不能直连 win_close，否则绕过保护——必须走 requestClose()。
@@ -17,6 +18,20 @@ type PromptChoice = 'save' | 'discard' | 'cancel';
 
 class CloseGuard {
   private prompting = false;
+  private unsubscribeDirty: (() => void) | null = null;
+
+  /** 启动 dirty 上报（main.ts init 调用）：订阅 flowState 变更 + 初始上报一次 */
+  init(): void {
+    if (this.unsubscribeDirty) return;
+    this.unsubscribeDirty = flowState.subscribe(() => syncDirtyToBackend());
+    syncDirtyToBackend();
+  }
+
+  /** 强制重报一次（main.ts 在 pywebview 就绪后调用，确保后端尽快拿到真实 dirty 与"已上报"标志） */
+  syncNow(): void {
+    lastReportedDirty = null;
+    syncDirtyToBackend();
+  }
 
   /** 关闭保护入口（顶栏 X / pywebview closing 拦截后触发） */
   async requestClose(): Promise<void> {
@@ -90,3 +105,24 @@ export const closeGuard = new CloseGuard();
 const w = window as unknown as Record<string, unknown>;
 w.__icvIsDirty = (): boolean => flowState.dirty;
 w.__icvRequestClose = (): void => { void closeGuard.requestClose(); };
+
+// ── 关闭未响应修复：dirty 状态主动上报后端缓存 ──
+// main.py 的 closing 事件不再同步 evaluate_js（GUI 线程等待 JS 渲染大图会卡死窗口），
+// 改为读取后端缓存的 dirty；本模块在 flowState 变更时主动上报，保证缓存近似实时。
+// 脏读可接受：未响应比"偶尔多弹一次确认"更严重；且 requestClose 内部会再校验真实 dirty。
+let lastReportedDirty: boolean | null = null;
+
+function reportDirtyToBackend(dirty: boolean): void {
+  const api = (window as unknown as { pywebview?: { api?: Record<string, unknown> } }).pywebview?.api;
+  if (!api || typeof api.win_set_dirty !== 'function') return;
+  try {
+    void (api.win_set_dirty as (d: boolean) => unknown)(dirty);
+  } catch { /* 后端不可用时静默（纯浏览器调试场景） */ }
+}
+
+function syncDirtyToBackend(): void {
+  const dirty = flowState.dirty;
+  if (dirty === lastReportedDirty) return; // 值未变化不重复上报（画布平移/选中等非 dirty 变更不刷桥）
+  lastReportedDirty = dirty;
+  reportDirtyToBackend(dirty);
+}

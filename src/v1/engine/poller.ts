@@ -12,6 +12,7 @@ export interface PollOptions {
 export interface PollResult {
   success: boolean;
   imageUrl?: string;
+  savedToDisk?: boolean; // incremental-3：生成图是否写入用户配置目录（tempfile 兜底为 false；后端旧版无该字段时为 undefined）
   code?: number;
   error?: string;
 }
@@ -51,7 +52,11 @@ export async function pollTask(taskId: string, opts: PollOptions = {}): Promise<
     if (res.status === 'done') {
       const r = res.result;
       if (r && r.success && r.image_url) {
-        return { success: true, imageUrl: r.image_url };
+        return {
+          success: true,
+          imageUrl: r.image_url,
+          savedToDisk: typeof r.saved_to_disk === 'boolean' ? r.saved_to_disk : undefined,
+        };
       }
       // 失败：错误码 + 消息（不自动切供应商，由用户手动重跑）
       const code = r?.error_code ?? 500;

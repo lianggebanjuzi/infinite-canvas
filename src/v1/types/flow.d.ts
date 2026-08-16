@@ -182,11 +182,33 @@ type HistoryEntry =
 interface ImageAssetRecord {
   key: string;            // hashRef(imageUrl) 图指纹主键（唯一定位「一张图」而非「一个节点」）
   nodeId: string;         // 图当前所在节点（冗余；同一 nodeId 被重跑覆盖后旧图指纹不变，仍作用旧图）
+  imageUrl?: string;      // 图 URL（incremental-3 起采纳时写入，资产库独立显示用；旧记录缺失 → 占位）
+  projectName: string[];  // 采纳过的项目名列表（A5：跨项目溯源；只追加去重，不删除；旧记录缺失 → []）
   adopted: boolean;       // 已采纳（认可；采纳自动置 locked）
   locked: boolean;        // 已锁定（保护：removeChildren 不删 / _writeBackToSelf 不覆盖）
   tags: string[];         // 手动标签（B6 P1；搜索纳入）
   category: string;       // 分类预留（B8 P2；默认 '成图'，本期不渲染分类 UI）
   updatedAt: number;
+}
+
+/** 采纳时刻的内存元数据（不持久化，资产库复现 S9 用；缺失时经 historyDrawer.getEntryByImageUrl 反查） */
+interface AdoptMeta {
+  prompt?: string;
+  model?: string;
+  aspectRatio?: string;
+  resolution?: string;
+  count?: number;
+  refImageUrls?: string[];
+  refImageHashes?: string[];
+  outputType?: string;
+  createdAt?: number;
+}
+
+/** 资产库条目（getAdoptedAssets 输出：记录 + 可渲染 URL + 内存元数据） */
+interface AssetAsset {
+  record: ImageAssetRecord;
+  url: string;
+  meta?: AdoptMeta;
 }
 
 /** 资产快照（HistoryStack 并行撤销栈用） */

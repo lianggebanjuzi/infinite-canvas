@@ -1,16 +1,15 @@
 // src/v1/ui/history-drawer.ts
 // 左侧悬浮历史图库抽屉 + 拖入手势（改造自 src/components/history-sidebar.ts）
-// 增量（成图库收口）：
-//   B1 成图/文本分区 tab（默认成图）；B5 搜索（prompt/model/tags 过滤成图，outputText 过滤文本）
-//   B2/B3 采纳/锁定动作 + 角标（同一 AssetStore，X1 三处同步之一）；A6 图库卡片 hover「复现」
-//   loadFromHistory 优先用 entry.imageUrl（新行），缺失回退按 nodeId 解析当前节点 imageUrl（旧行兼容，修信任层错位隐患）
+// 增量（成图库收口）：B1 成图/文本分区 tab（默认成图）；B5 搜索（prompt/model/tags 过滤成图，outputText 过滤文本）
+//   B2/B3 采纳/锁定动作 + 角标（同一 AssetStore，X1 同步之一）；A6 图库卡片 hover「复现」
+// incremental-3 拆分（S1/S2）：历史图库专注「全部出图/文本记录」——移除采纳/锁定 hover 动作，
+//   保留只读角标（已采纳/已锁定，天然不可点）；复现/拖入画布/搜索/tab 全部保留；
+//   新增 setMutex（互斥回调，由 main.ts 编排，不内部 import 资产抽屉）与 getEntryByImageUrl（资产库复现 S9 反查）。
 // 生成图自动加入（addImage 带搜索元数据）；拖拽缩略图到画布触发 A4 语义（由 interactions 处理落点）。
 
 import { flowState } from '../state/flow-state';
-import { flowHistory } from '../state/history';
 import { assetStore } from '../asset-store';
 import { reproduceService } from '../reproduce';
-import { showToast } from './toast';
 
 /** 图库条目（image/text 分区展示） */
 interface HistoryItem {
@@ -57,6 +56,9 @@ class HistoryDrawer {
   private tab: 'image' | 'text' = 'image';
   private query = '';
   private unsubscribeAsset: (() => void) | null = null;
+  private mutex: (() => void) | null = null;
+  /** 渲染批次序号：分批渲染在途期间若发起新渲染，旧批次据序号作废（防重复插入） */
+  private renderSeq = 0;
 
   init(): void {
     this.drawer = document.getElementById('left-drawer');
@@ -81,10 +83,15 @@ class HistoryDrawer {
       });
     });
 
-    // 订阅 AssetStore：采纳/锁定变更 → 图库角标即时刷新（X1 三处同步之一）
+    // 订阅 AssetStore：采纳/锁定变更 → 图库只读角标即时刷新（X1 同步之一）
     this.unsubscribeAsset = assetStore.subscribe(() => this.render());
 
     this.render();
+  }
+
+  /** 注入互斥回调（main.ts 编排：打开本抽屉时自动收起资产库；不内部 import 对方单例，避免循环依赖） */
+  setMutex(fn: () => void): void {
+    this.mutex = fn;
   }
 
   /** 生成图自动入列（带搜索/复现元数据） */
@@ -162,18 +169,25 @@ class HistoryDrawer {
     this.openDrawer(!this.open);
   }
 
+  /** 收起抽屉（互斥回调用，main.ts 编排） */
+  close(): void {
+    this.openDrawer(false);
+  }
+
   openDrawer(open: boolean): void {
+    if (open && this.mutex) this.mutex(); // 互斥：开一个自动收起另一个（main.ts 编排）
     this.open = open;
     this.drawer?.classList.toggle('open', open);
   }
 
-  /** 过滤 + 渲染（tab / 搜索 / 采纳锁定角标 / hover 动作） */
+  /** 过滤 + 渲染（tab / 搜索 / 采纳锁定角标 / hover 动作；分批插入，避免大量大图一次阻塞 JS 主线程） */
   private render(): void {
     this._syncTabCounts();
     if (!this.grid) return;
     const filtered = this._filtered();
 
     if (filtered.length === 0) {
+      this.renderSeq++; // 作废在途分批渲染
       this.grid.innerHTML = '';
       if (this.emptyEl) {
         this.emptyEl.textContent = this.tab === 'image'
@@ -184,15 +198,36 @@ class HistoryDrawer {
       return;
     }
     if (this.emptyEl) this.emptyEl.style.display = 'none';
+    this.renderSeq++;
+    const seq = this.renderSeq;
     this.grid.innerHTML = '';
+    this._renderBatch(filtered, 0, seq);
+  }
 
-    filtered.forEach(item => {
+  /** 分批渲染：每批 BATCH 项，requestIdleCallback 空闲时续批；seq 失配即被新渲染取代 */
+  private _renderBatch(items: HistoryItem[], index: number, seq: number): void {
+    if (seq !== this.renderSeq || !this.grid) return;
+    const BATCH = 12;
+    const end = Math.min(index + BATCH, items.length);
+    for (let i = index; i < end; i++) {
+      const item = items[i];
       if (item.kind === 'text') {
         this._renderTextItem(item);
-        return;
+      } else {
+        this._renderImageItem(item);
       }
-      this._renderImageItem(item);
-    });
+    }
+    if (end < items.length) {
+      this._scheduleIdle(() => this._renderBatch(items, end, seq));
+    }
+  }
+
+  private _scheduleIdle(fn: () => void): void {
+    if (typeof requestIdleCallback === 'function') {
+      requestIdleCallback(() => fn(), { timeout: 50 });
+    } else {
+      setTimeout(fn, 16);
+    }
   }
 
   /** B5/B6/B7：按 tab 过滤（image：prompt/model/tags；text：outputText） */
@@ -236,7 +271,7 @@ class HistoryDrawer {
     this.grid.appendChild(div);
   }
 
-  /** 成图卡：缩略图 + 采纳/锁定角标 + hover 动作（采纳/锁定/复现）+ 拖入手势 */
+  /** 成图卡：缩略图 + 只读角标（S2，采纳/锁定态仍提示但不可点）+ hover 动作（仅复现，S1）+ 拖入手势 */
   private _renderImageItem(item: HistoryItem): void {
     if (!this.grid) return;
     const div = document.createElement('div');
@@ -253,8 +288,6 @@ class HistoryDrawer {
         ${locked ? `<span class="ht-badge lock" title="已锁定">${ICON_LOCK}</span>` : ''}
       </div>
       <div class="ht-actions">
-        <button class="ht-act${adopted ? ' on' : ''}" data-act="adopt">${adopted ? '已采纳' : '采纳'}</button>
-        <button class="ht-act${locked ? ' on' : ''}" data-act="lock">${locked ? '已锁定' : '锁定'}</button>
         <button class="ht-act" data-act="reproduce">复现</button>
       </div>`;
 
@@ -266,29 +299,26 @@ class HistoryDrawer {
     });
     div.addEventListener('dragend', () => { div.style.opacity = ''; });
 
-    // hover 动作：采纳/锁定（AssetStore 唯一写入口）/ 复现（A6）
+    // hover 动作：仅复现（A6，采纳/锁定已按 S1 移除；角标只读，点击卡片本体不触发动作）
     div.addEventListener('click', (e: MouseEvent) => {
       const btn = (e.target as Element).closest('.ht-act') as HTMLElement | null;
       if (!btn) return;
       e.preventDefault();
       e.stopPropagation();
-      const act = btn.dataset.act || '';
-      if (act === 'adopt') {
-        flowHistory.record(); // 用户手势入口：变更前入撤销栈（X3）
-        if (assetStore.isAdoptedByImageUrl(item.src)) assetStore.unadoptByUrl(item.src);
-        else assetStore.adoptByUrl(item.src, item.nodeId || '');
-        showToast(assetStore.isAdoptedByImageUrl(item.src) ? '已采纳（自动锁定）' : '已取消采纳');
-      } else if (act === 'lock') {
-        flowHistory.record();
-        assetStore.setLockedByUrl(item.src, item.nodeId || '', !assetStore.isLockedByImageUrl(item.src));
-        showToast(assetStore.isLockedByImageUrl(item.src) ? '已锁定' : '已解锁');
-      } else if (act === 'reproduce') {
+      if ((btn.dataset.act || '') === 'reproduce') {
         // A6：图库复现（trace 从 HistoryEntry 构造）
         void reproduceService.reproduceFromHistory(this._toEntry(item));
       }
     });
 
     this.grid.appendChild(div);
+  }
+
+  /** 按图 URL 反查 HistoryEntry（资产库复现 S9 用；本会话历史项未命中返回 null） */
+  getEntryByImageUrl(url: string): HistoryEntry | null {
+    if (!url) return null;
+    const item = this.items.find(i => i.kind === 'image' && i.src === url);
+    return item ? this._toEntry(item) : null;
   }
 
   /** HistoryItem → HistoryEntry（图库复现用；会话内条目携带完整参数） */

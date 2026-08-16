@@ -226,4 +226,17 @@ export const Backend = {
   async removeModel(providerId: string, modelId: string): Promise<{ status: string; message?: string }> {
     return await API.removeModel(providerId, modelId);
   },
+
+  // ── 设置（incremental-3：图片保存路径配置区用；settings-panel.ts 调用） ──
+  async loadSettings(): Promise<BackendSettings> {
+    return (await API.loadSettings()) as BackendSettings;
+  },
+
+  async saveSettings(settings: Record<string, unknown>): Promise<{ status: string; message?: string }> {
+    return (await API.saveSettings(settings)) as { status: string; message?: string };
+  },
+
+  async selectFolder(): Promise<{ status: string; path?: string; message?: string }> {
+    return (await API.selectFolder()) as { status: string; path?: string; message?: string };
+  },
 };

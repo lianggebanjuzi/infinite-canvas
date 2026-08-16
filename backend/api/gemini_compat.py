@@ -10,8 +10,22 @@ GEMINI_IMAGE_ASPECT_RATIOS = frozenset({
 
 _RESOLUTION_TO_IMAGE_SIZE = {'1k': '1K', '2k': '2K', '4k': '4K'}
 
+# 规则一：URL 以图片扩展名结尾（兼容旧中转站，行为保持不变）
 _IMAGE_URL_TAIL = re.compile(r'\.(jpe?g|png|webp|gif)(\?[^/]*)?$', re.IGNORECASE)
-_URL_SCAN = re.compile(r'https?://[^\s<>"\'\)\]]+')
+
+# 规则二：URL 路径含图片服务特征（visionary.beer 等返回「无扩展名」图片 URL）
+# 例：https://visionary.beer/api/generations/{uuid}/image?token={JWT}
+#   - 路径含 /generations/ 或 /generation/ 段
+#   - 或路径末段为 /image、/images（后跟查询串/锚点或直接结束）
+_IMAGE_GENERATION_PATH = re.compile(r'/(?:api/)?generations?/', re.IGNORECASE)
+_IMAGE_ENDPOINT_TAIL = re.compile(r'/(?:image|images)(?=[?#]|$)', re.IGNORECASE)
+
+# 扫描 URL 时直接排除中文全角标点，避免把 URL 后面的「，点击查看。」之类误并入
+# （token 为 base64url 字符集 A-Za-z0-9-_，不会被误截断）
+_URL_SCAN = re.compile(r'https?://[^\s<>"\'\)\]。，、；：！？）】》」』…]+')
+
+# URL 尾部兜底剥离的标点（ASCII + 中文全角；注意不含 base64url 的 - _ 字符）
+_TRAILING_PUNCT = '.,;:!?)]}>' + '。，、；：！？）】》」』…'
 
 
 def normalize_gemini_aspect_ratio(val):
@@ -71,14 +85,33 @@ def normalize_gemini_image_size(val):
     return _RESOLUTION_TO_IMAGE_SIZE.get(low, '1K')
 
 
+def _is_image_candidate(url):
+    """判断 URL 是否可视为图片资源：扩展名规则或图片服务路径规则命中其一即可。"""
+    if not url:
+        return False
+    if _IMAGE_URL_TAIL.search(url):
+        return True
+    if _IMAGE_GENERATION_PATH.search(url):
+        return True
+    if _IMAGE_ENDPOINT_TAIL.search(url):
+        return True
+    return False
+
+
 def extract_image_urls_from_text(text):
-    """从纯文本里抽出可下载的图片链接（中转站常把图放在文本里）。"""
+    """
+    从纯文本里抽出可下载的图片链接（中转站常把图放在文本里）。
+
+    兼容两类 URL：
+      1. 传统带图片扩展名：https://.../a.png?x=1
+      2. 无扩展名的图片服务 URL：https://.../api/generations/{id}/image?token=...
+    """
     if not isinstance(text, str) or not text.strip():
         return []
     out, seen = [], set()
     for u in _URL_SCAN.findall(text):
-        u = u.rstrip('.,;:)]}>')
-        if not _IMAGE_URL_TAIL.search(u):
+        u = u.rstrip(_TRAILING_PUNCT)
+        if not _is_image_candidate(u):
             continue
         if u not in seen:
             seen.add(u)

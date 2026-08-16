@@ -13,6 +13,7 @@ import { runEngine, applyTextToDownstream } from '../engine/run-engine';
 import { Backend, fetchImageModels, fetchChatModels } from '../api';
 import { DEFAULT_CHAT_MODEL_KEY } from '../nodes/text-gen';
 import { showToast } from './toast';
+import { floatingPanels } from './floating-panels';
 
 const RATIO_OPTIONS = ['3:4', '2:3', '4:5', '9:16', '1:4', '1:8', '1:1', '4:3', '3:2', '5:4', '16:9', '21:9', '4:1', '8:1', 'Auto'];
 const RES_OPTIONS = ['1k', '2k', '4k'];
@@ -300,6 +301,21 @@ class CmdPanel {
       return;
     }
 
+    // 默认模型回填：数据行为，与面板显隐解耦——选中节点即回填（不受下方 Tab 门控影响），
+    // 保证「新建节点/连线插入节点 → 运行选中」在面板收起态也能拿到默认模型（QA 回归 P1）。
+    // text-gen 回填对话模型；其余（含 image-gen 文本反推）回填绘图模型，与原有调用条件一致。
+    if (!(node.params.model as string | undefined)) {
+      if (node.type === 'text-gen') this._ensureChatModel(node.id);
+      else this._ensureModel(node.id);
+    }
+
+    // Tab 化：面板默认收起；仅当 Tab 呼出（floatingPanels.isVisible()）时才显示/定位。
+    // 显示态下切换选中节点：仍会走下方逻辑刷新内容/位置（跟随新选中节点），不会误收起。
+    if (!floatingPanels.isVisible()) {
+      this.el.classList.remove('show', 'pos-above', 'textgen', 'reverse');
+      return;
+    }
+
     // 上下文标识
     this.ctxName.textContent = node.title || '节点';
     this.ctxThumb.style.backgroundImage = node.imageUrl ? `url('${node.imageUrl.replace(/'/g, "\\'")}')` : 'none';
@@ -343,10 +359,6 @@ class CmdPanel {
 
     this._renderRefs();
     this._renderChips(node);
-    if (!(node.params.model as string | undefined)) {
-      if (isTextGen) this._ensureChatModel(node.id);
-      else this._ensureModel(node.id);
-    }
     this._renderTextHistory(node);
     this._position(node);
   }

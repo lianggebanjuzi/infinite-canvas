@@ -31,6 +31,10 @@ class SettingsPanel {
   private defaultSelect: SelectHandle | null = null;
   private providers: BackendProvider[] = [];
   private editingId: string | null = null;
+  /** 当前图片保存路径（_refresh 时 loadSettings 回显，P5） */
+  private imageSavePath = '';
+  /** 图片保存路径输入框（_renderImagePathSection 动态创建；_saveImagePath 读取） */
+  private imagePathInput: HTMLInputElement | null = null;
 
   init(): void {
     this.overlay = document.getElementById('settings-overlay');
@@ -99,6 +103,8 @@ class SettingsPanel {
     try {
       const res = await Backend.loadProviders();
       this.providers = res.providers || [];
+      const settings = await Backend.loadSettings(); // P5：设置打开时回显图片保存路径
+      this.imageSavePath = typeof settings.image_save_path === 'string' ? settings.image_save_path : '';
     } catch {
       this.providers = [];
       showToast('加载供应商失败', false);
@@ -110,6 +116,8 @@ class SettingsPanel {
     if (!this.list) return;
 
     this.list.innerHTML = '';
+    // P1：图片保存路径配置区置于供应商列表顶部（默认绘图模型上方）
+    this.list.appendChild(this._renderImagePathSection());
     this.list.appendChild(this._renderDefaultModelSelect());
 
     if (this.providers.length === 0) {
@@ -128,6 +136,89 @@ class SettingsPanel {
         this.list!.appendChild(this._renderCard(p));
       }
     });
+  }
+
+  /**
+   * 图片保存路径配置区（P1/P4/P5/P6）：输入框 + 选择文件夹 + 保存按钮 + hint。
+   * 保存调 save_settings，后端做 strip+abspath 归一与目录校验（不存在创建/非目录/写探针）；
+   * 失败 toast 人话 error；成功 toast「已保存」并回显归一后的绝对路径。
+   */
+  private _renderImagePathSection(): HTMLElement {
+    const wrap = document.createElement('div');
+    wrap.className = 'settings-image-path';
+    const label = document.createElement('span');
+    label.className = 'settings-label';
+    label.textContent = '图片保存路径';
+    wrap.appendChild(label);
+
+    const row = document.createElement('div');
+    row.className = 'settings-path-row';
+    const input = document.createElement('input');
+    input.className = 'settings-input';
+    input.id = 'settings-image-path-input';
+    input.placeholder = '未设置';
+    input.spellcheck = false;
+    input.value = this.imageSavePath;
+    this.imagePathInput = input;
+    const pickBtn = document.createElement('button');
+    pickBtn.className = 'mini-btn';
+    pickBtn.textContent = '选择文件夹';
+    pickBtn.title = '选择文件夹';
+    row.appendChild(input);
+    row.appendChild(pickBtn);
+    wrap.appendChild(row);
+
+    const saveRow = document.createElement('div');
+    saveRow.className = 'settings-path-save';
+    const saveBtn = document.createElement('button');
+    saveBtn.className = 'btn-secondary';
+    saveBtn.textContent = '保存';
+    saveBtn.style.padding = '6px 16px';
+    saveBtn.style.fontSize = '12px';
+    saveRow.appendChild(saveBtn);
+    wrap.appendChild(saveRow);
+
+    const hint = document.createElement('div');
+    hint.className = 'settings-hint';
+    hint.textContent = '生成图片与采纳的资产将保存到此目录。未设置时生成图仅临时可用、不落盘。';
+    wrap.appendChild(hint);
+
+    // 选择文件夹：调 select_folder() 后回填输入框（P1）
+    pickBtn.addEventListener('click', () => {
+      void (async () => {
+        try {
+          const res = await Backend.selectFolder();
+          if (res.status === 'success' && res.path) input.value = res.path;
+          else if (res.status === 'error') showToast(res.message || '选择文件夹失败', false);
+        } catch (e) {
+          showToast('选择文件夹失败：' + (e as Error).message, false);
+        }
+      })();
+    });
+    // 保存：后端归一 + 校验（P4/P6）
+    saveBtn.addEventListener('click', () => void this._saveImagePath());
+    return wrap;
+  }
+
+  /** 保存图片保存路径（合并当前 settings 后写入 image_save_path，P1） */
+  private async _saveImagePath(): Promise<void> {
+    const raw = this.imagePathInput?.value ?? '';
+    try {
+      const current = await Backend.loadSettings();
+      const res = await Backend.saveSettings({ ...current, image_save_path: raw });
+      if (res.status === 'success') {
+        showToast('已保存'); // 共享知识 3 常量
+        // 回显归一后的绝对路径（P5/P6）
+        const after = await Backend.loadSettings();
+        const normalized = typeof after.image_save_path === 'string' ? after.image_save_path : '';
+        this.imageSavePath = normalized;
+        if (this.imagePathInput) this.imagePathInput.value = normalized;
+      } else {
+        showToast(res.message || '保存失败', false); // 后端人话 error（目录校验失败等）
+      }
+    } catch (e) {
+      showToast('保存失败：' + (e as Error).message, false);
+    }
   }
 
   /** 顶部「默认绘图模型」自定义下拉，数据源 = 所有 enabled 供应商的 drawing 模型 */

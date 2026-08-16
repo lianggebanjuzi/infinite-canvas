@@ -37,6 +37,10 @@ body { font-family: var(--font); background: var(--bg-app); color: var(--text-1)
 }
 .win-btn:hover { background: var(--bg-hover); color: var(--text-1); }
 .win-btn.win-close:hover { background: var(--st-fail); color:#fff; }
+/* W4：最大化状态图标切换（□ ↔ ▣，两个 SVG 显隐切换） */
+.win-restore-ico { display:none; }
+.win-btn.maximized .win-restore-ico { display:block; }
+.win-btn.maximized .win-max-ico { display:none; }
 .icon-btn {
   width:30px; height:30px; display:flex; align-items:center; justify-content:center;
   border:none; background:transparent; border-radius: var(--r-sm); color: var(--text-2);
@@ -48,25 +52,55 @@ body { font-family: var(--font); background: var(--bg-app); color: var(--text-1)
 /* ═══════════ 主区域 ═══════════ */
 .main { display:flex; height: calc(100% - 44px); position:relative; }
 
-/* 左侧历史图库（悬浮抽屉） */
+/* 左侧历史图库（悬浮抽屉）：面板垂直全高顶满，从胶囊右侧水平滑出 */
 .left-drawer {
   position:absolute; left:0; top:0; bottom:0; z-index:22; pointer-events:none;
-  transform: translateX(-212px); transition: transform .22s ease;
+  /* 隐藏位移：面板 left:72 + 宽200 = 右缘272，把手宽16 → 最右 288；-300 确保整体移出视口左侧 */
+  transform: translateX(-300px); transition: transform .22s ease;
 }
 .left-drawer.open { transform: translateX(0); }
+/* 抽屉把手（改版：仅抽屉展开时作为"收起"入口出现；关闭时隐藏，入口统一走左侧胶囊调） */
 .left-drawer .drawer-handle {
-  position:absolute; left:212px; top:50%; transform: translateY(-50%);
-  width:18px; height:64px; display:flex; align-items:center; justify-content:center;
-  background: var(--bg-panel); border:1px solid var(--border);
-  border-radius: 0 10px 10px 0; color: var(--text-3); cursor:pointer;
-  transition: color .15s, background .15s;
-  pointer-events:auto;
+  /* 把手贴在面板右缘（left:72 + 面板宽200 = 272），垂直与面板同居中 */
+  position:absolute; left:272px; top:50%; transform: translateY(-50%);
+  width:16px; height:56px; display:flex; align-items:center; justify-content:center;
+  background: var(--bg-float); border:1px solid var(--border); border-left:none;
+  border-radius: 0 8px 8px 0; color: var(--text-3); cursor:pointer;
+  transition: color .15s, background .15s, opacity .2s;
+  pointer-events:none; opacity:0;
 }
+.left-drawer.open .drawer-handle { pointer-events:auto; opacity:1; }
 .left-drawer .drawer-handle:hover { color: var(--accent); background: var(--bg-hover); }
 .left-drawer .drawer-handle svg { transition: transform .22s ease; }
 .left-drawer.open .drawer-handle svg { transform: rotate(180deg); }
+/* 资产库第二抽屉：把手与历史图库同位置（互斥开抽屉，不会同时出现；S5） */
+.asset-drawer .drawer-handle { top: 50%; }
+/* ═══════════ 左侧胶囊调（改版：历史图库 / 资产库入口，样式仿 .bottom-bar 竖排） ═══════════ */
+.left-capsule {
+  position:absolute; left:16px; top:50%; transform:translateY(-50%);
+  display:flex; flex-direction:column; align-items:center; gap:2px;
+  padding:8px 6px;
+  background: var(--bg-float); border:1px solid var(--border);
+  border-radius:999px; box-shadow: var(--shadow-bar); z-index:30;
+}
+.left-capsule .capsule-btn {
+  width:30px; height:30px; display:flex; align-items:center; justify-content:center;
+  border:none; background:transparent; border-radius:50%;
+  color: var(--text-2); cursor:pointer; transition: all .15s;
+}
+.left-capsule .capsule-btn:hover { background: var(--bg-hover); color: var(--text-1); }
+.left-capsule .capsule-btn.active { color: var(--accent); background: var(--accent-dim); }
+/* 资产库卡片单列（卡片动作含取消采纳/锁定/查看/复现四个，单列宽度才放得下） */
+.asset-drawer .history-grid { grid-template-columns: 1fr; }
+/* 资产库计数（side-head 右侧） */
+.asset-count { font-size:10.5px; color: var(--text-3); }
+/* 资产库旧记录无 imageUrl 的占位（可取消采纳/锁定，无缩略图） */
+.asset-thumb.asset-missing { background: var(--bg-hover); display:flex; align-items:center; justify-content:center; }
+.asset-placeholder { font-size:11px; color: var(--text-3); pointer-events:none; }
 .sidebar-left {
-  position:absolute; left:12px; top:12px; bottom:12px; width:200px;
+  /* 悬浮面板：垂直恢复全高（top/bottom 12px 顶满，与旧侧栏同高），从胶囊右侧展开（left:72 保留） */
+  position:absolute; left:72px; top:12px; bottom:12px;
+  width:200px;
   background: var(--bg-panel); border:1px solid var(--border);
   border-radius: var(--r-md); box-shadow: var(--shadow-bar);
   display:flex; flex-direction:column; overflow:hidden;
@@ -626,6 +660,16 @@ body { font-family: var(--font); background: var(--bg-app); color: var(--text-1)
 /* 默认绘图模型（列表上方） */
 .settings-default-model { display:flex; align-items:center; gap:10px; margin-bottom:12px; }
 .settings-default-model .settings-label { flex-shrink:0; }
+
+/* 图片保存路径配置区（incremental-3，P1：输入框 + 选择文件夹 + 保存 + hint） */
+.settings-image-path {
+  display:flex; flex-direction:column; gap:8px;
+  margin-bottom:16px; padding-bottom:14px; border-bottom:1px solid var(--border-soft);
+}
+.settings-image-path .settings-label { font-size:12px; color: var(--text-2); }
+.settings-path-row { display:flex; gap:8px; align-items:center; }
+.settings-path-row .settings-input { flex:1; min-width:0; }
+.settings-path-save { display:flex; justify-content:flex-end; }
 
 /* 自定义下拉触发器 */
 .settings-select {

@@ -1,0 +1,135 @@
+classDiagram
+    class ImageAssetRecord {
+        key: string
+        nodeId: string
+        imageUrl?: string
+        projectName: string[]
+        adopted: boolean
+        locked: boolean
+        tags: string[]
+        category: string
+        updatedAt: number
+    }
+
+    class AdoptMeta {
+        prompt?: string
+        model?: string
+        aspectRatio?: string
+        resolution?: string
+        count?: number
+        refImageUrls?: string[]
+        refImageHashes?: string[]
+        outputType?: string
+        createdAt?: number
+    }
+
+    class AssetStore {
+        -records: Map~string, ImageAssetRecord~
+        -urlByKey: Map~string, string~
+        -metaByKey: Map~string, AdoptMeta~
+        -listeners: Set~() => void~
+        +init()
+        +loadFromBackend(): Promise~void~
+        +adopt(key: string, nodeId: string, imageUrl?: string, meta?: AdoptMeta)
+        +adoptByUrl(url: string, nodeId: string, meta?: AdoptMeta)
+        +unadopt(key: string)
+        +unadoptByUrl(url: string)
+        +setLocked(key: string, nodeId: string, locked: boolean)
+        +setLockedByUrl(url: string, nodeId: string, locked: boolean)
+        +getAdoptedAssets(): AssetAsset[]
+        +getByImageUrl(url: string): ImageAssetRecord | null
+        +isAdoptedByImageUrl(url: string): boolean
+        +isLockedByImageUrl(url: string): boolean
+        +isLockedNode(nodeId: string): boolean
+        +list(): ImageAssetRecord[]
+        +captureSnapshot(): AssetSnapshot
+        +applySnapshot(snap: AssetSnapshot)
+        +subscribe(fn: () => void): () => void
+        +persistNow(): Promise~void~
+        -_persist(): Promise~void~
+        -_getOrCreate(key, nodeId): ImageAssetRecord
+        -_normalize(r): ImageAssetRecord
+        -_keyOf(url): string
+    }
+
+    class AssetAsset {
+        record: ImageAssetRecord
+        url: string
+        meta?: AdoptMeta
+    }
+
+    class AssetDrawer {
+        -open: boolean
+        -query: string
+        -drawer: HTMLElement | null
+        -grid: HTMLElement | null
+        -handle: HTMLElement | null
+        -emptyEl: HTMLElement | null
+        -unsubscribeAsset: (() => void) | null
+        +init()
+        +toggle()
+        +openDrawer(open: boolean)
+        +close()
+        +setMutex(fn: () => void)
+        +render()
+        -_filtered(): AssetAsset[]
+        -_renderCard(item: AssetAsset)
+        -_toEntry(item: AssetAsset): HistoryEntry
+        -_viewImage(url: string)
+    }
+
+    class HistoryDrawer {
+        +setMutex(fn: () => void)
+        +getEntryByImageUrl(url: string): HistoryEntry | null
+        -_renderImageItem(item: HistoryItem)
+    }
+
+    class SettingsPanel {
+        -imagePathInput: HTMLInputElement | null
+        +init()
+        +open(): Promise~void~
+        +close()
+        -_refresh(): Promise~void~
+        -_renderImagePathSection(): HTMLElement
+        -_saveImagePath(): Promise~void~
+    }
+
+    class ProjectAPI {
+        -current_project_path: string | null
+        -settings_api: SettingsAPI | null
+        -fallback_dir: string
+        +_assets_path(): string
+        +save_assets(records): dict
+        +load_assets(): dict
+        -_configured_image_save_dir(): str | None
+        -_legacy_assets_path(): str | None
+        -_read_records(path): list
+        -_merge_records(main, legacy): list
+    }
+
+    class SettingsAPI {
+        +load_settings(): dict
+        +save_settings(settings): dict
+        +select_folder(): dict
+    }
+
+    class UnifiedAPIRouter {
+        -settings_api: SettingsAPI | None
+        +_get_save_dir(save_dir?: string): string
+        -_configured_image_save_dir(): str | None
+        +_save_images_to_local(parsed, save_dir?): dict
+    }
+
+    class ReproduceService {
+        +reproduceFromHistory(entry: HistoryEntry): Promise~void~
+    }
+
+    AssetStore --> ImageAssetRecord : 管理
+    AssetStore --> AdoptMeta : 内存元数据
+    AssetStore --> AssetAsset : getAdoptedAssets 输出
+    AssetDrawer --> AssetStore : 订阅 + 写入口
+    AssetDrawer --> HistoryDrawer : 复现反查 getEntryByImageUrl
+    AssetDrawer --> ReproduceService : reproduceFromHistory（S9）
+    ProjectAPI --> SettingsAPI : 读 image_save_path
+    UnifiedAPIRouter --> SettingsAPI : 读 image_save_path
+    SettingsPanel --> SettingsAPI : 经 Backend 调 load/save_settings + select_folder

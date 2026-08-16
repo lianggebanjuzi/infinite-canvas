@@ -34,6 +34,7 @@ interface BackendTaskResult {
     success?: boolean;
     image_url?: string;
     images?: string[];
+    saved_to_disk?: boolean; // incremental-3：生成图是否写入用户配置目录（tempfile 兜底为 false）
     error?: string;
     error_code?: number;
     message?: string;
@@ -79,6 +80,7 @@ interface BackendHistoryResult {
 /** save_assets / load_assets 返回（可变资产索引：采纳/锁定/tags/category） */
 interface BackendAssetsResult {
   status: string;            // success | empty | error
-  message?: string;
+  degraded?: boolean;        // incremental-3：save_assets 降级写入 fallback 目录（未配置图片保存路径）
+  message?: string;          // 人话提示（降级/错误时透传，如「请先在设置中配置图片保存路径」）
   records?: ImageAssetRecord[];
 }

@@ -12,6 +12,7 @@ import { cardView, openImageModal } from './card-view';
 import { linkView } from './link-view';
 import { runEngine } from '../engine/run-engine';
 import { showToast } from '../ui/toast';
+import { floatingPanels } from '../ui/floating-panels';
 import { resolveDefaultModel, resolveDefaultChatModel } from '../api';
 import { reproduceService } from '../reproduce';
 
@@ -102,6 +103,9 @@ class Interactions {
       }
 
       // 空白处：Shift 框选 / 否则仅取消选中（左键不再平移，平移只走中键）
+      // Tab 化：点画布空白统一收起悬浮面板（收起只走 Esc / 点空白）；hide() 幂等，未显示时无副作用。
+      // 注意：放在 Shift 分支之前——Shift+点空白框选同样属于「点画布空白」，一并收起。
+      floatingPanels.hide();
       if (e.shiftKey) {
         this._startFrameSelect(e);
         return;

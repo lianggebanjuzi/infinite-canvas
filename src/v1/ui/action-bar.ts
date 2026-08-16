@@ -10,6 +10,7 @@ import { showToast } from './toast';
 import { cmdPanel } from './cmd-panel';
 import { outpaintPanel } from './outpaint-panel';
 import { reproduceService } from '../reproduce';
+import { floatingPanels } from './floating-panels';
 
 class ActionBar {
   private el: HTMLElement | null = null;
@@ -66,6 +67,12 @@ class ActionBar {
 
   sync(): void {
     if (!this.el) return;
+    // Tab 化：面板默认收起；仅当 Tab 呼出（floatingPanels.isVisible()）时才显示/定位
+    // 显示态下切换选中节点：仍走下方逻辑刷新内容/位置（跟随新选中节点），不会误收起
+    if (!floatingPanels.isVisible()) {
+      this.el.classList.remove('show', 'pos-below');
+      return;
+    }
     const node = selection.single();
     // 文本节点：隐藏操作条
     if (!node || node.type === 'text-gen') {

@@ -103,6 +103,8 @@ class RunEngine {
   private batchProgress = new Map<string, BatchProgress>();
   /** 本批次新建的产出节点 id 集合（供 markUpstreamChangedExcept 跳过） */
   private _createdCardIds = new Set<string>();
+  /** 本批次是否出现过「生成图未落盘到用户配置目录」（P3：批次结束统一 toast 一次，避免逐张刷屏） */
+  private _sawNotSavedToDisk = false;
 
   /** 读取批次进度（cmd-panel 选中 run 节点时展示「生成中 done/total」） */
   getBatchProgress(nodeId: string): { total: number; done: number; failed: number } | undefined {
@@ -182,6 +184,10 @@ class RunEngine {
       const result = await pollTask(created.task_id);
       if (!result.success || !result.imageUrl) {
         throw new Error(result.error || '扩图失败');
+      }
+      // P3：未配置图片保存路径 → 生成图未落盘（tempfile 兜底），人话提示不阻断
+      if (result.savedToDisk === false) {
+        showToast('图片保存路径未设置，生成图不会落盘到本地', false);
       }
 
       // 产出节点：x 固定在源节点右侧，y 向下避让同列已有卡片（与 runImageReverse 口径一致）
@@ -364,6 +370,7 @@ class RunEngine {
     const progress: BatchProgress = { total, done: 0, failed: 0, lastError: null };
     this.batchProgress.set(nodeId, progress);
     this._createdCardIds.clear();
+    this._sawNotSavedToDisk = false; // P3：批次级未落盘标记复位
     flowState.notify(); // 面板立即显示「生成中 0/total」
 
     // 5. 并发 N 个 worker（Promise.allSettled：互不阻塞，任一失败不影响兄弟）。
@@ -405,6 +412,10 @@ class RunEngine {
       flowState.updateNode(nodeId, { status: 'done', error: null, lastRunAt: Date.now() });
       dirty.markUpstreamChangedExcept(nodeId, this._createdCardIds);
       showToast(`成功 ${progress.done}/${total}`);
+      // P3：本批次出现过未落盘（未配置图片保存路径）→ 统一提示一次，不阻断结果展示
+      if (this._sawNotSavedToDisk) {
+        showToast('图片保存路径未设置，生成图不会落盘到本地', false);
+      }
     } else {
       // 全失败：保留旧图，节点 fail
       flowState.updateNode(nodeId, { status: 'fail', error: progress.lastError || '生成失败' });
@@ -432,6 +443,8 @@ class RunEngine {
       }
       const result = await pollTask(created.task_id);
       if (result.success && result.imageUrl) {
+        // P3：该张图未落盘到用户配置目录（tempfile 兜底）→ 标记，批次结束统一 toast
+        if (result.savedToDisk === false) this._sawNotSavedToDisk = true;
         if (isTxt2Img && index === 0) {
           // 保护点 2：源节点当前 imageUrl（旧图）被锁定 → 不写回自身，改走新建产出节点（旧图保留，Q3）
           const gen = flowState.getNode(genId);

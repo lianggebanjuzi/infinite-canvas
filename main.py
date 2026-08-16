@@ -7,6 +7,9 @@ import os
 import shutil
 import json
 import subprocess
+import ctypes
+import threading
+from ctypes import wintypes
 
 import webview
 
@@ -73,8 +76,8 @@ def _get_window_hwnd():
 
     优先取 pywebview 暴露的 native 句柄（Windows 下为 WinForms 窗体对象，
     其 .Handle 即 HWND），不再依赖 FindWindowW 对窗口标题的耦合。失败返回 0。
-    当前仅用于 _apply_rounded_corners（圆角补偿）；窗口拖动已由 pywebview
-    官方 drag-region 机制接管，不再需要手写 ctypes。
+    当前用于 _apply_rounded_corners（圆角补偿）与 win_toggle_maximize（Win32 最大化）；
+    窗口拖动已由 pywebview 官方 drag-region 机制接管，不再需要手写 ctypes。
     """
     try:
         win = webview.windows[0]
@@ -95,6 +98,77 @@ def _get_window_hwnd():
 
 
 # ─────────────────────────────────────────
+# Win32 窗口工具（无边框最大化贴工作区，W1-W3）
+# 全程物理像素：pywebview/WinForms 进程已是 DPI aware，GetMonitorInfoW / GetWindowRect /
+# SetWindowPos 均按物理像素，不与 pywebview 逻辑像素 API 混用（设计 §1.1）。
+# ─────────────────────────────────────────
+class _WinRect(ctypes.Structure):
+    """Win32 RECT（物理像素）"""
+    _fields_ = [('left', wintypes.LONG), ('top', wintypes.LONG),
+                ('right', wintypes.LONG), ('bottom', wintypes.LONG)]
+
+
+class _WinMonitorInfo(ctypes.Structure):
+    """Win32 MONITORINFO（rcWork = 工作区，已不含任务栏）"""
+    _fields_ = [('cbSize', wintypes.DWORD), ('rcMonitor', _WinRect),
+                ('rcWork', _WinRect), ('dwFlags', wintypes.DWORD)]
+
+
+def _get_monitor_work_area(hwnd):
+    """获取窗口当前所在显示器的工作区（rcWork，不含任务栏）；失败返回 None。
+
+    MonitorFromWindow(MONITOR_DEFAULTTONEAREST=2) 取「窗口当前所在显示器」，
+    GetMonitorInfoW 返回其工作区 —— 多显示器 / 不同 DPI 下均贴合当前屏（W3）。
+    """
+    try:
+        user32 = ctypes.windll.user32
+        user32.MonitorFromWindow.restype = wintypes.HANDLE
+        user32.MonitorFromWindow.argtypes = [wintypes.HWND, wintypes.DWORD]
+        monitor = user32.MonitorFromWindow(hwnd, 2)  # MONITOR_DEFAULTTONEAREST
+        if not monitor:
+            return None
+        user32.GetMonitorInfoW.restype = wintypes.BOOL
+        user32.GetMonitorInfoW.argtypes = [wintypes.HANDLE, ctypes.POINTER(_WinMonitorInfo)]
+        info = _WinMonitorInfo()
+        info.cbSize = ctypes.sizeof(_WinMonitorInfo)
+        if not user32.GetMonitorInfoW(monitor, ctypes.byref(info)):
+            return None
+        return (info.rcWork.left, info.rcWork.top,
+                info.rcWork.right - info.rcWork.left,
+                info.rcWork.bottom - info.rcWork.top)
+    except Exception:
+        return None
+
+
+def _get_window_rect(hwnd):
+    """获取窗口当前屏幕矩形 (left, top, width, height)；失败返回 None（最大化前记录原矩形用）"""
+    try:
+        user32 = ctypes.windll.user32
+        user32.GetWindowRect.restype = wintypes.BOOL
+        user32.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(_WinRect)]
+        rect = _WinRect()
+        if not user32.GetWindowRect(hwnd, ctypes.byref(rect)):
+            return None
+        return (rect.left, rect.top,
+                rect.right - rect.left,
+                rect.bottom - rect.top)
+    except Exception:
+        return None
+
+
+def _set_window_pos(hwnd, rect):
+    """SetWindowPos 移动/改尺寸窗口；SWP_NOZORDER=0x0004 | SWP_NOACTIVATE=0x0010。返回是否成功。"""
+    try:
+        user32 = ctypes.windll.user32
+        user32.SetWindowPos.restype = wintypes.BOOL
+        user32.SetWindowPos.argtypes = [wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int,
+                                        ctypes.c_int, ctypes.c_int, wintypes.UINT]
+        return bool(user32.SetWindowPos(hwnd, None, rect[0], rect[1], rect[2], rect[3], 0x0004 | 0x0010))
+    except Exception:
+        return False
+
+
+# ─────────────────────────────────────────
 # 统一 API 类（所有 AI 逻辑统一走 UnifiedAPIRouter）
 # ─────────────────────────────────────────
 class InfiniteCanvasAPI:
@@ -102,13 +176,17 @@ class InfiniteCanvasAPI:
     def __init__(self):
         self.provider  = ProviderAPI(PROVIDERS_FILE)
         self.settings  = SettingsAPI(SETTINGS_FILE, PROMPTS_FILE)
-        self.unified   = UnifiedAPIRouter(self.provider)
+        self.unified   = UnifiedAPIRouter(self.provider, settings_api=self.settings)
         self.image     = ImageAPI(self.settings, self.unified)
         self.clipboard = ClipboardAPI()
-        self.project   = ProjectAPI()
+        self.project   = ProjectAPI(settings_api=self.settings, fallback_dir=APP_DIR)
         # 无边框窗口状态（自绘标题栏）
         self._win_maximized = False  # 最大化状态标志（win_toggle_maximize 切换用）
+        self._win_restore_rect = None  # 最大化前窗口矩形 (left, top, width, height)；还原时恢复
         self._closing_forced = False  # 强制关闭标志：win_close 置位后 closing 拦截放行（绕过保护）
+        # 关闭保护缓存（未响应修复）：前端经 win_set_dirty 上报 dirty，closing 事件读缓存而非同步 evaluate_js
+        self._cached_dirty = True  # 初始保守为 True（前端未上报前不静默丢数据；前端就绪后会立即上报真实值）
+        self._dirty_reported = False  # 前端是否至少上报过一次（未上报时回退旧同步查询，覆盖页面未加载/崩溃场景）
 
     # ─────────────────────────────────────────
     # 供应商管理
@@ -323,14 +401,93 @@ class InfiniteCanvasAPI:
         webview.windows[0].minimize()
 
     def win_toggle_maximize(self):
-        """最大化 / 还原切换（pywebview 的 maximize()/restore() 是两个方法，用一个标志位切换）"""
-        win = webview.windows[0]
+        """最大化 / 还原切换（W1-W4，Win32 手动贴当前屏工作区）。
+
+        最大化：GetWindowRect 记录原矩形 → MonitorFromWindow + GetMonitorInfoW 取 rcWork
+                → SetWindowPos 贴边（不遮任务栏，W1；多屏/DPI 贴合当前屏，W3）；
+        还原：SetWindowPos 恢复原矩形（缺失时 ShowWindow SW_RESTORE 兜底，W2）。
+        返回 {maximized: bool} 供前端切换 #win-max 图标（W4）。
+        """
+        hwnd = _get_window_hwnd()
         if self._win_maximized:
-            win.restore()
+            self._restore_window(hwnd)
             self._win_maximized = False
+            self._sync_win_icon(False)
+            return {"maximized": False}
+
+        # 最大化：先记录当前矩形（W2 还原基准）
+        if hwnd:
+            rect = _get_window_rect(hwnd)
+            if rect:
+                self._win_restore_rect = rect
+            area = _get_monitor_work_area(hwnd)
+            if area:
+                _set_window_pos(hwnd, area)
+            else:
+                # 兜底：Win32 不可用时退回 pywebview 原生最大化（可能盖任务栏，属可接受降级）
+                webview.windows[0].maximize()
         else:
-            win.maximize()
-            self._win_maximized = True
+            webview.windows[0].maximize()
+        self._win_maximized = True
+        self._sync_win_icon(True)
+        return {"maximized": True}
+
+    def win_is_maximized(self):
+        """查询窗口是否处于最大化态（前端启动初始化 W4 图标）。
+
+        以本应用标志位为主；系统级原生最大化（IsZoomed，如 Win+↑）只升不降，
+        避免把「自定义贴工作区最大化」（非系统 Zoom 态，IsZoomed 为 False）误判为还原。
+        """
+        hwnd = _get_window_hwnd()
+        if hwnd:
+            try:
+                if ctypes.windll.user32.IsZoomed(hwnd):
+                    self._win_maximized = True
+            except Exception:
+                pass
+        return {"maximized": self._win_maximized}
+
+    def _restore_window(self, hwnd):
+        """还原窗口到最大化前矩形；无记录/无句柄时兜底 ShowWindow(SW_RESTORE=9)"""
+        if hwnd:
+            if self._win_restore_rect:
+                _set_window_pos(hwnd, self._win_restore_rect)
+            else:
+                try:
+                    ctypes.windll.user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+                except Exception:
+                    pass
+        else:
+            try:
+                webview.windows[0].restore()
+            except Exception:
+                pass
+
+    def _sync_win_icon(self, maximized):
+        """evaluate_js 同步前端 #win-max 图标（W2 脱节兜底：覆盖系统手势等返回值之外的路径）。
+
+        未响应修复：evaluate_js 是同步阻塞调用（等待 JS 主线程执行完），而 maximized/restored
+        事件在 GUI 线程触发，JS 忙时直接调用会卡死窗口；改为 daemon 后台线程 fire-and-forget，
+        只阻塞后台线程，GUI 线程保持响应。图标主路径本就由前端 win_toggle_maximize 返回值同步。
+        """
+        def _run():
+            try:
+                webview.windows[0].evaluate_js(
+                    f'window.__icvWinMaxState && window.__icvWinMaxState({str(bool(maximized)).lower()})'
+                )
+            except Exception:
+                pass
+        threading.Thread(target=_run, daemon=True).start()
+
+    def _on_win_maximized(self):
+        """pywebview events.maximized：窗口进入系统最大化态 → 同步标志位与图标（W2 脱节兜底）"""
+        self._win_maximized = True
+        self._sync_win_icon(True)
+
+    def _on_win_restored(self):
+        """pywebview events.restored：窗口退出最大化态 → 同步标志位与图标（W2 脱节兜底）"""
+        self._win_maximized = False
+        self._sync_win_icon(False)
 
     def win_close(self):
         """强制关闭入口：由前端 requestClose 决定后调用（_closing_forced 标志绕过 closing 拦截）"""
@@ -340,24 +497,59 @@ class InfiniteCanvasAPI:
         finally:
             self._closing_forced = False
 
+    def win_set_dirty(self, dirty):
+        """前端上报 dirty 状态（关闭未响应修复）：closing 事件读此缓存，避免同步 evaluate_js 卡死 GUI 线程。
+
+        由前端 close-guard 在 flowState 变更时主动调用（含 pywebview 就绪后的初始上报）。
+        """
+        self._cached_dirty = bool(dirty)
+        self._dirty_reported = True
+        return True
+
+    def _request_close_async(self):
+        """后台线程触发前端三选一弹窗（__icvRequestClose）。
+
+        evaluate_js 是同步阻塞调用（等待 JS 主线程执行完）；在 GUI 线程直接调用会在 JS 忙于
+        渲染大图时卡死窗口（未响应）。放到 daemon 后台线程后只阻塞该线程，GUI 线程保持响应，
+        JS 空闲后弹窗自然出现。前端 closeGuard.requestClose() 自带 prompting 去重，重复触发无害；
+        且 requestClose 内部会再校验真实 dirty（缓存脏读时干净项目会立即关闭，不弹多余确认）。
+        """
+        def _run():
+            try:
+                webview.windows[0].evaluate_js(
+                    'window.__icvRequestClose && window.__icvRequestClose()'
+                )
+            except Exception:
+                pass
+        threading.Thread(target=_run, daemon=True).start()
+
     def _on_closing(self):
         """窗口关闭拦截：dirty=true 时阻止关闭并触发前端三选一弹窗；_closing_forced 时放行。
 
         返回 False 表示阻止关闭（pywebview closing 事件契约）。
+        未响应修复：不再在 GUI 线程同步 evaluate_js（等待 JS 主线程执行完，渲染大图时会卡死窗口），
+        改为读取前端主动上报的 dirty 缓存；确认 dirty 后经后台线程触发前端弹窗。
         """
         if self._closing_forced:
             return True
-        try:
-            is_dirty = webview.windows[0].evaluate_js(
-                'window.__icvIsDirty ? window.__icvIsDirty() : false'
-            )
-            if is_dirty:
-                webview.windows[0].evaluate_js(
-                    'window.__icvRequestClose && window.__icvRequestClose()'
+        if not self._dirty_reported:
+            # 前端尚未上报（页面未加载完/已崩溃）：回退旧同步查询；异常即放行，避免窗口无法关闭
+            try:
+                is_dirty = webview.windows[0].evaluate_js(
+                    'window.__icvIsDirty ? window.__icvIsDirty() : false'
                 )
-                return False  # 阻止关闭，等待前端三选一弹窗
-        except Exception:
-            pass  # 前端未就绪时放行，避免窗口卡死无法关闭
+                if is_dirty:
+                    webview.windows[0].evaluate_js(
+                        'window.__icvRequestClose && window.__icvRequestClose()'
+                    )
+                    return False  # 阻止关闭，等待前端三选一弹窗
+            except Exception:
+                pass  # 前端未就绪时放行，避免窗口卡死无法关闭
+            return True
+        # 前端已上报：读缓存（近似实时），绝不同步等待 JS
+        if self._cached_dirty:
+            self._request_close_async()
+            return False  # 阻止关闭，前端稍后弹三选一（requestClose 内部会再校验真实 dirty）
         return True
 
 
@@ -433,6 +625,18 @@ def main():
 
     # 关闭保护：dirty 时拦截（返回 False 阻止关闭并触发前端三选一弹窗）
     window.events.closing += api._on_closing
+
+    # W2 脱节兜底：系统手势（Win+↑/↓ 等）进入/退出最大化时同步 _win_maximized 与前端图标。
+    # pywebview 6.2.1 WinForms 后端已在 winforms.py 的 on_resize 中 set() 这两个事件（实测支持）；
+    # 若某版本不支持，try/except 静默跳过 → 降级为仅 win_toggle_maximize / win_is_maximized 同步（设计 §5.1）。
+    try:
+        window.events.maximized += api._on_win_maximized
+    except Exception:
+        pass
+    try:
+        window.events.restored += api._on_win_restored
+    except Exception:
+        pass
 
     webview.start(debug=getattr(sys, 'frozen', False) == False)
 

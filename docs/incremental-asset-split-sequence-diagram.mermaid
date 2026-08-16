@@ -1,0 +1,85 @@
+sequenceDiagram
+    autonumber
+    actor User
+    participant FE as 前端顶栏/双击
+    participant BE as Backend(win_toggle_maximize)
+    participant W as Win32(user32)
+    participant JS as pywebview(前端回调)
+
+    Note over User,JS: 流程① 最大化 / 还原（W1-W4）
+    User->>FE: 点击 #win-max 或双击顶栏
+    FE->>BE: win_toggle_maximize()
+    alt 当前未最大化
+        BE->>W: GetWindowRect(hwnd) → 记录 _win_restore_rect
+        BE->>W: MonitorFromWindow(hwnd, NEAREST) → GetMonitorInfoW → rcWork
+        BE->>W: SetWindowPos(hwnd, rcWork)（贴当前屏工作区）
+        BE->>BE: _win_maximized = True
+    else 当前已最大化
+        BE->>W: SetWindowPos(hwnd, _win_restore_rect)（还原原矩形）
+        BE->>BE: _win_maximized = False
+    end
+    BE-->>FE: {maximized: bool}
+    FE->>FE: setWinMaxIcon(maximized)（□ ↔ ▣）
+    Note over BE,JS: 系统手势（Win+↑）时：window.events.maximized/restored → _on_win_maximized → evaluate_js(__icvWinMaxState) 同步图标
+
+    Note over User,HD: 流程② 采纳 → 落盘 → 资产库刷新（A1/A2/A3/X1/X2）
+    participant UI as 画布角标/对比面板/资产库
+    participant AS as AssetStore
+    participant FS as FlowState
+    participant HD as HistoryDrawer
+    participant AD as AssetDrawer
+    participant CV as CardView
+    User->>UI: 任一处点「采纳」
+    UI->>AS: adoptByUrl(url, nodeId, meta)
+    AS->>AS: records.set + urlByKey/metaByKey + projectName 追加（A5）+ notify()
+    AS->>FS: _markDirty()（dirty=true → 顶栏「未保存」, X2）
+    AS->>BE: saveAssets(list)（防抖原子写 <save_dir>/assets.json）
+    alt 未配置图片保存路径（降级）
+        BE->>BE: 写 APP_DIR/assets.json
+        BE-->>AS: {status:'success', degraded:true, message:'请先在设置中配置图片保存路径'}
+        AS-->>User: toast「请先在设置中配置图片保存路径」（人话，A2）
+    else 正常
+        BE-->>AS: {status:'success'}
+    end
+    AS-->>AD: notify → 资产库刷新（adopted 出现, S3）
+    AS-->>HD: notify → 历史图库只读角标刷新（S2）
+    AS-->>CV: notify → 画布角标刷新（X1）
+
+    Note over User,AD: 流程③ 打开应用恢复索引（A3/A4）
+    participant PS as Persistence(open)
+    User->>PS: 打开项目（或应用启动空项目）
+    PS->>BE: loadAssets()
+    BE->>BE: 读主索引：<图片保存目录>/assets.json 存在？→ 是则读；否则读 APP_DIR/assets.json
+    alt 旧项目有 <项目名>.assets.json（A4 迁移）
+        BE->>BE: 按 key 合并（主索引优先，仅补缺失 key）→ 写回主索引 → 删除旧文件
+    end
+    BE-->>AS: {status:'success', records:[...]}
+    AS->>AS: records.clear + normalize（含 imageUrl/projectName） + notify()
+    AS-->>AD: 资产库渲染已采纳图（S3）
+    AS-->>HD: 历史图库只读角标恢复（X1）
+
+    Note over User,BE2: 流程④ 设置保存路径 → 生成图落盘（P1-P6）
+    participant SP as SettingsPanel
+    participant BE1 as Backend(save_settings)
+    participant RE as RunEngine
+    participant BE2 as Backend(unified generate_image)
+    User->>SP: 打开设置 → 输入/选择文件夹
+    SP->>SP: _renderImagePathSection 回显（P5）
+    User->>SP: 点「保存」
+    SP->>BE1: saveSettings({...image_save_path: raw})
+    BE1->>BE1: strip + abspath 归一（P6）+ 目录校验（P4：不存在创建/非目录/写探针）
+    alt 校验失败
+        BE1-->>SP: {status:'error', message:'目录不可写…'}
+        SP-->>User: toast 错误
+    else 校验通过
+        BE1-->>SP: {status:'success'}
+        SP-->>User: toast「已保存」
+    end
+    User->>RE: 运行生成节点
+    RE->>BE2: generateImage(prompt, options)
+    BE2->>BE2: _get_save_dir() → settings.image_save_path（makedirs）
+    BE2->>BE2: _save_images_to_local → 写图到该目录 + saved_to_disk=true
+    BE2-->>RE: {success, image_url, saved_to_disk}
+    alt saved_to_disk === false（未配置/非法，回退 tempfile）
+        RE-->>User: toast「图片保存路径未设置，生成图不会落盘到本地」（P3，不阻断）
+    end

@@ -21,7 +21,10 @@ import { cardView } from './canvas/card-view';
 import { interactions } from './canvas/interactions';
 import { cmdPanel } from './ui/cmd-panel';
 import { actionBar } from './ui/action-bar';
+import { floatingPanels } from './ui/floating-panels';
 import { historyDrawer } from './ui/history-drawer';
+import { assetDrawer } from './ui/asset-drawer';
+import { leftCapsule } from './ui/left-capsule';
 import { bottomBar } from './ui/bottom-bar';
 import { comparePanel } from './ui/compare-panel';
 // 挂起：空态引导卡停用（index.html 容器已注释；恢复时取消本行与 init() 调用的注释）
@@ -66,10 +69,30 @@ function bindKeyboard(): void {
     const isTyping = tag === 'input' || tag === 'textarea';
     const isMeta = e.ctrlKey || e.metaKey;
 
+    // Tab：呼出悬浮面板（节点上方操作条 + 下方命令面板同时显示）
+    // 仅无修饰键的 Tab；焦点在输入类元素（input/textarea/select/contenteditable）内时不拦截，
+    // 保持浏览器默认焦点跳转（如改 prompt 时按 Tab 不得误触呼出）。
+    // Tab 是纯「呼出」动作：已显示时按 Tab 无动作（show() 幂等 no-op），收起统一走 Esc / 点画布空白。
+    if (e.key === 'Tab' && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
+      const el = document.activeElement as HTMLElement | null;
+      const inInput = isTyping || tag === 'select' || !!el?.isContentEditable;
+      if (!inInput && floatingPanels.show()) {
+        e.preventDefault();
+      }
+      return;
+    }
+
     // Ctrl+S 保存
     if (isMeta && e.key === 's') {
       e.preventDefault();
       void saveCoordinator.save(false);
+      return;
+    }
+
+    // Escape 收起悬浮面板：输入框内聚焦也生效（改 prompt 时按 Esc 收起面板）。
+    // 卡片就地编辑 textarea 对 Escape 做了 stopPropagation，不会冒泡到这里，互不干扰。
+    if (e.key === 'Escape' && isTyping) {
+      floatingPanels.hide();
       return;
     }
 
@@ -101,9 +124,11 @@ function bindKeyboard(): void {
 
     // Escape 关闭浮层
     if (e.key === 'Escape') {
+      floatingPanels.hide(); // Tab 化：Esc 同时收起上下悬浮面板
       settingsPanel.close();
       outpaintPanel.close();
       comparePanel.close();
+      assetDrawer.close(); // 资产库抽屉（可选，设计 §2 文件列表）
       document.getElementById('ctx-menu')?.classList.remove('show');
       document.getElementById('img-modal')?.classList.remove('show');
     }
@@ -151,10 +176,40 @@ function syncUndoRedo(): void {
 // 由 WinForms 后端 move() 移动窗口（带 DPI 缩放；不经用户 js_api 异步层，稳定不抽搐）。
 // 前端只需：① 捕获阶段拦截"交互元素"上的 mousedown（stopPropagation），
 // 防止官方冒泡监听把点击项目名/窗口按钮误判为拖动；② 保留窗口控制按钮与双击最大化。
+// W4：win_toggle_maximize 返回 {maximized} 切换 #win-max 图标；系统手势（Win+↑/↓）由
+// 后端 window.events.maximized/restored → evaluate_js(window.__icvWinMaxState) 兜底同步。
+
+/** 同步顶栏 #win-max 图标（□ ↔ ▣，W4） */
+function setWinMaxIcon(maximized: boolean): void {
+  const btn = document.getElementById('win-max');
+  if (btn) btn.classList.toggle('maximized', !!maximized);
+}
+
+/** 后端 evaluate_js 回调：系统手势进入/退出最大化时同步图标（W2 脱节兜底） */
+(window as unknown as Record<string, unknown>).__icvWinMaxState = (maximized: boolean): void => {
+  setWinMaxIcon(!!maximized);
+};
+
+/** 兼容 pywebview 返回值可能被包一层 result（共享知识 5）：取 r?.maximized ?? r?.result?.maximized */
+function readMaximized(r: unknown): boolean | null {
+  const v = (r as { maximized?: unknown } | undefined)?.maximized
+    ?? (r as { result?: { maximized?: unknown } } | undefined)?.result?.maximized;
+  return typeof v === 'boolean' ? v : null;
+}
+
+/** 点击/双击顶栏触发最大化切换，并依据后端返回值同步图标（W4） */
+async function toggleMaximizeAndSyncIcon(): Promise<void> {
+  try {
+    const r = await window.pywebview.api.win_toggle_maximize();
+    const maximized = readMaximized(r);
+    if (maximized !== null) setWinMaxIcon(maximized);
+  } catch { /* 后端不可用时静默（纯浏览器调试场景） */ }
+}
+
 function bindWindowControls(): void {
   // 三个窗口按钮：关闭按钮走 closeGuard（不得直连 win_close，否则关闭保护形同虚设）
   document.getElementById('win-min')!.addEventListener('click', () => { window.pywebview.api.win_minimize(); });
-  document.getElementById('win-max')!.addEventListener('click', () => { window.pywebview.api.win_toggle_maximize(); });
+  document.getElementById('win-max')!.addEventListener('click', () => { void toggleMaximizeAndSyncIcon(); });
   document.getElementById('win-close')!.addEventListener('click', () => { void closeGuard.requestClose(); });
 
   const topbar = document.querySelector('.topbar') as HTMLElement;
@@ -168,11 +223,11 @@ function bindWindowControls(): void {
     }
   }, true);
 
-  // 双击顶栏空白 = 最大化/还原
+  // 双击顶栏空白 = 最大化/还原（W1）
   topbar.addEventListener('dblclick', (e: MouseEvent) => {
     const t = e.target as HTMLElement;
     if (t.closest('input, button, select, textarea, .topbar-right')) return;
-    window.pywebview.api.win_toggle_maximize();
+    void toggleMaximizeAndSyncIcon();
   });
 }
 
@@ -187,6 +242,12 @@ async function init(): Promise<void> {
 
   // 悬浮 UI
   historyDrawer.init();
+  assetDrawer.init();
+  // 双抽屉互斥（S5）：打开一个自动收起另一个；由 main.ts 编排，抽屉内部不互相 import 关闭逻辑
+  historyDrawer.setMutex(() => assetDrawer.close());
+  assetDrawer.setMutex(() => historyDrawer.close());
+  // 左侧胶囊调（改版）：两个图标入口 + active 态同步（MutationObserver 监听抽屉 open class）
+  leftCapsule.init();
   cmdPanel.init();
   actionBar.init();
   bottomBar.init();
@@ -203,6 +264,8 @@ async function init(): Promise<void> {
 
   // 保存编排器（60s 自动保存 + 失焦 + 三态）+ 撤销/重做按钮
   saveCoordinator.init();
+  // 关闭保护：dirty 上报后端缓存（main.py closing 事件读缓存，不再同步 evaluate_js 卡 GUI 线程）
+  closeGuard.init();
   document.getElementById('btn-undo')?.addEventListener('click', () => { if (!runEngine.isBusy()) flowHistory.undo(); });
   document.getElementById('btn-redo')?.addEventListener('click', () => { if (!runEngine.isBusy()) flowHistory.redo(); });
   flowState.subscribe(() => syncUndoRedo());
@@ -211,8 +274,16 @@ async function init(): Promise<void> {
   // 初始渲染（空画布 → 空态引导）
   flowState.notify();
 
-  // 等待 pywebview 后加载模型（填充默认模型，供模板/新节点使用）
+  // 等待 pywebview 后加载模型（填充默认模型，供模板/新节点使用）+ 初始化窗口最大化图标（W4）
   await waitForPywebview();
+  // pywebview 就绪后强制重报一次 dirty：确保后端尽早拿到真实值并置位"已上报"标志
+  // （此前 init 阶段若 pywebview 未就绪，win_set_dirty 会被静默跳过）
+  closeGuard.syncNow();
+  try {
+    const r = await window.pywebview.api.win_is_maximized();
+    const maximized = readMaximized(r);
+    if (maximized !== null) setWinMaxIcon(maximized);
+  } catch { /* 后端不可用时静默（纯浏览器调试场景） */ }
   void fillDefaultModels();
 }
 

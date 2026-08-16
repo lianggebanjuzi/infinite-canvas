@@ -67,15 +67,54 @@ class SettingsAPI:
             return {"image_save_path": "", "default_project_path": ""}
 
     def save_settings(self, settings):
-        """保存设置"""
+        """保存设置。image_save_path 做归一（strip + abspath，P6）与目录校验（不存在创建 / 非目录报错 / 写探针可写，P4）。
+
+        空字符串允许（= 未配置，生成图走「不落盘」降级提示）；校验失败返回人话 error。
+        """
         print("正在保存设置...")
         try:
+            normalized = dict(settings or {})
+            if 'image_save_path' in normalized:
+                normalized['image_save_path'] = self._normalize_image_save_path(normalized.get('image_save_path'))
             with open(self.settings_file, 'w', encoding='utf-8') as f:
-                json.dump(settings, f, ensure_ascii=False, indent=4)
+                json.dump(normalized, f, ensure_ascii=False, indent=4)
             return {"status": "success", "message": "设置已保存"}
+        except ValueError as e:
+            return {"status": "error", "message": str(e)}
         except Exception as e:
             print(f"保存设置失败: {e}")
-            return {"status": "error", "message": str(e)}
+            return {"status": "error", "message": f"保存设置失败：{e}"}
+
+    def _normalize_image_save_path(self, raw):
+        """路径归一 + 目录校验（P4/P6）：
+        - strip 首尾空格；空字符串 → ''（允许未配置）
+        - 非空 → os.path.abspath 归一为绝对路径
+        - 目录不存在 → 尝试创建；存在但非目录 → 报错；写探针验证可写 → 报错
+        返回归一后的路径字符串；校验失败抛 ValueError（人话 message）。
+        """
+        if raw is None:
+            return ''
+        raw_str = str(raw).strip()
+        if not raw_str:
+            return ''
+        path = os.path.abspath(raw_str)
+        if os.path.exists(path):
+            if not os.path.isdir(path):
+                raise ValueError(f'「{path}」不是有效的目录')
+        else:
+            try:
+                os.makedirs(path, exist_ok=True)
+            except Exception as e:
+                raise ValueError(f'目录不存在且无法创建：{e}')
+        # 写探针：验证目录可写（P4）
+        probe = os.path.join(path, '.icv_write_probe')
+        try:
+            with open(probe, 'w', encoding='utf-8') as f:
+                f.write('ok')
+            os.remove(probe)
+        except Exception as e:
+            raise ValueError(f'目录不可写：{e}')
+        return path
 
     def select_folder(self):
         """打开文件夹选择对话框"""
