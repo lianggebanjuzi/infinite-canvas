@@ -75,3 +75,10 @@ interface BackendHistoryResult {
   message?: string;
   entries?: HistoryEntry[];
 }
+
+/** save_assets / load_assets 返回（可变资产索引：采纳/锁定/tags/category） */
+interface BackendAssetsResult {
+  status: string;            // success | empty | error
+  message?: string;
+  records?: ImageAssetRecord[];
+}

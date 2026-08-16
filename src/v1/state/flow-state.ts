@@ -5,6 +5,7 @@ import { uid } from '../../utils/uid';
 import { nodeRegistry } from '../nodes/node-registry';
 import { TEXT_HISTORY_LIMIT } from '../nodes/text-gen';
 import { showToast } from '../ui/toast';
+import { assetStore } from '../asset-store';
 
 /** 卡片固定宽度（与 canvas-view.CARD_W 同值；数据层不依赖视图层） */
 const CARD_W = 260;
@@ -80,6 +81,7 @@ export class FlowState {
    * 删除条件 = parentId===genId 且 出边为空 且 入边集合 == {gen→child}
    * （即：纯引擎产出、未被手动改造/手动连线的节点）。
    * 不满足 → 保留该子节点并标 stale（其下游也标 stale）+ toast「有手动连线的结果节点，已保留并标待重跑」。
+   * 锁定保护（Q3）：锁定产出节点（数据层查 AssetStore）不删除，保留 + 标 stale（含其下游）+ toast「有锁定的结果节点，已保留并标待重跑」。
    * txt2img 无子节点时自然无操作。逐个 removeNode（清理连线与选中）；仅一次 notify 由 removeNode 触发。
    */
   removeChildren(parentId: string): void {
@@ -87,7 +89,18 @@ export class FlowState {
     if (children.length === 0) return;
     let changed = false;
     let keptManual = false;
+    let keptLocked = false;
     children.forEach(child => {
+      // 保护点 1：锁定产出节点 → 不删除、标 stale（含其下游）、keptLocked=true（Q3 保留 + 标 stale）
+      if (this._isLockedChild(child)) {
+        keptLocked = true;
+        [child, ...this.getAllDownstreams(child.id)].forEach(n => {
+          if (n.status === 'run' || n.status === 'stale') return;
+          n.status = 'stale';
+          changed = true;
+        });
+        return;
+      }
       // 纯引擎产出判定：出边为空 且 入边恰为 {parent→child} 一条（未被手动连线/手动改造）
       const outEdges = this.getEdgesFrom(child.id);
       const inEdges = this.getEdgesTo(child.id);
@@ -112,11 +125,19 @@ export class FlowState {
         });
       }
     });
-    if (keptManual) showToast('有手动连线的结果节点，已保留并标待重跑', false);
+    if (keptLocked) showToast('有锁定的结果节点，已保留并标待重跑', false);
+    else if (keptManual) showToast('有手动连线的结果节点，已保留并标待重跑', false);
     if (changed) {
       this.updatedAt = Date.now();
       this.dirty = true;
     }
+  }
+
+  /** 锁定判定（数据层内部查询 AssetStore，不依赖 UI）：图指纹命中 或 nodeId 冗余命中 */
+  private _isLockedChild(child: FlowNode): boolean {
+    if (!child) return false;
+    if (child.imageUrl && assetStore.isLockedByImageUrl(child.imageUrl)) return true;
+    return assetStore.isLockedNode(child.id);
   }
 
   /**

@@ -50,7 +50,17 @@
     </button>
     <aside class="sidebar-left" id="sidebar-left">
       <div class="side-head"><span>历史图库</span></div>
+      <!-- 成图库收口：搜索框（B5）+ 成图/文本分区 tab（B1） -->
+      <div class="history-search" id="history-search-wrap">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
+        <input class="history-search-input" id="history-search" placeholder="搜 prompt / 模型 / 标签…" spellcheck="false">
+      </div>
+      <div class="history-tabs" id="history-tabs">
+        <button class="history-tab active" data-tab="image"><span class="history-tab-name">成图</span><span class="history-tab-count"></span></button>
+        <button class="history-tab" data-tab="text"><span class="history-tab-name">文本</span><span class="history-tab-count"></span></button>
+      </div>
       <div class="history-grid" id="history-grid"></div>
+      <div class="history-empty" id="history-empty" style="display:none;"></div>
     </aside>
   </div>
 
@@ -77,6 +87,10 @@
       <button class="act-btn" data-action="hd">
         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 3 14h7l-1 8 10-12h-7l1-8Z"/></svg>
         高清放大
+      </button>
+      <button class="act-btn" data-action="reproduce" title="复现（仅带生成档案的节点显示）">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 0 1 15-6.7L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-15 6.7L3 16"/><path d="M3 21v-5h5"/></svg>
+        复现
       </button>
       <div class="act-sep"></div>
       <button class="act-btn" data-action="download" title="下载">
@@ -156,6 +170,10 @@
     <button class="run-btn" id="btn-run-selected" title="运行选中节点（单选=运行当前卡）">
       <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 3l14 9-14 9V3Z"/></svg>
       <span>运行选中</span>
+    </button>
+    <button class="run-btn" id="btn-compare" title="对比选中成图（至少 2 张）" disabled>
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/><rect x="14" y="16" width="7" height="5" rx="1.5"/></svg>
+      <span>对比</span>
     </button>
   </div>
 
@@ -239,6 +257,25 @@
       <button class="btn-ghost" id="outpaint-cancel">取消</button>
       <button class="btn-primary" id="outpaint-confirm">开始扩图</button>
     </div>
+  </div>
+</div>
+
+<!-- 对比面板（模态浮层；挂 .overlay 类 → interactions.ts 已把 .overlay 排除在画布交互外；C4 关闭仅清瞬时态） -->
+<div class="overlay compare-overlay" id="compare-overlay">
+  <div class="compare-panel">
+    <div class="compare-head">
+      <h2>对比 <span class="compare-count" id="compare-count"></span></h2>
+      <div class="compare-grid-switch">
+        <button class="compare-grid-btn" data-grid="2">2宫格</button>
+        <button class="compare-grid-btn" data-grid="4">4宫格</button>
+        <button class="compare-grid-btn" data-grid="8">8宫格</button>
+      </div>
+      <button class="compare-close" id="compare-close" title="关闭">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
+      </button>
+    </div>
+    <div class="compare-grid" id="compare-grid"></div>
+    <div class="compare-foot">淘汰的图留在图库，不污染画布主链</div>
   </div>
 </div>
 

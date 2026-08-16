@@ -32,6 +32,7 @@ interface GenerationTrace {
   resolution: string;
   count: number;
   refImageHashes: string[];  // 参考图指纹（轻量字符串哈希，用于“是否同源”比对，不是密码学哈希）
+  refImageUrls?: string[];   // 可选：本次实际使用的参考图 URL（跨会话复现用；旧 trace 缺失时按 hash 反查图池兜底）
   seed?: string | null;      // 官方/中转站支持 seed 时记录；否则 null
   createdAt: number;
   parentId?: string | null;  // 生成源节点（手建节点自身生成时即自己 id）
@@ -154,12 +155,14 @@ type HistoryEntry =
   | {
       kind: 'image';
       nodeId: string;
+      imageUrl?: string;        // 新行：该产出图 URL（旧行缺失时回退按 nodeId 解析当前节点 imageUrl）
       prompt: string;
       model: string;
       aspectRatio: string;
       resolution: string;
       count: number;
       refImageHashes: string[];   // 参考图指纹（hashRef 轻量哈希）
+      refImageUrls?: string[];    // 新行：本次实际使用的参考图 URL（跨会话复现用）
       seed?: string | null;
       createdAt: number;
       parentId?: string | null;
@@ -174,3 +177,26 @@ type HistoryEntry =
       createdAt: number;
       parentId?: string | null;
     };
+
+/** 资产索引记录（采纳/锁定单一数据源；键 = 图指纹 hashRef(imageUrl)，冗余 nodeId 供保护回溯） */
+interface ImageAssetRecord {
+  key: string;            // hashRef(imageUrl) 图指纹主键（唯一定位「一张图」而非「一个节点」）
+  nodeId: string;         // 图当前所在节点（冗余；同一 nodeId 被重跑覆盖后旧图指纹不变，仍作用旧图）
+  adopted: boolean;       // 已采纳（认可；采纳自动置 locked）
+  locked: boolean;        // 已锁定（保护：removeChildren 不删 / _writeBackToSelf 不覆盖）
+  tags: string[];         // 手动标签（B6 P1；搜索纳入）
+  category: string;       // 分类预留（B8 P2；默认 '成图'，本期不渲染分类 UI）
+  updatedAt: number;
+}
+
+/** 资产快照（HistoryStack 并行撤销栈用） */
+interface AssetSnapshot {
+  records: ImageAssetRecord[];
+}
+
+/** 对比面板瞬时状态（不持久化；关闭仅清瞬时态，不污染画布主链） */
+interface ComparePanelState {
+  open: boolean;
+  nodeIds: string[];
+  grid: 2 | 4 | 8;
+}

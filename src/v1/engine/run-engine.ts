@@ -23,6 +23,7 @@ import { historyPersist } from '../history-persist';
 import { linkView } from '../canvas/link-view';
 import { CARD_W } from '../canvas/canvas-view';
 import { showToast } from '../ui/toast';
+import { assetStore } from '../asset-store';
 
 /** 节点定义执行上下文（供 canRun/buildOptions 使用） */
 const ctx: FlowContext = {
@@ -377,14 +378,29 @@ class RunEngine {
 
     // 6. 汇总：有成功 → done + 旧下游标 stale（新产出节点跳过）；
     //    图生图分支源节点旧 imageUrl 入历史后清空（回参考图占位）；文生图分支不清 imageUrl（第 1 张已写回自身）。
+    //    保护点 3（P1）：源节点旧 imageUrl 被锁定 → 不清空（保留主视觉，符合 v3「好结果不被重跑顶掉」）。
     const after = flowState.getNode(nodeId);
     if (!after) return; // 批次期间生成节点被删除
     if (progress.done > 0) {
       if (!isTxt2Img && after.imageUrl) {
-        // 图生图：旧 imageUrl 先入历史图库保留，再清空（回参考图占位）
-        // 注意：setNodeImage(id, null) 忽略 null 不清空 imageUrl，必须用 updateNode({imageUrl:null})
-        historyDrawer.addImage(after.imageUrl);
-        flowState.updateNode(nodeId, { imageUrl: null });
+        if (assetStore.isLockedByImageUrl(after.imageUrl)) {
+          // 参考图锁定：保留显示（不清空主视觉）+ toast
+          showToast('参考图已锁定，保留显示', false);
+        } else {
+          // 图生图：旧 imageUrl 先入历史图库保留，再清空（回参考图占位）
+          // 注意：setNodeImage(id, null) 忽略 null 不清空 imageUrl，必须用 updateNode({imageUrl:null})
+          const p = after.params as unknown as StyleTransferParams;
+          historyDrawer.addImage(after.imageUrl, {
+            nodeId: after.id,
+            prompt: typeof p.prompt === 'string' ? p.prompt : '',
+            model: typeof p.model === 'string' ? p.model : '',
+            aspectRatio: typeof p.aspectRatio === 'string' ? p.aspectRatio : '3:4',
+            resolution: typeof p.resolution === 'string' ? p.resolution : '2k',
+            count: typeof p.count === 'number' ? p.count : 1,
+            outputType: 'img2img',
+          });
+          flowState.updateNode(nodeId, { imageUrl: null });
+        }
       }
       flowState.updateNode(nodeId, { status: 'done', error: null, lastRunAt: Date.now() });
       dirty.markUpstreamChangedExcept(nodeId, this._createdCardIds);
@@ -417,9 +433,21 @@ class RunEngine {
       const result = await pollTask(created.task_id);
       if (result.success && result.imageUrl) {
         if (isTxt2Img && index === 0) {
-          // 文生图第 1 张（按 index=0，非完成顺序）写回源节点自身 imageUrl
-          await this._writeBackToSelf(genId, result.imageUrl);
-          progress.done += 1;
+          // 保护点 2：源节点当前 imageUrl（旧图）被锁定 → 不写回自身，改走新建产出节点（旧图保留，Q3）
+          const gen = flowState.getNode(genId);
+          const locked = !!gen && !!gen.imageUrl && assetStore.isLockedByImageUrl(gen.imageUrl);
+          if (locked) {
+            const card = await this.createResultCard(genId, result.imageUrl, layout, {}, {
+              outputType: 'txt2img',
+              refs,
+            });
+            this._createdCardIds.add(card.id);
+            progress.done += 1;
+          } else {
+            // 文生图第 1 张（按 index=0，非完成顺序）写回源节点自身 imageUrl
+            await this._writeBackToSelf(genId, result.imageUrl);
+            progress.done += 1;
+          }
         } else {
           // 图生图全部 + 文生图第 2..N 张：出一张建一张（不等兄弟），立即创建新 image-gen 产出节点并自动连线
           const card = await this.createResultCard(genId, result.imageUrl, layout, {}, {
@@ -448,14 +476,23 @@ class RunEngine {
     const node = flowState.getNode(genId);
     if (!node) return;
     if (node.imageUrl && node.imageUrl !== imageUrl) {
-      historyDrawer.addImage(node.imageUrl); // 旧图入历史图库保留
+      const p = node.params as unknown as StyleTransferParams;
+      historyDrawer.addImage(node.imageUrl, { // 旧图入历史图库保留（带搜索元数据）
+        nodeId: node.id,
+        prompt: typeof p.prompt === 'string' ? p.prompt : '',
+        model: typeof p.model === 'string' ? p.model : '',
+        aspectRatio: typeof p.aspectRatio === 'string' ? p.aspectRatio : '3:4',
+        resolution: typeof p.resolution === 'string' ? p.resolution : '2k',
+        count: typeof p.count === 'number' ? p.count : 1,
+        outputType: 'txt2img',
+      });
     }
     const ratio = await loadImageRatio(imageUrl);
     flowState.setNodeImage(genId, imageUrl, ratio && ratio > 0 ? ratio : undefined);
     // 文生图第 1 张写回自身：source of truth = node.trace，并追加一条 kind:'image' 流水
-    const trace = historyPersist.buildImageTrace(node, [], 'txt2img');
+    const trace = historyPersist.buildImageTrace(node, [], 'txt2img', imageUrl);
     node.trace = trace;
-    void historyPersist.appendTrace({ kind: 'image', nodeId: node.id, ...trace });
+    void historyPersist.appendTrace({ kind: 'image', nodeId: node.id, ...trace, imageUrl });
   }
 
   /**
@@ -504,11 +541,21 @@ class RunEngine {
     });
     // 自动建卡连线：suppressStale 避免刚 done 的产出节点被立即打回 stale
     flowState.addEdge(genId, node.id, { suppressStale: true });
-    historyDrawer.addImage(imageUrl);
-    // 生成档案：写 node.trace（source of truth）+ 追加一条 kind:'image' 流水
-    const nodeTrace = historyPersist.buildImageTrace(node, trace.refs, trace.outputType);
+    // 生成档案：写 node.trace（source of truth）+ 追加一条 kind:'image' 流水（imageUrl 冗余：跨会话图库解析优先用行内 URL）
+    const nodeTrace = historyPersist.buildImageTrace(node, trace.refs, trace.outputType, imageUrl);
     node.trace = nodeTrace;
-    void historyPersist.appendTrace({ kind: 'image', nodeId: node.id, ...nodeTrace });
+    historyDrawer.addImage(imageUrl, {
+      nodeId: node.id,
+      prompt: typeof gp.prompt === 'string' ? gp.prompt : '',
+      model: typeof gp.model === 'string' ? gp.model : '',
+      aspectRatio: typeof gp.aspectRatio === 'string' ? gp.aspectRatio : '3:4',
+      resolution: typeof gp.resolution === 'string' ? gp.resolution : '2k',
+      count: typeof gp.count === 'number' ? gp.count : 1,
+      refImageUrls: trace.refs,
+      refImageHashes: nodeTrace.refImageHashes,
+      outputType: trace.outputType,
+    });
+    void historyPersist.appendTrace({ kind: 'image', nodeId: node.id, ...nodeTrace, imageUrl });
     return node;
   }
 

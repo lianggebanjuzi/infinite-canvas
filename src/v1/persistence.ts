@@ -9,6 +9,7 @@ import { TEXT_HISTORY_LIMIT } from './nodes/text-gen';
 import { showToast } from './ui/toast';
 import { historyPersist } from './history-persist';
 import { historyDrawer } from './ui/history-drawer';
+import { assetStore } from './asset-store';
 
 /**
  * 文本历史归一：只接受 {text: string, ts: number} 条目，过滤非法、按 TEXT_HISTORY_LIMIT 裁尾。
@@ -203,6 +204,7 @@ class Persistence {
       if (result.status === 'success') {
         this.lastPath = result.path ?? null;
         this._clearDirtyIfUnchanged(versionAtCollect);
+        void assetStore.persistNow(); // 幂等兜底：资产索引随项目保存落盘（X2）
         this._afterSave(sizeKB, silent);
         return true;
       }
@@ -215,6 +217,7 @@ class Persistence {
     if (result.status === 'success') {
       this.lastPath = result.path ?? null;
       this._clearDirtyIfUnchanged(versionAtCollect);
+      void assetStore.persistNow(); // 幂等兜底：资产索引随项目保存落盘（X2）
       this._afterSave(sizeKB, silent);
       return true;
     }
@@ -241,7 +244,7 @@ class Persistence {
     return this.lastPath !== null;
   }
 
-  /** 打开项目（对话框）：入口已由 closeGuard.guardOpen 包装；成功后清撤销栈 + 载入 flowHistory.jsonl */
+  /** 打开项目（对话框）：入口已由 closeGuard.guardOpen 包装；成功后清撤销栈 + 载入 history.jsonl + 恢复资产索引 */
   async open(): Promise<void> {
     const result = await Backend.openProject();
     if (result.status === 'success' && result.data !== undefined && result.data !== null) {
@@ -250,6 +253,7 @@ class Persistence {
         this.syncProjectNameInput();
         flowHistory.clear(); // 跨项目：清空撤销栈，避免撤销回滚到旧项目快照
         void this._loadHistoryIntoDrawer();
+        void assetStore.loadFromBackend(); // 恢复采纳/锁定（AC-5：关闭重开后状态一致）
         showToast('项目已打开');
       }
     } else if (result.status !== 'cancelled') {

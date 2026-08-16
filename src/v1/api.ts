@@ -183,6 +183,15 @@ export const Backend = {
     return (await API.loadHistory()) as BackendHistoryResult;
   },
 
+  // ── 可变资产索引（采纳/锁定/tags/category） ──
+  async saveAssets(records: ImageAssetRecord[]): Promise<BackendAssetsResult> {
+    return (await API.saveAssets(records)) as BackendAssetsResult;
+  },
+
+  async loadAssets(): Promise<BackendAssetsResult> {
+    return (await API.loadAssets()) as BackendAssetsResult;
+  },
+
   // ── 供应商/设置 ──
   async loadProviders(): Promise<BackendProviderList> {
     return (await API.loadProviders()) as BackendProviderList;

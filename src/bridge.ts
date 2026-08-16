@@ -10,6 +10,9 @@ import { runEngine } from './v1/engine/run-engine';
 import { persistence } from './v1/persistence';
 import { Backend } from './v1/api';
 import { showToast } from './v1/ui/toast';
+import { assetStore } from './v1/asset-store';
+import { reproduceService } from './v1/reproduce';
+import { comparePanel } from './v1/ui/compare-panel';
 
 const w = window as unknown as Record<string, unknown>;
 
@@ -22,4 +25,7 @@ w.ICV = {
   persistence,
   Backend,
   showToast,
+  assetStore,
+  reproduceService,
+  comparePanel,
 };

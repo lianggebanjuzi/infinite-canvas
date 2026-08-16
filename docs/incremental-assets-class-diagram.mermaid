@@ -1,0 +1,131 @@
+classDiagram
+    class AssetStore {
+        -records: Map~string, ImageAssetRecord~
+        -listeners: Set~() => void~
+        -persistTimer: number | null
+        +init()
+        +loadFromBackend(): Promise~void~
+        +adopt(key: string, nodeId: string)
+        +unadopt(key: string)
+        +setLocked(key: string, nodeId: string, locked: boolean)
+        +addTags(key: string, tags: string[])
+        +isAdoptedByImageUrl(url: string): boolean
+        +isLockedByImageUrl(url: string): boolean
+        +isLockedNode(nodeId: string): boolean
+        +getByImageUrl(url: string): ImageAssetRecord | null
+        +list(): ImageAssetRecord[]
+        +captureSnapshot(): AssetSnapshot
+        +applySnapshot(snap: AssetSnapshot)
+        +subscribe(fn: () => void): () => void
+        +notify()
+        +persistNow(): Promise~void~
+        -_persist(): void
+        -_markDirty(): void
+        -_keyOf(url: string): string
+    }
+
+    class ImageAssetRecord {
+        key: string
+        nodeId: string
+        adopted: boolean
+        locked: boolean
+        tags: string[]
+        category: string
+        updatedAt: number
+    }
+
+    class AssetSnapshot {
+        records: ImageAssetRecord[]
+    }
+
+    class ReproduceService {
+        +reproduceFromNode(nodeId: string): Promise~void~
+        +reproduceFromHistory(entry: HistoryEntry): Promise~void~
+        +resolveRefImages(trace: GenerationTrace, hintNode?: FlowNode): ResolvedRefs
+        +checkModelAvailable(model: string): Promise~boolean~
+        -_createNodeFromTrace(trace: GenerationTrace): FlowNode
+        -_placeNodeNear(source: FlowNode): { x: number; y: number }
+        -_rejectIfBusy(): boolean
+    }
+
+    class ResolvedRefs {
+        urls: string[]
+        missing: number
+    }
+
+    class RunEngine {
+        +isBusy(): boolean
+        +run(nodeId: string): Promise~void~
+        +runBatch(nodeId: string): Promise~void~
+        +runOneWorker(genId, prompt, options, layout, progress, isTxt2Img, index, refs): Promise~void~
+        +createResultCard(genId, imageUrl, layout, paramOverrides, trace): Promise~FlowNode~
+        -_writeBackToSelf(genId, imageUrl): Promise~void~
+    }
+
+    class HistoryPersist {
+        +buildImageTrace(node, refs, outputType, imageUrl?): GenerationTrace
+        +appendTrace(entry): Promise~void~
+        +loadHistory(): Promise~HistoryEntry[]~
+    }
+
+    class ComparePanel {
+        -state: ComparePanelState
+        -el: HTMLElement | null
+        +init()
+        +open(nodeIds: string[])
+        +close()
+        +setGrid(mode: 2 | 4 | 8)
+        -_render()
+        -_cellAdopt(recordKey: string, nodeId: string)
+        -_cellLock(recordKey: string, nodeId: string)
+        -_comparableNodes(ids: string[]): FlowNode[]
+    }
+
+    class ComparePanelState {
+        open: boolean
+        nodeIds: string[]
+        grid: 2 | 4 | 8
+    }
+
+    class HistoryDrawer {
+        -items: HistoryItem[]
+        -tab: 'image' | 'text'
+        -query: string
+        +init()
+        +addImage(src, meta)
+        +loadFromHistory(entries)
+        +setTab(tab)
+        +setQuery(q)
+        -_render()
+        -_filtered(): HistoryItem[]
+    }
+
+    class FlowState {
+        +removeChildren(parentId): void
+        -_isLockedChild(child: FlowNode): boolean
+    }
+
+    class HistoryStack {
+        -undoStack: FlowSnapshot[]
+        -redoStack: FlowSnapshot[]
+        -assetUndoStack: AssetSnapshot[]
+        -assetRedoStack: AssetSnapshot[]
+        +record()
+        +undo()
+        +redo()
+        +suspend()
+        +resume()
+        +clear()
+    }
+
+    AssetStore --> ImageAssetRecord : 管理
+    AssetStore --> AssetSnapshot : 快照
+    HistoryStack --> AssetStore : 并行快照（撤销）
+    ReproduceService --> RunEngine : 调用 run（唯一入口）
+    ReproduceService --> HistoryPersist : 读 trace
+    ReproduceService --> AssetStore : 查询锁定（保护）
+    ComparePanel --> AssetStore : 采纳/锁定同一数据源
+    HistoryDrawer --> AssetStore : 角标/过滤
+    HistoryDrawer --> ReproduceService : 图库复现（A6）
+    RunEngine --> AssetStore : 锁定保护查询
+    FlowState --> AssetStore : removeChildren 保护

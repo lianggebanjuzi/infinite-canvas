@@ -21,10 +21,13 @@ class HistoryPersist {
    * 构造图片生成档案（GenerationTrace，写 node.trace 作 source of truth）：
    * prompt/model/aspectRatio/resolution/count 取节点 params，
    * refImageHashes 由本次实际使用的参考图 refs 哈希而来（含上游派生，非仅 node.refImages）；
+   * refImageUrls 可选记录实际参考图 URL（跨会话复现反查用；旧 trace 缺失时按 hash 反查图池兜底）；
    * parentId = node.parentId ?? node.id（手建节点自身生成时即自己 id）。
+   * imageUrl 为本次产出图 URL（写 history.jsonl 行用；GenerationTrace 本身不存 imageUrl 字段）。
    */
-  buildImageTrace(node: FlowNode, refs: string[], outputType: GenerationTrace['outputType']): GenerationTrace {
+  buildImageTrace(node: FlowNode, refs: string[], outputType: GenerationTrace['outputType'], imageUrl?: string): GenerationTrace {
     const p = (node.params || {}) as unknown as StyleTransferParams;
+    void imageUrl; // 供调用方构造 HistoryEntry 时携带（见 run-engine appendTrace）
     return {
       prompt: typeof p.prompt === 'string' ? p.prompt : '',
       model: typeof p.model === 'string' ? p.model : '',
@@ -32,6 +35,7 @@ class HistoryPersist {
       resolution: typeof p.resolution === 'string' ? p.resolution : '2k',
       count: typeof p.count === 'number' ? p.count : 1,
       refImageHashes: (refs || []).filter(r => !!r).map(r => this.hashRef(r)),
+      refImageUrls: (refs || []).filter(r => !!r),
       seed: null,
       createdAt: Date.now(),
       parentId: node.parentId ?? node.id,

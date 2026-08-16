@@ -9,14 +9,17 @@ import { interactions } from './interactions';
 import { applyCardStatus } from '../ui/status-visuals';
 import { applyTextToDownstream } from '../engine/run-engine';
 import { showToast } from '../ui/toast';
+import { assetStore } from '../asset-store';
 
 const ICON_EXPAND = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></svg>';
+const ICON_CHECK = '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>';
+const ICON_LOCK = '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>';
 
 class CardView {
   private container: HTMLElement | null = null;
   private els = new Map<string, HTMLElement>();
-  /** 内容指纹缓存：主图/缩略行/标题/状态/文本变化时才重建 img.innerHTML（避免高频调用反复重建大图 DOM） */
-  private _contentFingerprint = new Map<string, { mainSrc: string; refStrip: string; title: string; status: string; text: string }>();
+  /** 内容指纹缓存：主图/缩略行/标题/状态/文本/角标态变化时才重建 img.innerHTML（避免高频调用反复重建大图 DOM） */
+  private _contentFingerprint = new Map<string, { mainSrc: string; refStrip: string; title: string; status: string; text: string; assetState: string }>();
   /** 当前处于就地编辑态的 text-gen 节点 id（编辑中跳过 img.innerHTML 重建，避免打字被重建打断） */
   private _editingNodeId: string | null = null;
 
@@ -77,6 +80,12 @@ class CardView {
     // 拖动守卫：按住文本拖动卡片松手后浏览器仍会补发 click，位移过（wasNodeDragMoved）则不进入编辑。
     el.addEventListener('click', (e: MouseEvent) => {
       const target = e.target as Element;
+      // 采纳/锁定角标点击（X1 画布角标入口：变更前 record 入撤销栈）
+      const badge = target.closest('.pcard-badge') as HTMLElement | null;
+      if (badge) {
+        this._handleBadgeClick(node.id, badge);
+        return;
+      }
       if (!target.closest('.pcard-text')) return;
       if (interactions.wasNodeDragMoved()) return;
       const n = flowState.getNode(node.id);
@@ -85,6 +94,27 @@ class CardView {
       this._enterTextEdit(node.id);
     });
     return el;
+  }
+
+  /** 画布角标点击：采纳/锁定切换（唯一写入口 = AssetStore；X1 三处同步） */
+  private _handleBadgeClick(nodeId: string, badge: HTMLElement): void {
+    const node = flowState.getNode(nodeId);
+    if (!node || !node.imageUrl) return;
+    const url = node.imageUrl;
+    flowHistory.record(); // 用户手势入口：变更前入撤销栈（X3）
+    if (badge.classList.contains('adopt')) {
+      if (assetStore.isAdoptedByImageUrl(url)) {
+        assetStore.unadoptByUrl(url);
+        showToast('已取消采纳');
+      } else {
+        assetStore.adoptByUrl(url, node.id);
+        showToast('已采纳（自动锁定）');
+      }
+    } else {
+      const next = !assetStore.isLockedByImageUrl(url);
+      assetStore.setLockedByUrl(url, node.id, next);
+      showToast(next ? '已锁定' : '已解锁');
+    }
   }
 
   private updateCard(el: HTMLElement, node: FlowNode): void {
@@ -105,32 +135,43 @@ class CardView {
       img.style.height = this.cardHeight(node) + 'px'; // 高度随 ratio 每次照常更新（开销极小）
     }
 
-    // 内容指纹：仅当主图/缩略行/标题/状态/文本变化时才重建 img.innerHTML 与标签文本。
+    // 内容指纹：仅当主图/缩略行/标题/状态/文本/角标态变化时才重建 img.innerHTML 与标签文本。
     // 位置/选中态/状态视觉每次照常更新；避免滚轮缩放等高频调用反复重建大图 DOM（dataURL 大字符串）。
     // 文本：text-gen 卡片只显示结果 outputText（空则占位），其余节点无文本恒为空。
     const refStrip = this._refStrip(node);
     const title = node.title || '节点';
     const text = node.outputText || '';
-    const fp = { mainSrc, refStrip, title, status: node.status, text };
+    // 角标态（X1）：采纳/锁定读 AssetStore 单一数据源；纳入指纹保证 adopt/lock 任一变更都触发重建。
+    // 括号显式组合：'al'（已采纳+已锁定）/ 'a' / 'l' / '' 四种态都可达（QA O1）。
+    const adopted = !!mainSrc && assetStore.isAdoptedByImageUrl(mainSrc);
+    const locked = !!mainSrc && assetStore.isLockedByImageUrl(mainSrc);
+    const assetState = (adopted ? 'a' : '') + (locked ? 'l' : '');
+    const fp = { mainSrc, refStrip, title, status: node.status, text, assetState };
     const prev = this._contentFingerprint.get(node.id);
     const changed = !prev
       || prev.mainSrc !== fp.mainSrc
       || prev.refStrip !== fp.refStrip
       || prev.title !== fp.title
       || prev.status !== fp.status
-      || prev.text !== fp.text;
+      || prev.text !== fp.text
+      || prev.assetState !== fp.assetState;
     if (changed) {
       this._contentFingerprint.set(node.id, fp);
       // 就地编辑中跳过重建（避免状态等变化把 textarea 打没）；退出编辑态后由保存/取消路径强制重建
       if (img && this._editingNodeId !== node.id) {
         // 底部叠加参考图缩略行（本节点 refImages ∪ 上游可作参考图的图，动态增删，叠加不改变卡片尺寸）
+        const badgesHtml = isTextGen || !mainSrc ? '' : `
+          <div class="pcard-badges">
+            <button class="pcard-badge adopt${adopted ? ' on' : ''}" title="${adopted ? '取消采纳' : '采纳（自动锁定）'}">${ICON_CHECK}</button>
+            <button class="pcard-badge lock${locked ? ' on' : ''}" title="${locked ? '取消锁定' : '锁定'}">${ICON_LOCK}</button>
+          </div>`;
         if (isTextGen) {
           // 文本为主视觉：白底文本区（内部滚动），有结果显示 outputText，空态显示占位文案
           img.innerHTML = text
             ? `<div class="pcard-text">${escapeHtml(text)}</div><div class="scan"></div>${refStrip}`
             : `<div class="pcard-text empty"><span class="pcard-text-empty">点击输入文本</span></div><div class="scan"></div>${refStrip}`;
         } else if (mainSrc) {
-          img.innerHTML = `<div class="ph" style="background-image:url('${escapeUrl(mainSrc)}')"></div><div class="scan"></div>${refStrip}`;
+          img.innerHTML = `<div class="ph" style="background-image:url('${escapeUrl(mainSrc)}')"></div><div class="scan"></div>${refStrip}${badgesHtml}`;
         } else {
           img.innerHTML = `<div class="ph"><div class="ph-empty">${emptyContent()}</div></div><div class="scan"></div>${refStrip}`;
         }

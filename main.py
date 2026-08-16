@@ -286,6 +286,14 @@ class InfiniteCanvasAPI:
         """读取 history.jsonl（打开项目时跨会话展示）"""
         return self.project.load_history()
 
+    def save_assets(self, records):
+        """保存可变资产索引（<项目名>.assets.json，原子写；采纳/锁定/tags/category）"""
+        return self.project.save_assets(records)
+
+    def load_assets(self):
+        """读取可变资产索引（打开项目时恢复采纳/锁定状态）"""
+        return self.project.load_assets()
+
     # ─────────────────────────────────────────
     # 设置
     # ─────────────────────────────────────────

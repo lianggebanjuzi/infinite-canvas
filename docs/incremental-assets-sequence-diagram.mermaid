@@ -1,0 +1,63 @@
+sequenceDiagram
+    autonumber
+    actor User
+    participant AB as ActionBar / 右键菜单
+    participant RS as ReproduceService
+    participant FS as FlowState
+    participant RE as RunEngine
+    participant BE as Backend
+    participant HP as HistoryPersist
+    participant HD as HistoryDrawer
+    participant AS as AssetStore
+    participant UI as ComparePanel / 图库 / 画布角标
+    participant BB as BottomBar
+    participant CP as ComparePanel
+
+    %% ── 1. 功能 A · 复现（A1-A5）──
+    Note over User,HD: ① 复现：带 trace 节点 → 参数回填 → 新建独立节点 → 自动重跑
+    User->>AB: 选中带 trace 节点 → 点「复现」
+    AB->>RS: reproduceFromNode(nodeId)
+    RS->>FS: getNode(nodeId) → trace
+    RS->>RS: checkModelAvailable(model)
+    alt 模型不可用
+        RS-->>User: toast「模型不可用，已保留原参数」
+    end
+    RS->>RS: resolveRefImages(trace, node)
+    alt 存在未解析 hash
+        RS-->>User: toast「N 张参考图缺失」
+    end
+    RS->>FS: flowHistory.record()
+    RS->>FS: addNode(image-gen, x, y, params=trace 配方)
+    RS->>FS: addRefImage(newNodeId, url...) 挂载解析出的参考图
+    RS->>FS: selection.select(newNodeId)
+    RS->>RE: run(newNodeId)
+    RE->>BE: generateImage(prompt, options)
+    BE-->>RE: task_id
+    RE->>RE: pollTask(task_id)
+    RE-->>RE: imageUrl
+    RE->>HP: buildImageTrace(node, refs, outputType, imageUrl)
+    RE->>HP: appendTrace(entry)（node.trace 已写）
+    RE->>HD: addImage(imageUrl)
+    RE-->>User: 复现完成，原节点保留可对比
+
+    %% ── 2. 功能 B/C · 采纳与三处同步（B2/X1/X2）──
+    Note over User,CP: ② 采纳：任一入口 → AssetStore 单一数据源 → 三处角标同步 + 持久化
+    User->>UI: 任一入口点「采纳」（画布角标 / 图库 / 对比面板）
+    UI->>AS: adopt(key, nodeId)
+    AS->>AS: records.set + notify()
+    AS->>FS: _markDirty()（dirty=true → 顶栏「未保存」）
+    AS->>BE: saveAssets(records)（防抖原子写 assets.json）
+    AS-->>UI: notify → 画布角标 / 图库角标 / 对比面板角标同步刷新
+
+    %% ── 3. 功能 C · 对比面板（C1-C4）──
+    Note over User,FS: ③ 对比：多选 → 底部「对比(n)」→ 并排 → 面板内采纳 → 关闭不污染主链
+    User->>FS: 多选节点（含文本与图）
+    FS-->>BB: notify → 对比(n) 按钮同步（n=可对比数）
+    User->>BB: 点「对比(n)」（n≥2）
+    BB->>CP: open(comparableIds)
+    CP->>CP: _render()（2/4 宫格 + prompt 摘要 + 参数）
+    User->>CP: 点某格「采纳」
+    CP->>AS: adopt(key, nodeId)
+    AS-->>CP: notify → 该格角标刷新
+    User->>CP: 点遮罩 / Esc / ×
+    CP->>CP: close()（仅清瞬时态，不删节点/不改连线/不标 stale → C4）

@@ -23,6 +23,7 @@ import { cmdPanel } from './ui/cmd-panel';
 import { actionBar } from './ui/action-bar';
 import { historyDrawer } from './ui/history-drawer';
 import { bottomBar } from './ui/bottom-bar';
+import { comparePanel } from './ui/compare-panel';
 // 挂起：空态引导卡停用（index.html 容器已注释；恢复时取消本行与 init() 调用的注释）
 // import { emptyState } from './ui/empty-state';
 import { settingsPanel } from './ui/settings-panel';
@@ -31,6 +32,7 @@ import { saveCoordinator } from './save-coordinator';
 import { closeGuard } from './close-guard';
 import { flowHistory } from './state/history';
 import { runEngine } from './engine/run-engine';
+import { assetStore } from './asset-store';
 import { resolveDefaultModel, resolveDefaultChatModel } from './api';
 
 // ───────────────────────── pywebview 就绪等待 ─────────────────────────
@@ -101,6 +103,7 @@ function bindKeyboard(): void {
     if (e.key === 'Escape') {
       settingsPanel.close();
       outpaintPanel.close();
+      comparePanel.close();
       document.getElementById('ctx-menu')?.classList.remove('show');
       document.getElementById('img-modal')?.classList.remove('show');
     }
@@ -190,6 +193,10 @@ async function init(): Promise<void> {
   // emptyState.init(); // 挂起：空态引导卡停用（恢复时取消注释）
   settingsPanel.init();
   outpaintPanel.init();
+  comparePanel.init();
+
+  // 资产索引（采纳/锁定单一数据源；X1 三处订阅）
+  assetStore.init();
 
   bindKeyboard();
   bindWindowControls();

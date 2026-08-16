@@ -9,6 +9,7 @@ import { cardView } from '../canvas/card-view';
 import { showToast } from './toast';
 import { cmdPanel } from './cmd-panel';
 import { outpaintPanel } from './outpaint-panel';
+import { reproduceService } from '../reproduce';
 
 class ActionBar {
   private el: HTMLElement | null = null;
@@ -53,6 +54,12 @@ class ActionBar {
       void outpaintPanel.open(node.id);
       return;
     }
+    if (action === 'reproduce') {
+      // 复现（A1-A5）：带 trace 节点一键回填参数并重跑（新建独立节点，不破坏原图）；无 trace 节点按钮不可见
+      if (!node.trace) { showToast('该节点没有生成档案，无法复现', false); return; }
+      void reproduceService.reproduceFromNode(node.id);
+      return;
+    }
     // 多角度/打光/高清放大：第二版能力
     showToast('该能力将在后续版本开放', false);
   }
@@ -71,6 +78,10 @@ class ActionBar {
     const wr = wrap.getBoundingClientRect();
     const { x: cx0, y: topY } = canvasView.worldToWrap(node.x + CARD_W / 2, node.y);
     const botY = canvasView.worldToWrap(0, node.y + cardView.cardHeight(node)).y;
+
+    // 复现按钮显隐：仅带 trace 的节点显示（A1：无 trace 节点不出现；text 反推产物 trace=null 天然隐藏）
+    const reproduceBtn = this.el.querySelector('[data-action="reproduce"]') as HTMLElement | null;
+    if (reproduceBtn) reproduceBtn.classList.toggle('act-hidden', !node.trace);
 
     // 与指令面板同侧翻转：面板在上 → 操作条在下
     const cpH = (document.getElementById('cmd-panel') as HTMLElement)?.offsetHeight || 240;

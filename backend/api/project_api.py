@@ -155,6 +155,48 @@ class ProjectAPI:
             print(f"读取历史失败: {e}")
             return {"status": "error", "message": str(e)}
 
+    def _assets_path(self):
+        """推导 <项目名>.assets.json 落点（与 .history.jsonl 同目录兄弟；复用 _history_path 模式）。
+
+        可变资产索引（采纳/锁定/tags/category）独立于 append-only history.jsonl 与 .icproj 大文件；
+        无路径返回 None。
+        """
+        if not self.current_project_path:
+            return None
+        base = self.current_project_path
+        if base.endswith('.icproj'):
+            base = base[:-len('.icproj')]
+        return base + '.assets.json'
+
+    def save_assets(self, records):
+        """保存可变资产索引到 <项目名>.assets.json（原子写；采纳/锁定/tags/category 高频小变更独立落盘）"""
+        try:
+            assets_path = self._assets_path()
+            if not assets_path:
+                return {"status": "error", "message": "no_path"}
+            with self.lock:
+                atomic_write_json(assets_path, {"records": records if isinstance(records, list) else []})
+            return {"status": "success"}
+        except Exception as e:
+            print(f"保存资产索引失败: {e}")
+            return {"status": "error", "message": str(e)}
+
+    def load_assets(self):
+        """读取可变资产索引；文件缺失返回 empty（旧项目默认全未采纳/未锁定）；损坏容错回退空索引"""
+        try:
+            assets_path = self._assets_path()
+            if not assets_path or not os.path.exists(assets_path):
+                return {"status": "empty"}
+            with open(assets_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            records = data.get("records", []) if isinstance(data, dict) else []
+            if not isinstance(records, list):
+                records = []
+            return {"status": "success", "records": records}
+        except Exception as e:
+            print(f"读取资产索引失败: {e}")
+            return {"status": "empty"}
+
     def cleanup_orphan_tmp_files(self):
         """最佳努力清理当前项目目录下崩溃遗留的 *.icproj.tmp 孤儿（绝不误删 .icproj，R1.4 P1）"""
         if not self.current_project_path:

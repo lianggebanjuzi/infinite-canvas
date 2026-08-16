@@ -9,15 +9,19 @@ import { saveCoordinator } from '../save-coordinator';
 import { closeGuard } from '../close-guard';
 import { flowHistory } from '../state/history';
 import { settingsPanel } from './settings-panel';
+import { comparePanel } from './compare-panel';
+import { showToast } from './toast';
 
 const THEME_KEY = 'infinite_canvas_theme';
 
 class BottomBar {
   private runBtn: HTMLButtonElement | null = null;
+  private compareBtn: HTMLButtonElement | null = null;
   private nameInput: HTMLInputElement | null = null;
 
   init(): void {
     this.runBtn = document.getElementById('btn-run-selected') as HTMLButtonElement | null;
+    this.compareBtn = document.getElementById('btn-compare') as HTMLButtonElement | null;
     this.nameInput = document.getElementById('project-name') as HTMLInputElement | null;
 
     // 打开：先过 closeGuard 的 dirty 检查（保存/放弃/取消）
@@ -27,6 +31,16 @@ class BottomBar {
     document.getElementById('btn-theme')?.addEventListener('click', () => this._toggleTheme());
     document.getElementById('btn-settings')?.addEventListener('click', () => settingsPanel.open());
     this.runBtn?.addEventListener('click', () => void runEngine.runSelected());
+
+    // 对比（C1）：n = 选中可对比数（image-gen 且 imageUrl 非空；文本不计入），n<2 时整钮禁用
+    this.compareBtn?.addEventListener('click', () => {
+      const comparable = this._comparableIds();
+      if (comparable.length < 2) {
+        showToast('请至少选择 2 张成图进行对比', false);
+        return;
+      }
+      comparePanel.open(comparable);
+    });
 
     // 项目名编辑：聚焦记一次快照（整段重命名为一步撤销）
     this.nameInput?.addEventListener('focus', () => flowHistory.record());
@@ -43,6 +57,14 @@ class BottomBar {
 
     flowState.subscribe(() => this._sync());
     this._sync();
+  }
+
+  /** 可对比节点 id（image-gen 且 imageUrl 非空；文本节点不计入 n，Q5 拍板） */
+  private _comparableIds(): string[] {
+    return selection.ids.filter(id => {
+      const n = flowState.getNode(id);
+      return !!n && n.type === 'image-gen' && !!n.imageUrl;
+    });
   }
 
   private _toggleTheme(): void {
@@ -64,6 +86,14 @@ class BottomBar {
       this.runBtn.classList.toggle('run-active', n > 1);
       const label = this.runBtn.querySelector('span');
       if (label) label.textContent = n === 1 ? '运行当前卡' : (n > 1 ? `运行选中 (${n})` : '运行选中');
+    }
+    // 对比按钮（C1）：n = 可对比数；n<2 整钮禁用；文本节点不计入 n（混选时不隐藏）
+    if (this.compareBtn) {
+      const n = this._comparableIds().length;
+      this.compareBtn.disabled = n < 2;
+      this.compareBtn.classList.toggle('run-active', n >= 2);
+      const label = this.compareBtn.querySelector('span');
+      if (label) label.textContent = n >= 2 ? `对比 (${n})` : '对比';
     }
   }
 }

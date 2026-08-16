@@ -13,6 +13,7 @@ import { linkView } from './link-view';
 import { runEngine } from '../engine/run-engine';
 import { showToast } from '../ui/toast';
 import { resolveDefaultModel, resolveDefaultChatModel } from '../api';
+import { reproduceService } from '../reproduce';
 
 const DRAG_THRESHOLD = 3;
 
@@ -661,6 +662,11 @@ class Interactions {
         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 3 14h7l-1 8 10-12h-7l1-8Z"/></svg>
         重新运行
       </div>` : ''}
+      ${node.type === 'image-gen' && node.trace ? `
+      <div class="ctx-item" data-act="reproduce">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 0 1 15-6.7L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-15 6.7L3 16"/><path d="M3 21v-5h5"/></svg>
+        复现
+      </div>` : ''}
       <div class="ctx-sep"></div>
       <div class="ctx-item danger" data-act="delete">
         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></svg>
@@ -748,6 +754,15 @@ class Interactions {
         flowHistory.record();
         flowState.removeNode(nodeId);
         selection.clear();
+        break;
+      }
+      case 'reproduce': {
+        // 右键菜单复现（P0 主入口）：仅带 trace 的 image-gen 节点显示菜单项
+        const node = flowState.getNode(nodeId);
+        if (node && node.trace) {
+          selection.select(nodeId);
+          void reproduceService.reproduceFromNode(nodeId);
+        }
         break;
       }
       case 'insert-step': {
