@@ -68,3 +68,10 @@ interface BackendSettings {
   image_save_path?: string;
   [key: string]: unknown;
 }
+
+/** append_history / load_history 返回 */
+interface BackendHistoryResult {
+  status: string;            // success | empty | error
+  message?: string;
+  entries?: HistoryEntry[];
+}

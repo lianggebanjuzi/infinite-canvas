@@ -1,0 +1,98 @@
+classDiagram
+    class FlowState {
+        nodes: FlowNode[]
+        edges: FlowEdge[]
+        canvas: FlowCanvasState
+        projectName: string
+        dirty: boolean
+        +applySnapshot(snap: FlowSnapshot)
+        +addNode() +removeNode() +addEdge() +removeEdge()
+        +updateNode() +updateNodeParams() +setNodeImage()
+        +pushTextHistory() +addRefImage() +removeRefImage() +replaceAll()
+        +notify()
+    }
+
+    class FlowSnapshot {
+        nodes: FlowNode[]
+        edges: FlowEdge[]
+        projectName: string
+        dirty: boolean
+    }
+
+    class HistoryStack {
+        -undoStack: FlowSnapshot[]
+        -redoStack: FlowSnapshot[]
+        -suspended: boolean
+        +record()
+        +undo()
+        +redo()
+        +suspend()
+        +resume()
+        +clear()
+        +canUndo: boolean
+        +canRedo: boolean
+    }
+
+    class SaveCoordinator {
+        -saving: boolean
+        -pending: boolean
+        -status: 'saved' | 'dirty' | 'saving'
+        -intervalMs = 60000
+        +init()
+        +save(silent: boolean): Promise~boolean~
+        +saveForClose(): Promise~boolean~
+        +hasPath(): boolean
+        +setStatus()
+    }
+
+    class Persistence {
+        -lastPath: string | null
+        +collect(): FlowProject
+        +restore(raw): boolean
+        +save(silent?): Promise~void~
+        +open(): Promise~void~
+        +hasPath(): boolean
+    }
+
+    class CloseGuard {
+        +requestClose(): Promise~void~
+        +guardOpen(action): Promise~void~
+        +promptUnsavedChanges(mode): Promise~'save'|'discard'|'cancel'~
+    }
+
+    class HistoryPersist {
+        +hashRef(url): string
+        +buildImageTrace(node): HistoryEntry
+        +buildTextTrace(node): HistoryEntry
+        +appendTrace(entry): void
+        +loadHistory(): Promise~HistoryEntry[]~
+    }
+
+    class RunEngine {
+        -busy: boolean
+        +run() +runBatch() +runTextGen() +runImageReverse() +runOutpaint()
+        +isBusy(): boolean
+    }
+
+    class ProjectAPI {
+        -current_project_path: string | null
+        -lock: Lock
+        +save_project(data, path?)
+        +save_project_as(data)
+        +open_project_dialog()
+        +append_history(entry): dict
+        +load_history(): dict
+        +get_current_project_path()
+        -_history_path(): string
+    }
+
+    FlowState --> FlowSnapshot : applySnapshot 恢复
+    HistoryStack --> FlowSnapshot : 存取
+    SaveCoordinator --> Persistence : 调 save
+    SaveCoordinator --> FlowState : 读 dirty
+    CloseGuard --> SaveCoordinator : saveForClose
+    CloseGuard --> FlowState : 读 dirty
+    RunEngine --> HistoryStack : suspend/resume
+    HistoryPersist --> RunEngine : 生成成功钩子
+    Persistence --> ProjectAPI : 经 Backend
+    HistoryPersist --> ProjectAPI : 经 Backend

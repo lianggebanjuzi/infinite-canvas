@@ -1,0 +1,106 @@
+sequenceDiagram
+    autonumber
+    participant U as 用户
+    participant UI as 前端 UI/键盘
+    participant SC as SaveCoordinator
+    participant P as Persistence
+    participant B as Backend(api.ts)
+    participant PY as main.py/pywebview
+    participant PA as ProjectAPI
+    participant FS as 文件系统
+
+    %% ── 1. 原子保存 ──
+    Note over U,FS: ① 原子保存（手动 Ctrl+S / 按钮）
+    U->>UI: Ctrl+S
+    UI->>SC: save(silent=false)
+    SC->>P: collect() → FlowProject
+    P->>B: saveProject(data)
+    B->>PY: pywebview.api.save_project(data)
+    PY->>PA: save_project(data)
+    PA->>FS: atomic_write_json(.icproj)（.tmp→fsync→os.replace）
+    FS-->>PA: 成功
+    PA-->>PY: {status:'success', path}
+    PY-->>B: success
+    B-->>P: success
+    P->>P: lastPath=path, dirty=false
+    P->>SC: 成功
+    SC->>UI: status='saved'（已保存 ✓）
+
+    %% ── 2. 自动保存触发 ──
+    Note over U,FS: ② 自动保存（60s 定时器 / 窗口失焦）
+    SC->>SC: 60s 定时器 / blur
+    SC->>P: dirty===true 且 hasPath() ?
+    alt dirty 且 hasPath
+        P->>B: saveProject(data)
+        B->>PY: save_project(data)
+        PY->>PA: save_project(data)
+        PA->>FS: atomic_write_json（原子替换）
+        FS-->>PA: 成功
+        PA-->>PY: success
+        PY-->>B: success
+        B-->>P: success
+        P->>P: dirty=false
+        SC->>UI: status='saved'（静默，不弹 toast）
+    else 无路径
+        SC->>SC: 跳过，保持 dirty
+    end
+
+    %% ── 3. 关闭保护拦截 ──
+    Note over U,FS: ③ 关闭保护拦截（点 X / Alt+F4）
+    U->>PY: 点窗口关闭
+    PY->>PY: closing 事件回调
+    PY->>UI: evaluate_js('__icvIsDirty()')
+    UI-->>PY: dirty=true/false
+    alt dirty=false
+        PY-->>U: 直接关闭
+    else dirty=true
+        PY->>U: 返回 False 阻止关闭
+        PY->>UI: evaluate_js('__icvRequestClose()')
+        UI->>UI: promptUnsavedChanges('close') 三选一
+        alt 取消
+            UI-->>U: 不关，返回应用
+        else 不保存
+            UI->>PY: win_close()（_closing_forced=true → destroy）
+        else 保存并关闭
+            UI->>SC: saveForClose()
+            SC->>P: save()（无路径则 saveProjectAs 弹另存为）
+            P->>PY: save_project / save_project_as
+            PY->>FS: atomic_write_json
+            FS-->>PY: 成功
+            PY-->>P: success
+            P->>SC: 成功
+            SC->>UI: ok
+            UI->>PY: win_close()（强制 destroy）
+        end
+    end
+
+    %% ── 4. 撤销/重做 ──
+    Note over U,FS: ④ 撤销/重做（快照回滚）
+    U->>UI: 用户手势（增删节点/连线/改参数）
+    UI->>UI: history.record()（快照入 undo 栈，清 redo）
+    UI->>UI: 变更（dirty=true）
+    U->>UI: Ctrl+Z
+    UI->>UI: history.undo() → applySnapshot
+    UI->>UI: 恢复 nodes/edges/projectName/dirty
+    UI->>UI: 顶栏按 dirty 复位（已保存/未保存）
+    U->>UI: Ctrl+Shift+Z
+    UI->>UI: history.redo() → applySnapshot
+
+    %% ── 5. history 持久化 ──
+    Note over U,FS: ⑤ history.jsonl 持久化
+    U->>UI: 运行生成（runEngine.run）
+    UI->>UI: runEngine suspend()（引擎变更不入撤销栈）
+    UI->>UI: 生成成功 → buildImageTrace(node)
+    UI->>UI: node.trace = trace（source of truth）
+    UI->>B: appendHistory(entry)
+    B->>PY: pywebview.api.append_history(entry)
+    PY->>PA: append_history(entry)
+    PA->>FS: append_json_line(<project>.history.jsonl)
+    FS-->>PA: 成功
+    PA-->>PY: {status:'success'}
+    PY-->>B: success
+    B-->>UI: success
+    alt 写失败
+        UI->>UI: toast「历史记录未写入」（不阻断结果展示）
+    end
+    UI->>UI: runEngine resume()

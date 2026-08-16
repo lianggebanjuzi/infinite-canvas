@@ -16,7 +16,17 @@
   </div>
   <div class="project-wrap">
     <input class="project-name" id="project-name" value="未命名项目" spellcheck="false" title="项目名称">
+    <span class="save-status" id="save-status" data-status="saved">已保存</span>
     <span class="save-dot" id="save-dot" title="有未保存的修改"></span>
+  </div>
+  <!-- 撤销/重做（信任层） -->
+  <div class="topbar-tools">
+    <button class="win-btn" id="btn-undo" title="撤销 (Ctrl+Z)" disabled>
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7v6h6"/><path d="M21 17a9 9 0 0 0-9-9 9 9 0 0 0-6 2.3L3 13"/></svg>
+    </button>
+    <button class="win-btn" id="btn-redo" title="重做 (Ctrl+Shift+Z)" disabled>
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 7v6h-6"/><path d="M3 17a9 9 0 0 1 9-9 9 9 0 0 1 6 2.3L21 13"/></svg>
+    </button>
   </div>
   <!-- 自绘窗口控制按钮（无边框窗口；.topbar-right 布局 CSS 早已预留，只补 HTML） -->
   <div class="topbar-right">

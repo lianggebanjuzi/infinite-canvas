@@ -42,6 +42,11 @@ export default defineConfig({
     // 单入口，不拆分 chunk，简化 pywebview 加载
     rollupOptions: {
       input: resolve(__dirname, 'src/index.html'),
+      // IIFE：把 bundle 顶层变量封闭进函数作用域，与 window 全局完全隔离，
+      // 根治「顶层 var 撞 window 内置属性（history/name/status/top/location 等）静默失败」类问题
+      output: {
+        format: 'iife',
+      },
     },
     // 生产环境 sourcemap（调试用，发布时关闭）
     sourcemap: false,

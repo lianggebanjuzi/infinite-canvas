@@ -5,6 +5,7 @@
 import { flowState } from '../state/flow-state';
 import { selection } from '../state/selection';
 import { dirty } from '../state/dirty';
+import { flowHistory } from '../state/history';
 import { canvasView, CARD_W } from '../canvas/canvas-view';
 import { cardView } from '../canvas/card-view';
 import { interactions } from '../canvas/interactions';
@@ -71,6 +72,11 @@ class CmdPanel {
   }
 
   private _bindEvents(): void {
+    // 输入框聚焦即记一次快照：整段输入的 prompt/指令折叠为一步撤销（逐字记录会刷爆 50 步上限）
+    this.input.addEventListener('focus', () => {
+      if (selection.single()) flowHistory.record();
+    });
+
     // 输入框：改自己 → 更新 params（不标 stale）；发送 → 运行
     this.input.addEventListener('input', () => {
       const node = selection.single();
@@ -186,6 +192,7 @@ class CmdPanel {
         div.textContent = item.name;
         div.addEventListener('click', (ev) => {
           ev.stopPropagation();
+          flowHistory.record();
           if (type === 'text') {
             flowState.updateNodeParams(node.id, { modelType: 'text', textModel: item.id });
           } else {
@@ -200,6 +207,7 @@ class CmdPanel {
 
     const setTab = (type: 'draw' | 'text'): void => {
       currentType = type;
+      flowHistory.record();
       flowState.updateNodeParams(node.id, { modelType: type });
       tabDraw.className = 'param-menu-tab' + (type === 'draw' ? ' active' : '');
       tabText.className = 'param-menu-tab' + (type === 'text' ? ' active' : '');
@@ -267,6 +275,7 @@ class CmdPanel {
   private _applyParam(nodeId: string, paramType: string, value: string): void {
     const node = flowState.getNode(nodeId);
     if (!node) return;
+    flowHistory.record();
     if (paramType === 'model') {
       flowState.updateNodeParams(nodeId, { model: value });
       if (value) {
@@ -287,7 +296,7 @@ class CmdPanel {
     if (!this.el) return;
     const node = selection.single();
     if (!node) {
-      this.el.classList.remove('show', 'pos-above', 'textgen');
+      this.el.classList.remove('show', 'pos-above', 'textgen', 'reverse');
       return;
     }
 
@@ -423,6 +432,7 @@ class CmdPanel {
 
   /** 历史回填动作（与运行成功时的覆盖动作完全一致）：写 outputText + 覆盖直接 image-gen 下游 prompt + 标 stale */
   private _refillHistoryItem(nodeId: string, item: TextGenHistoryItem): void {
+    flowHistory.record();
     flowState.updateNode(nodeId, { outputText: item.text });
     applyTextToDownstream(nodeId, item.text);
     showToast('已回填历史反推文本');
@@ -459,6 +469,7 @@ class CmdPanel {
         del.title = '删除参考图';
         del.addEventListener('click', (e: MouseEvent) => {
           e.stopPropagation();
+          flowHistory.record();
           flowState.removeRefImage(node.id, url);
           dirty.markStale(node.id);
         });

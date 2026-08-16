@@ -3,9 +3,12 @@
 // restore 校验 format==='icv' 且 version==='3.4'；兼容读取 3.3/3.2 旧文件（节点缺 outputText/textHistory 由 migrateNode 兜底）
 
 import { flowState } from './state/flow-state';
+import { flowHistory } from './state/history';
 import { Backend } from './api';
 import { TEXT_HISTORY_LIMIT } from './nodes/text-gen';
 import { showToast } from './ui/toast';
+import { historyPersist } from './history-persist';
+import { historyDrawer } from './ui/history-drawer';
 
 /**
  * 文本历史归一：只接受 {text: string, ts: number} 条目，过滤非法、按 TEXT_HISTORY_LIMIT 裁尾。
@@ -185,9 +188,12 @@ class Persistence {
     return true;
   }
 
-  /** 保存（A2：图片 base64 内嵌；大体积时 Toast 提示） */
-  async save(): Promise<void> {
+  /** 保存（A2：图片 base64 内嵌；大体积时 Toast 提示）。silent=true 静默（自动保存不逐次 toast）。返回是否保存成功。 */
+  async save(silent = false): Promise<boolean> {
     const data = this.collect();
+    // 快照 collect 时刻的状态版本：仅在「collect 后状态未再变化」时才清 dirty，
+    // 否则在途期间的新改动会保留 dirty，由 SaveCoordinator 的 pending 补写再落盘后复位（零丢失）。
+    const versionAtCollect = flowState.updatedAt;
     let sizeKB = 0;
     try { sizeKB = Math.round(JSON.stringify(data).length / 1024); } catch { sizeKB = 0; }
 
@@ -196,41 +202,65 @@ class Persistence {
       result = await Backend.saveProjectAs(data);
       if (result.status === 'success') {
         this.lastPath = result.path ?? null;
-        flowState.dirty = false;
-        this._afterSave(sizeKB);
-      } else if (result.status !== 'cancelled') {
+        this._clearDirtyIfUnchanged(versionAtCollect);
+        this._afterSave(sizeKB, silent);
+        return true;
+      }
+      if (result.status !== 'cancelled' && !silent) {
         showToast('保存失败: ' + (result.message || ''), false);
       }
-      return;
+      return false;
     }
 
     if (result.status === 'success') {
       this.lastPath = result.path ?? null;
+      this._clearDirtyIfUnchanged(versionAtCollect);
+      this._afterSave(sizeKB, silent);
+      return true;
+    }
+    if (!silent) showToast('保存失败: ' + (result.message || ''), false);
+    return false;
+  }
+
+  /** 仅在「collect 快照后状态未再变化」时清 dirty；否则保留 dirty（在途期间又产生了新改动，尚未落盘） */
+  private _clearDirtyIfUnchanged(versionAtCollect: number): void {
+    if (flowState.updatedAt === versionAtCollect) {
       flowState.dirty = false;
-      this._afterSave(sizeKB);
-    } else {
-      showToast('保存失败: ' + (result.message || ''), false);
     }
   }
 
-  private _afterSave(sizeKB: number): void {
+  private _afterSave(sizeKB: number, silent: boolean): void {
     flowState.notify();
+    if (silent) return;
     const hint = sizeKB > 2048 ? '（项目较大，图片已内嵌保存）' : '';
     showToast('项目已保存' + hint);
   }
 
-  /** 打开项目（对话框） */
+  /** 是否已有保存路径 */
+  hasPath(): boolean {
+    return this.lastPath !== null;
+  }
+
+  /** 打开项目（对话框）：入口已由 closeGuard.guardOpen 包装；成功后清撤销栈 + 载入 flowHistory.jsonl */
   async open(): Promise<void> {
     const result = await Backend.openProject();
     if (result.status === 'success' && result.data !== undefined && result.data !== null) {
       if (this.restore(result.data)) {
         this.lastPath = result.path ?? null;
         this.syncProjectNameInput();
+        flowHistory.clear(); // 跨项目：清空撤销栈，避免撤销回滚到旧项目快照
+        void this._loadHistoryIntoDrawer();
         showToast('项目已打开');
       }
     } else if (result.status !== 'cancelled') {
       showToast('打开失败: ' + (result.message || ''), false);
     }
+  }
+
+  /** 载入 flowHistory.jsonl 到历史图库（跨会话展示；失败静默） */
+  private async _loadHistoryIntoDrawer(): Promise<void> {
+    const entries = await historyPersist.loadHistory();
+    historyDrawer.loadFromHistory(entries);
   }
 
   /** 同步项目名输入框 */

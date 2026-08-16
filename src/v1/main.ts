@@ -27,7 +27,10 @@ import { bottomBar } from './ui/bottom-bar';
 // import { emptyState } from './ui/empty-state';
 import { settingsPanel } from './ui/settings-panel';
 import { outpaintPanel } from './ui/outpaint-panel';
-import { persistence } from './persistence';
+import { saveCoordinator } from './save-coordinator';
+import { closeGuard } from './close-guard';
+import { flowHistory } from './state/history';
+import { runEngine } from './engine/run-engine';
 import { resolveDefaultModel, resolveDefaultChatModel } from './api';
 
 // ───────────────────────── pywebview 就绪等待 ─────────────────────────
@@ -44,8 +47,14 @@ function waitForPywebview(): Promise<void> {
 
 // ───────────────────────── 全局错误处理 ─────────────────────────
 function installGlobalErrorHandler(): void {
-  window.addEventListener('error', () => { /* 静默：不出现文字日志（共享约定第 6 条） */ });
-  window.addEventListener('unhandledrejection', () => { /* 静默 */ });
+  // 仅输出到 DevTools console（不渲染进 UI，维持「画布不出现文字日志」共享约定第 6 条），
+  // 便于 pywebview 调试模式下定位异常（曾因完全静默导致右键菜单等 init/交互异常难以诊断）。
+  window.addEventListener('error', (e) => {
+    console.error('[ICV] 未捕获错误:', e.error ?? e.message);
+  });
+  window.addEventListener('unhandledrejection', (e) => {
+    console.error('[ICV] 未处理的 Promise 拒绝:', (e as PromiseRejectionEvent).reason);
+  });
 }
 
 // ───────────────────────── 键盘快捷键 ─────────────────────────
@@ -58,17 +67,30 @@ function bindKeyboard(): void {
     // Ctrl+S 保存
     if (isMeta && e.key === 's') {
       e.preventDefault();
-      void persistence.save();
+      void saveCoordinator.save(false);
       return;
     }
 
     if (isTyping) return;
+
+    // Ctrl+Z 撤销 / Ctrl+Shift+Z / Ctrl+Y 重做（运行中禁用）
+    if (isMeta && e.key === 'z' && !e.shiftKey) {
+      e.preventDefault();
+      if (!runEngine.isBusy()) flowHistory.undo();
+      return;
+    }
+    if (isMeta && (e.key === 'y' || (e.key === 'z' && e.shiftKey))) {
+      e.preventDefault();
+      if (!runEngine.isBusy()) flowHistory.redo();
+      return;
+    }
 
     // Delete 删除选中
     if (e.key === 'Delete' || e.key === 'Backspace') {
       const ids = [...flowState.selectedIds];
       if (ids.length > 0) {
         e.preventDefault();
+        flowHistory.record();
         ids.forEach(id => flowState.removeNode(id));
         selection.clear();
       }
@@ -109,6 +131,16 @@ async function fillDefaultModels(): Promise<void> {
   }
 }
 
+// ───────────────────────── 撤销/重做按钮状态 ─────────────────────────
+/** 同步顶栏撤销/重做按钮灰显态：运行中禁用，无可撤销/重做时禁用 */
+function syncUndoRedo(): void {
+  const undoBtn = document.getElementById('btn-undo') as HTMLButtonElement | null;
+  const redoBtn = document.getElementById('btn-redo') as HTMLButtonElement | null;
+  const busy = runEngine.isBusy();
+  if (undoBtn) undoBtn.disabled = busy || !flowHistory.canUndo;
+  if (redoBtn) redoBtn.disabled = busy || !flowHistory.canRedo;
+}
+
 // ───────────────────────── 无边框窗口控制（自绘标题栏） ─────────────────────────
 // 窗口拖动由 pywebview 官方 drag-region 机制接管（不再手写 ctypes）：
 // pywebview 6.x 注入的 customize.js 在 document.body 上监听 mousedown（冒泡阶段），
@@ -117,10 +149,10 @@ async function fillDefaultModels(): Promise<void> {
 // 前端只需：① 捕获阶段拦截"交互元素"上的 mousedown（stopPropagation），
 // 防止官方冒泡监听把点击项目名/窗口按钮误判为拖动；② 保留窗口控制按钮与双击最大化。
 function bindWindowControls(): void {
-  // 三个窗口按钮
+  // 三个窗口按钮：关闭按钮走 closeGuard（不得直连 win_close，否则关闭保护形同虚设）
   document.getElementById('win-min')!.addEventListener('click', () => { window.pywebview.api.win_minimize(); });
   document.getElementById('win-max')!.addEventListener('click', () => { window.pywebview.api.win_toggle_maximize(); });
-  document.getElementById('win-close')!.addEventListener('click', () => { window.pywebview.api.win_close(); });
+  document.getElementById('win-close')!.addEventListener('click', () => { void closeGuard.requestClose(); });
 
   const topbar = document.querySelector('.topbar') as HTMLElement;
 
@@ -161,6 +193,13 @@ async function init(): Promise<void> {
 
   bindKeyboard();
   bindWindowControls();
+
+  // 保存编排器（60s 自动保存 + 失焦 + 三态）+ 撤销/重做按钮
+  saveCoordinator.init();
+  document.getElementById('btn-undo')?.addEventListener('click', () => { if (!runEngine.isBusy()) flowHistory.undo(); });
+  document.getElementById('btn-redo')?.addEventListener('click', () => { if (!runEngine.isBusy()) flowHistory.redo(); });
+  flowState.subscribe(() => syncUndoRedo());
+  syncUndoRedo();
 
   // 初始渲染（空画布 → 空态引导）
   flowState.notify();

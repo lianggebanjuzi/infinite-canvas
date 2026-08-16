@@ -211,6 +211,22 @@ async function main() {
     check(sendEl.disabled === false, 'image-gen 非运行态 → 发送钮可用');
   }
 
+  console.log('\n▶ C2: image-gen 文本反推节点取消选中 → reverse class 清理（P3 修复守护）');
+  {
+    reset();
+    panelClasses.clear();
+    const n = flowState.addNode('image-gen', 0, 0, {
+      params: { prompt: '', model: 'p:draw', aspectRatio: '3:4', resolution: '2k', count: 1, modelType: 'text' },
+    });
+    selection.select(n.id);
+    cmdPanel.sync();
+    check(panelClasses.has('reverse'), 'image-gen 文本反推节点选中 → 面板带 reverse class');
+    selection.clear();
+    cmdPanel.sync();
+    check(!panelClasses.has('reverse'), '取消选中（无选中分支）→ reverse class 已移除（无残留）');
+    check(!panelClasses.has('show') && !panelClasses.has('textgen') && !panelClasses.has('pos-above'), '取消选中 → show/textgen/pos-above 一并清理');
+  }
+
   console.log(`\n──────────────────────────────`);
   console.log(`结果: ${passed} passed, ${failed} failed`);
   if (failed > 0) {

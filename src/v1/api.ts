@@ -175,6 +175,14 @@ export const Backend = {
     return (await API.openProject()) as BackendProjectResult;
   },
 
+  async appendHistory(entry: unknown): Promise<BackendHistoryResult> {
+    return (await API.appendHistory(entry)) as BackendHistoryResult;
+  },
+
+  async loadHistory(): Promise<BackendHistoryResult> {
+    return (await API.loadHistory()) as BackendHistoryResult;
+  },
+
   // ── 供应商/设置 ──
   async loadProviders(): Promise<BackendProviderList> {
     return (await API.loadProviders()) as BackendProviderList;

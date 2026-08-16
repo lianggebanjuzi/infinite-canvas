@@ -41,3 +41,6 @@ tsc-errors*.txt
 
 # 本地实验目录（含内嵌 git 仓库，禁止入库）
 /deepseek harness/
+
+# Smoke 测试编译产物（tsconfig.smoke.json 输出）
+.icv-smoke/

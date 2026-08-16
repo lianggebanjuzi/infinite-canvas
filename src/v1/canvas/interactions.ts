@@ -5,6 +5,7 @@
 import { flowState } from '../state/flow-state';
 import { selection } from '../state/selection';
 import { dirty } from '../state/dirty';
+import { flowHistory } from '../state/history';
 import { nodeRegistry } from '../nodes/node-registry';
 import { canvasView, CARD_W } from './canvas-view';
 import { cardView, openImageModal } from './card-view';
@@ -321,6 +322,8 @@ class Interactions {
     if (targetCard) {
       const toId = targetCard.dataset.nodeId;
       if (toId && toId !== fromId) {
+        // 只有校验可通过才入撤销栈（避免无效连线留下无操作快照）
+        if (flowState.canConnect(fromId, toId) === null) flowHistory.record();
         const res = flowState.connect(fromId, toId);
         if (!res.ok) showToast(res.error || '连线失败', false);
         else showToast('已创建连线');
@@ -371,6 +374,7 @@ class Interactions {
     const def = nodeRegistry.get(type as NodeType);
     const world = canvasView.toWorldCoords(screenX, screenY);
     const h = CARD_W / (def.defaultRatio > 0 ? def.defaultRatio : 3 / 4);
+    flowHistory.record();
     const node = flowState.addNode(type as NodeType, world.x - CARD_W / 2, world.y - h / 2);
     selection.select(node.id);
     if (fromId && flowState.canConnect(fromId, node.id) === null) {
@@ -505,6 +509,7 @@ class Interactions {
           showToast('文本节点不接收图片', false);
           return;
         }
+        flowHistory.record();
         flowState.addRefImage(targetNode.id, src);
         dirty.markStale(targetNode.id);
         showToast('已添加参考图');
@@ -513,6 +518,7 @@ class Interactions {
 
       // 空白处：新建统一生成节点，图片作为参考图（不再是输出图）
       const h = CARD_W / r;
+      flowHistory.record();
       const node = flowState.addNode('image-gen', world.x - CARD_W / 2, world.y - h / 2, {
         refImages: [src],
         ratio: r,
@@ -553,6 +559,7 @@ class Interactions {
               this.pendingFileNodeId = null;
               return;
             }
+            flowHistory.record();
             flowState.addRefImage(nodeId, src);
             dirty.markStale(nodeId);
             showToast('已添加参考图');
@@ -738,12 +745,14 @@ class Interactions {
         break;
       }
       case 'delete': {
+        flowHistory.record();
         flowState.removeNode(nodeId);
         selection.clear();
         break;
       }
       case 'insert-step': {
         const edgeId = this._menuEl().dataset.edgeId || '';
+        flowHistory.record();
         const node = flowState.insertStep(edgeId);
         if (node) {
           dirty.markUpstreamChanged(node.id);
@@ -757,6 +766,7 @@ class Interactions {
       }
       case 'delete-edge': {
         const edgeId = this._menuEl().dataset.edgeId || '';
+        flowHistory.record();
         flowState.removeEdge(edgeId);
         showToast('连线已删除');
         break;
@@ -768,6 +778,7 @@ class Interactions {
         const world = canvasView.toWorldCoords(window.innerWidth / 2, window.innerHeight / 2);
         const def = nodeRegistry.get(type as NodeType);
         const h = CARD_W / (def.defaultRatio > 0 ? def.defaultRatio : 3 / 4);
+        flowHistory.record();
         const node = flowState.addNode(type as NodeType, world.x - CARD_W / 2, world.y - h / 2);
         selection.select(node.id);
         this._fillDefaultModelFor(node.id);

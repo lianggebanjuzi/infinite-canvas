@@ -134,3 +134,43 @@ interface OutpaintOptions {
   model: string;             // 自动解析的 gemini/nano-banana/seedream 系绘图模型（"provider:model"）
   resolution: string;        // '4k'（不暴露分辨率选项，模型自动出图最高 4K）
 }
+
+/**
+ * 撤销/重做快照：携带捕获时刻的 nodes/edges/projectName/dirty（不含 canvas 视口，避免撤销导致视口跳变）。
+ * 快照回滚模型：applySnapshot 原样恢复，dirty 精确复位（回到与磁盘一致时自动 false）。
+ */
+interface FlowSnapshot {
+  nodes: FlowNode[];
+  edges: FlowEdge[];
+  projectName: string;
+  dirty: boolean;
+}
+
+/**
+ * history.jsonl 单行条目（append-only 流水账，跨会话图库展示用）。
+ * 用 kind 判别 image/text：text 行用精简字段（无 aspectRatio/resolution 等图片字段）。
+ */
+type HistoryEntry =
+  | {
+      kind: 'image';
+      nodeId: string;
+      prompt: string;
+      model: string;
+      aspectRatio: string;
+      resolution: string;
+      count: number;
+      refImageHashes: string[];   // 参考图指纹（hashRef 轻量哈希）
+      seed?: string | null;
+      createdAt: number;
+      parentId?: string | null;
+      outputType: 'txt2img' | 'img2img' | 'outpaint';
+    }
+  | {
+      kind: 'text';
+      nodeId: string;
+      instruction: string;
+      model: string;
+      outputText: string;
+      createdAt: number;
+      parentId?: string | null;
+    };

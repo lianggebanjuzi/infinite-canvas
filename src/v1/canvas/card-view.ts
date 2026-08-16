@@ -3,6 +3,7 @@
 
 import { flowState } from '../state/flow-state';
 import { selection } from '../state/selection';
+import { flowHistory } from '../state/history';
 import { CARD_W } from './canvas-view';
 import { interactions } from './interactions';
 import { applyCardStatus } from '../ui/status-visuals';
@@ -223,6 +224,7 @@ class CardView {
     if (newText === prevText) { this._restoreTextCard(nodeId); return; } // 内容没变，仅退出编辑
 
     // 永远只写结果 outputText + 覆盖直接 image-gen 下游 prompt + 标 stale（与处理成功联动一致）
+    flowHistory.record();
     flowState.updateNode(nodeId, { outputText: newText });
     applyTextToDownstream(nodeId, newText);
     showToast('已保存文本');

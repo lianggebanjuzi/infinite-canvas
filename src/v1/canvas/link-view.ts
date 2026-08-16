@@ -5,6 +5,7 @@
 import { flowState } from '../state/flow-state';
 import { selection } from '../state/selection';
 import { dirty } from '../state/dirty';
+import { flowHistory } from '../state/history';
 import { CARD_W } from './canvas-view';
 import { cardView } from './card-view';
 import { showToast } from '../ui/toast';
@@ -128,6 +129,7 @@ class LinkView {
     del.title = '删除连线';
     del.addEventListener('click', (e: MouseEvent) => {
       e.stopPropagation();
+      flowHistory.record();
       flowState.removeEdge(edge.id);
       showToast('连线已删除');
     });
@@ -138,6 +140,7 @@ class LinkView {
 
   /** 中点 + 号 → 真插入：断开原连线并在中点插入新「生成节点」 */
   private _insertStep(edgeId: string): void {
+    flowHistory.record();
     const node = flowState.insertStep(edgeId);
     if (!node) { showToast('插入步骤失败', false); return; }
     dirty.markUpstreamChanged(node.id); // 原下游因上游变化标 stale

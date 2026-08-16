@@ -108,6 +108,7 @@ class InfiniteCanvasAPI:
         self.project   = ProjectAPI()
         # 无边框窗口状态（自绘标题栏）
         self._win_maximized = False  # 最大化状态标志（win_toggle_maximize 切换用）
+        self._closing_forced = False  # 强制关闭标志：win_close 置位后 closing 拦截放行（绕过保护）
 
     # ─────────────────────────────────────────
     # 供应商管理
@@ -277,6 +278,14 @@ class InfiniteCanvasAPI:
     def open_project_dialog(self):
         return self.project.open_project_dialog()
 
+    def append_history(self, entry):
+        """追加一条生成档案到 history.jsonl（前端构造 trace，后端 append 单行）"""
+        return self.project.append_history(entry)
+
+    def load_history(self):
+        """读取 history.jsonl（打开项目时跨会话展示）"""
+        return self.project.load_history()
+
     # ─────────────────────────────────────────
     # 设置
     # ─────────────────────────────────────────
@@ -316,8 +325,32 @@ class InfiniteCanvasAPI:
             self._win_maximized = True
 
     def win_close(self):
-        """关闭窗口"""
-        webview.windows[0].destroy()
+        """强制关闭入口：由前端 requestClose 决定后调用（_closing_forced 标志绕过 closing 拦截）"""
+        self._closing_forced = True
+        try:
+            webview.windows[0].destroy()
+        finally:
+            self._closing_forced = False
+
+    def _on_closing(self):
+        """窗口关闭拦截：dirty=true 时阻止关闭并触发前端三选一弹窗；_closing_forced 时放行。
+
+        返回 False 表示阻止关闭（pywebview closing 事件契约）。
+        """
+        if self._closing_forced:
+            return True
+        try:
+            is_dirty = webview.windows[0].evaluate_js(
+                'window.__icvIsDirty ? window.__icvIsDirty() : false'
+            )
+            if is_dirty:
+                webview.windows[0].evaluate_js(
+                    'window.__icvRequestClose && window.__icvRequestClose()'
+                )
+                return False  # 阻止关闭，等待前端三选一弹窗
+        except Exception:
+            pass  # 前端未就绪时放行，避免窗口卡死无法关闭
+        return True
 
 
 # ─────────────────────────────────────────
@@ -389,6 +422,9 @@ def main():
     # 因此注册 shown 事件（窗口显示后再设置，可靠路径），并提前尝试一次（hwnd 已存在时立即生效）。
     window.events.shown += _apply_rounded_corners
     _apply_rounded_corners()
+
+    # 关闭保护：dirty 时拦截（返回 False 阻止关闭并触发前端三选一弹窗）
+    window.events.closing += api._on_closing
 
     webview.start(debug=getattr(sys, 'frozen', False) == False)
 

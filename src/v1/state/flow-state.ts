@@ -424,6 +424,39 @@ export class FlowState {
     this.dirty = false;
     this.notify();
   }
+
+  // ───────────────────────── 撤销/重做快照 ─────────────────────────
+  /** 捕获当前状态为快照（深拷贝 nodes/edges，避免栈内快照被后续变更别名污染） */
+  captureSnapshot(): FlowSnapshot {
+    return {
+      nodes: this.nodes.map(n => this._cloneNode(n)),
+      edges: this.edges.map(e => ({ ...e })),
+      projectName: this.projectName,
+      dirty: this.dirty,
+    };
+  }
+
+  /** 快照回滚：恢复 nodes/edges/projectName/dirty（含历史 dirty 值，撤销穿越保存点），清空选中并 notify */
+  applySnapshot(snap: FlowSnapshot): void {
+    this.nodes = (snap.nodes || []).map(n => this._cloneNode(n));
+    this.edges = (snap.edges || []).map(e => ({ ...e }));
+    this.projectName = snap.projectName || '未命名项目';
+    this.selectedIds.clear();
+    this.dirty = snap.dirty;
+    this.updatedAt = Date.now();
+    this.notify();
+  }
+
+  /** 深拷贝节点（params/refImages/textHistory/trace 均复制，共享 V8 字符串底层字节，内存安全） */
+  private _cloneNode(n: FlowNode): FlowNode {
+    return {
+      ...n,
+      params: { ...(n.params || {}) },
+      refImages: [...(n.refImages || [])],
+      textHistory: Array.isArray(n.textHistory) ? n.textHistory.map(h => ({ ...h })) : [],
+      trace: n.trace ? { ...n.trace, refImageHashes: [...(n.trace.refImageHashes || [])] } : null,
+    };
+  }
 }
 
 export const flowState = new FlowState();

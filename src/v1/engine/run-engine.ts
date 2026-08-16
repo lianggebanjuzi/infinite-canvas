@@ -14,10 +14,12 @@
 
 import { flowState } from '../state/flow-state';
 import { dirty } from '../state/dirty';
+import { flowHistory } from '../state/history';
 import { nodeRegistry } from '../nodes/node-registry';
 import { Backend, fetchImageModels } from '../api';
 import { pollTask } from './poller';
 import { historyDrawer } from '../ui/history-drawer';
+import { historyPersist } from '../history-persist';
 import { linkView } from '../canvas/link-view';
 import { CARD_W } from '../canvas/canvas-view';
 import { showToast } from '../ui/toast';
@@ -107,6 +109,11 @@ class RunEngine {
     return p ? { total: p.total, done: p.done, failed: p.failed } : undefined;
   }
 
+  /** 是否正在生成（撤销/重做 busy 期间禁用、关闭弹窗 busy 时附加中断警示） */
+  isBusy(): boolean {
+    return this.busy;
+  }
+
   async run(nodeId: string): Promise<void> {
     const node = flowState.getNode(nodeId);
     if (!node) return;
@@ -118,6 +125,7 @@ class RunEngine {
     if (typeof check === 'string') { showToast(check, false); return; }
 
     this.busy = true;
+    flowHistory.suspend(); // 引擎内部状态/产出变更不入撤销栈（R5.5）
     try {
       if (node.type === 'text-gen') {
         await this.runTextGen(nodeId);
@@ -127,6 +135,7 @@ class RunEngine {
         await this.runBatch(nodeId);
       }
     } finally {
+      flowHistory.resume();
       this.busy = false;
     }
   }
@@ -151,6 +160,7 @@ class RunEngine {
     if (!opts.model) { showToast('请先在设置中配置 Nano Banana 系列模型', false); return; }
 
     this.busy = true;
+    flowHistory.suspend(); // 引擎内部状态/产出节点不入撤销栈
     const prevStatus = node.status;
     try {
       // 执行中：源节点 run + 上游连线流光（结束后恢复原状态）
@@ -187,7 +197,7 @@ class RunEngine {
         model: opts.model,
         aspectRatio: opts.aspectRatio || '1:1',
         resolution: opts.resolution || '4k',
-      });
+      }, { outputType: 'outpaint', refs: refs });
 
       // 新产出节点从 stale 传播豁免；源节点旧下游标 stale（与引擎其它成功链路口径一致）
       this._createdCardIds.clear();
@@ -204,6 +214,7 @@ class RunEngine {
       showToast(message, false);
     } finally {
       linkView.setNodeFlowing(nodeId, false);
+      flowHistory.resume();
       this.busy = false;
     }
   }
@@ -244,6 +255,8 @@ class RunEngine {
       flowState.updateNode(nodeId, { status: 'done', outputText: text, error: null, lastRunAt: Date.now() });
       flowState.pushTextHistory(nodeId, text);
       applyTextToDownstream(nodeId, text);
+      // 文本 trace：node.trace 恒 null（类型定义如此），但仍追加一条 kind:'text' 流水
+      void historyPersist.appendTrace(historyPersist.buildTextTrace(node));
       showToast('已完成');
     } catch (e) {
       // 5. 失败：fail + 原因；不覆盖下游、不写历史
@@ -307,6 +320,7 @@ class RunEngine {
       });
       flowState.pushTextHistory(newNode.id, text);
       flowState.updateNode(nodeId, { status: 'done', error: null, lastRunAt: Date.now() });
+      void historyPersist.appendTrace(historyPersist.buildTextTrace(newNode));
       showToast('已生成文本节点');
     } catch (e) {
       const message = (e as Error).message || '反推失败';
@@ -355,7 +369,7 @@ class RunEngine {
     //    布局游标在批次开始时快照生成节点位置，之后只随已放置卡片累计，完成顺序不定也不重叠。
     const layout: ResultLayout = { x: node.x + CARD_W + RESULT_GAP_X, cursorY: node.y };
     const jobs = Array.from({ length: total }, (_, i) =>
-      this.runOneWorker(nodeId, prompt, options, layout, progress, isTxt2Img, i));
+      this.runOneWorker(nodeId, prompt, options, layout, progress, isTxt2Img, i, refs));
     await Promise.allSettled(jobs);
 
     linkView.setNodeFlowing(nodeId, false);
@@ -393,6 +407,7 @@ class RunEngine {
     progress: BatchProgress,
     isTxt2Img: boolean,
     index: number,
+    refs: string[],
   ): Promise<void> {
     try {
       const created = await Backend.generateImage(prompt, { ...options, count: COUNT_MIN });
@@ -407,7 +422,10 @@ class RunEngine {
           progress.done += 1;
         } else {
           // 图生图全部 + 文生图第 2..N 张：出一张建一张（不等兄弟），立即创建新 image-gen 产出节点并自动连线
-          const card = await this.createResultCard(genId, result.imageUrl, layout);
+          const card = await this.createResultCard(genId, result.imageUrl, layout, {}, {
+            outputType: isTxt2Img ? 'txt2img' : 'img2img',
+            refs,
+          });
           this._createdCardIds.add(card.id);
           progress.done += 1;
         }
@@ -434,6 +452,10 @@ class RunEngine {
     }
     const ratio = await loadImageRatio(imageUrl);
     flowState.setNodeImage(genId, imageUrl, ratio && ratio > 0 ? ratio : undefined);
+    // 文生图第 1 张写回自身：source of truth = node.trace，并追加一条 kind:'image' 流水
+    const trace = historyPersist.buildImageTrace(node, [], 'txt2img');
+    node.trace = trace;
+    void historyPersist.appendTrace({ kind: 'image', nodeId: node.id, ...trace });
   }
 
   /**
@@ -450,6 +472,7 @@ class RunEngine {
     imageUrl: string,
     layout: ResultLayout,
     paramOverrides: Record<string, unknown> = {},
+    trace: { outputType: GenerationTrace['outputType']; refs: string[] } = { outputType: 'img2img', refs: [] },
   ): Promise<FlowNode> {
     const gen = flowState.getNode(genId);
     if (!gen) throw new Error('生成节点已删除，产出节点创建失败');
@@ -482,6 +505,10 @@ class RunEngine {
     // 自动建卡连线：suppressStale 避免刚 done 的产出节点被立即打回 stale
     flowState.addEdge(genId, node.id, { suppressStale: true });
     historyDrawer.addImage(imageUrl);
+    // 生成档案：写 node.trace（source of truth）+ 追加一条 kind:'image' 流水
+    const nodeTrace = historyPersist.buildImageTrace(node, trace.refs, trace.outputType);
+    node.trace = nodeTrace;
+    void historyPersist.appendTrace({ kind: 'image', nodeId: node.id, ...nodeTrace });
     return node;
   }
 

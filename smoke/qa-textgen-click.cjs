@@ -31,7 +31,13 @@ const stubEl = (over = {}) => ({
   ...over,
 });
 
-global.window = { addEventListener() {}, innerWidth: 1280, innerHeight: 800 };
+// 捕获事件监听器（dblclick 等），供「双击空卡才弹文件选择器」的新语义模拟
+const windowListeners = {};
+global.window = {
+  addEventListener(type, cb) { windowListeners[type] = cb; },
+  innerWidth: 1280,
+  innerHeight: 800,
+};
 global.pywebview = { api: {} };
 global.document = {
   getElementById: () => null,
@@ -77,6 +83,12 @@ let pickerCalls = [];
 const origOpenPicker = interactions.openFilePickerForRef.bind(interactions);
 interactions.openFilePickerForRef = (nodeId) => { pickerCalls.push(nodeId); };
 
+// 注册真实 _bindMouse 中的 dblclick 处理器（模拟 init 时 canvas-wrap 存在；wrap.addEventListener 为 no-op 桩）
+const savedWrap = interactions.wrap;
+interactions.wrap = stubEl();
+interactions._bindMouse();
+interactions.wrap = savedWrap;
+
 function resetDrag(nodeId, opts = {}) {
   interactions.drag = {
     mode: 'node',
@@ -100,6 +112,14 @@ function simulateClick(nodeId, opts = {}) {
   return pickerCalls.length > 0;
 }
 
+// 双击模拟：命中真实 dblclick 处理器（有图 → 看大图；空图片卡双击 → 弹文件选择器）
+function simulateDblClick(nodeId) {
+  pickerCalls = [];
+  const ev = { target: { closest: () => ({ dataset: { nodeId } }) } };
+  if (windowListeners.dblclick) windowListeners.dblclick(ev);
+  return pickerCalls.length > 0;
+}
+
 // ───────────────────────── 用例 ─────────────────────────
 console.log('\n▶ Q1: 四类节点单击行为（修复核心）');
 
@@ -109,14 +129,18 @@ console.log('\n▶ Q1: 四类节点单击行为（修复核心）');
 }
 
 {
-  // 引擎产出的 image-gen 节点（旧 image-result 迁移后语义）：空卡单击 → 弹文件选择器（正常图片节点行为）
+  // 引擎产出的 image-gen 节点（旧 image-result 迁移后语义）：单击只选中不弹；双击空卡才弹文件选择器
   const n = flowState.addNode('image-gen', 0, 0, { parentId: 'some-gen', title: '生成结果' });
-  check(simulateClick(n.id), '引擎产出 image-gen 空卡单击 → 弹文件选择器（非只读，正常图片节点行为）');
+  const clickOpened = simulateClick(n.id);
+  const dblOpened = simulateDblClick(n.id);
+  check(!clickOpened && dblOpened, '引擎产出 image-gen 空卡：单击只选中不弹、双击才弹选择器');
 }
 
 {
   const n = flowState.addNode('image-gen', 0, 0); // 无输出图、无参考图 → 空卡
-  check(simulateClick(n.id), 'image-gen 空卡单击 → 弹文件选择器（原行为必须保留）');
+  const clickOpened = simulateClick(n.id);
+  const dblOpened = simulateDblClick(n.id);
+  check(!clickOpened && dblOpened, 'image-gen 空卡：单击只选中不弹、双击才弹选择器（新语义）');
 }
 
 {

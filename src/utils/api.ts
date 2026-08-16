@@ -64,6 +64,8 @@ declare const pywebview: {
     open_project_dialog(): Promise<{ data?: unknown; filename?: string; filepath?: string }>;
     load_project(file_path: string): Promise<{ data?: unknown }>;
     get_current_project_path(): Promise<{ path?: string }>;
+    append_history(entry: unknown): Promise<{ status: string; message?: string }>;
+    load_history(): Promise<{ status: string; message?: string; entries?: unknown[] }>;
     load_settings(): Promise<Record<string, unknown>>;
     save_settings(settings: Record<string, unknown>): Promise<{ status: string }>;
     select_folder(): Promise<{ path?: string }>;
@@ -178,6 +180,14 @@ export const API = {
 
     async getCurrentProjectPath() {
         return await pywebview.api.get_current_project_path();
+    },
+
+    async appendHistory(entry: unknown) {
+        return await pywebview.api.append_history(entry);
+    },
+
+    async loadHistory() {
+        return await pywebview.api.load_history();
     },
 
     async loadSettings() {
