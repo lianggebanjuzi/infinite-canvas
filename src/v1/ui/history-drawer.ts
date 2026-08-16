@@ -64,7 +64,7 @@ class HistoryDrawer {
   private render(): void {
     if (!this.grid) return;
     if (this.items.length === 0) {
-      this.grid.innerHTML = '<div class="history-empty">本次会话生成的图片与历史记录将显示在这里，可拖入画布复用</div>';
+      this.grid.innerHTML = ''; // 空状态保持干净，不渲染任何提示
       return;
     }
     this.grid.innerHTML = '';

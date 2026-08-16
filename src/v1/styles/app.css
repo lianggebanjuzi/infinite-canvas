@@ -81,7 +81,6 @@ body { font-family: var(--font); background: var(--bg-app); color: var(--text-1)
   background-size:cover; background-position:center; background-repeat:no-repeat;
 }
 .history-thumb:hover { border-color: var(--accent); }
-.history-empty { padding:20px 8px; text-align:center; color: var(--text-3); font-size:12px; line-height:1.8; }
 
 /* 画布 */
 /* 点阵背景挂在 .canvas-wrap（视口容器，无 transform）：position 由 applyView 反平移跟随世界、size 随缩放联动、视口裁剪永不露白 */
