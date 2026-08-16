@@ -2,15 +2,15 @@
 // ICV v1 流程画布核心类型（ambient 全局类型，无需 import 即可使用）
 // 与架构文档「四、数据结构与接口」保持一致
 
-/** 统一「生成节点」：多图参考（0~N）→ 生成 N 张新图（每张一张结果卡），注册式扩展 */
-type NodeType = 'image-gen' | 'image-result' | 'text-gen';
+/** 统一「生成节点」：多图参考（0~N）→ 生成 N 张新图（每张一个可编辑 image-gen 产出节点；文生图第 1 张写回自身），注册式扩展 */
+type NodeType = 'image-gen' | 'text-gen';
 
 /** 节点状态机五态 */
 type NodeStatus = 'idle' | 'run' | 'done' | 'stale' | 'fail';
 
-/** text-gen 参数：反推指令（用户可编辑）+ chat 模型 */
+/** text-gen 参数：命令（临时，发送后清空）+ 文本模型 */
 interface TextGenParams {
-  instruction: string;   // 反推指令；新建为空、用户自填（DEFAULT_INSTRUCTION 仅作占位提示）
+  instruction?: string;  // 命令；新建为空、用户自填、发送后清空（仅作命令暂存）
   model: string;         // "provider_id:model_id"（chat 模型）
 }
 
@@ -19,6 +19,25 @@ interface TextGenHistoryItem {
   text: string;          // 反推结果全文
   ts: number;            // 运行完成时间戳（Date.now()）
 }
+
+/**
+ * 生成档案（trace）：记录一张产出图“是怎么来的”。
+ * 不存图本身，只存配方：prompt / 模型 / 比例 / 分辨率 / 张数 / 参考图指纹。
+ * seed 字段先留空；官方 API 或中转站支持时由后端透传并写回。
+ */
+interface GenerationTrace {
+  prompt: string;
+  model: string;
+  aspectRatio: string;
+  resolution: string;
+  count: number;
+  refImageHashes: string[];  // 参考图指纹（轻量字符串哈希，用于“是否同源”比对，不是密码学哈希）
+  seed?: string | null;      // 官方/中转站支持 seed 时记录；否则 null
+  createdAt: number;
+  parentId?: string | null;  // 生成源节点（手建节点自身生成时即自己 id）
+  outputType: 'txt2img' | 'img2img' | 'outpaint';
+}
+
 
 /** 画布节点：宽固定 260，高 = 260 / ratio */
 interface FlowNode {
@@ -36,7 +55,8 @@ interface FlowNode {
   refImages: string[];       // 用户主动挂载的参考图（默认 []；上游可作参考图的图由 getReferenceImages 派生）
   error: string | null;      // fail 原因（红点 hover/点击展示）
   lastRunAt: number | null;
-  parentId: string | null;   // 结果卡专属：所属生成节点 id；其余节点恒 null（用于重跑顶掉旧结果卡）
+  parentId: string | null;   // 引擎产出节点标记：本节点由哪个生成节点产出（重跑顶掉旧产出用）；手建节点恒 null
+  trace: GenerationTrace | null; // 生成档案：该节点主视觉图的配方；text-gen / 手建未跑节点为 null
 }
 
 /** 画布连线：模板默认连好，首版不支持手动新建 */
@@ -53,10 +73,10 @@ interface FlowCanvasState {
   panY: number;
 }
 
-/** .icproj 项目格式（3.3：新增 text-gen 文本反推节点，节点带 outputText/textHistory） */
+/** .icproj 项目格式（3.4：双卡模型——image-result 已并入 image-gen，产出节点=image-gen+parentId 标记） */
 interface FlowProject {
   format: 'icv';
-  version: '3.3';
+  version: '3.4';
   projectName: string;
   canvas: FlowCanvasState;
   nodes: FlowNode[];
@@ -80,22 +100,37 @@ interface NodeDefinition {
   defaultTitle: string;
   defaultRatio: number;       // 3/4
   defaultParams: Record<string, unknown>;
-  creatable?: boolean;        // false=不进新建菜单（结果卡由引擎自动创建，缺省 true）
+  creatable?: boolean;        // false=不进新建菜单（引擎产出节点由引擎自动创建，缺省 true）
   canRun(node: FlowNode, ctx: FlowContext): boolean | string; // true / 禁止原因
   buildOptions(node: FlowNode, ctx: FlowContext): Record<string, unknown>; // backend options
 }
 
 /** 生成节点参数（统一节点复用） */
 interface StyleTransferParams {
-  prompt: string;             // 生成指令
-  model: string;              // "provider_id:model_id"
+  prompt: string;             // 生成指令；文本模型反推模式下复用为「命令」
+  model: string;              // "provider_id:model_id"（绘图模型）
   aspectRatio: string;        // '3:4' | '1:1' | '16:9' | 'Auto'
   resolution: string;         // '1k' | '2k' | '4k'
   count: number;              // 1-4
+  modelType?: 'draw' | 'text'; // image-gen 模型 chip 类型：绘图（默认，生成图）/ 文本（反推）
+  textModel?: string;          // image-gen 文本模型（modelType='text' 时用于反推，chat 模型）
 }
 
 /** 前端统一错误（映射自 backend {success:false,error_code,message}） */
 interface FlowError {
   code: number;
   message: string;
+}
+
+/**
+ * 扩图执行参数（image-gen 悬浮「扩图」入口专用）：
+ * 前端 canvas 合成白底底图（PNG dataURL）→ banana 系列模型带图补全。
+ * 不持久化到节点 params（首版不支持重跑；重跑走普通生成），仅引擎调用时传递。
+ */
+interface OutpaintOptions {
+  prompt: string;            // 组装后的完整提示词（固定前缀「白色区域是待补全区域…」+ 可选用户描述）
+  referenceImages: string[]; // 合成底图（PNG dataURL，白底不透明 + 原图，长边 ≤4096）
+  aspectRatio: string;       // 目标比例 '1:1' | '3:4' | '4:3' | '16:9' | '9:16'
+  model: string;             // 自动解析的 gemini/nano-banana/seedream 系绘图模型（"provider:model"）
+  resolution: string;        // '4k'（不暴露分辨率选项，模型自动出图最高 4K）
 }

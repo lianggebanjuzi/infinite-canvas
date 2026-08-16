@@ -1,6 +1,6 @@
 // src/v1/persistence.ts
 // .icproj 序列化/反序列化 —— 只有本模块可以读写 .icproj（共享约定第 5 条）
-// restore 校验 format==='icv' 且 version==='3.3'；兼容读取 3.2 旧文件（节点缺 outputText/textHistory 由 migrateNode 兜底）
+// restore 校验 format==='icv' 且 version==='3.4'；兼容读取 3.3/3.2 旧文件（节点缺 outputText/textHistory 由 migrateNode 兜底）
 
 import { flowState } from './state/flow-state';
 import { Backend } from './api';
@@ -28,9 +28,10 @@ function normalizeTextHistory(raw: unknown): TextGenHistoryItem[] {
 }
 
 /**
- * 当前格式节点归一（接受 image-gen / image-result / text-gen；其余类型——含 3.0/3.1 旧类型——返回 null 被过滤）。
+ * 当前格式节点归一（接受 image-gen / text-gen；image-result 旧类型迁移为 image-gen；其余类型——含 3.0/3.1 旧类型——返回 null 被过滤）。
  * - image-gen：字段校验，refImages 缺省补空；type 保持 image-gen。
- * - image-result：只读透传（type 保持、title 默认'生成结果'、params 恒 {}、imageUrl string|null、refImages []、parentId string|null 校验）。
+ * - image-result（3.2/3.3 旧文件）：迁移为 image-gen（双卡模型：产出节点=image-gen+parentId 标记），
+ *   保留 parentId/坐标/imageUrl/title，params 补 { prompt, model, aspectRatio, resolution, count } 默认，title 缺省 '生成结果'。
  * - text-gen：params 归一 { instruction, model }（instruction 缺省置空，不预填），outputText/textHistory 归一（3.2 旧文件缺字段时补默认值）。
  * 连线 / 标题 / 参数保留。
  */
@@ -47,17 +48,17 @@ function migrateNode(raw: unknown): FlowNode | null {
 
   const parentId = typeof r.parentId === 'string' && r.parentId ? r.parentId : null;
 
-  // 结果卡：只读透传（3.2 当前格式）
+  // 旧结果卡（3.2/3.3）：迁移为完整 image-gen 产出节点（双卡模型）
   if (t === 'image-result') {
     return {
       id: r.id,
-      type: 'image-result',
+      type: 'image-gen',
       x: typeof r.x === 'number' ? r.x : 0,
       y: typeof r.y === 'number' ? r.y : 0,
       ratio: typeof r.ratio === 'number' && r.ratio > 0 ? r.ratio : 3 / 4,
       status: (['idle', 'run', 'done', 'stale', 'fail'] as NodeStatus[]).includes(r.status as NodeStatus) ? r.status as NodeStatus : 'idle',
       title: typeof r.title === 'string' ? r.title : '生成结果',
-      params: {},
+      params: { prompt: '', model: '', aspectRatio: '3:4', resolution: '2k', count: 1, ...rawParams },
       imageUrl: typeof r.imageUrl === 'string' ? r.imageUrl : null,
       outputText: null,
       textHistory: [],
@@ -65,6 +66,7 @@ function migrateNode(raw: unknown): FlowNode | null {
       error: typeof r.error === 'string' ? r.error : null,
       lastRunAt: typeof r.lastRunAt === 'number' ? r.lastRunAt : null,
       parentId,
+        trace: null,
     };
   }
 
@@ -89,6 +91,7 @@ function migrateNode(raw: unknown): FlowNode | null {
       error: typeof r.error === 'string' ? r.error : null,
       lastRunAt: typeof r.lastRunAt === 'number' ? r.lastRunAt : null,
       parentId: null,
+        trace: null,
     };
   }
 
@@ -108,6 +111,7 @@ function migrateNode(raw: unknown): FlowNode | null {
     error: typeof r.error === 'string' ? r.error : null,
     lastRunAt: typeof r.lastRunAt === 'number' ? r.lastRunAt : null,
     parentId,
+      trace: null,
   };
 
   node.refImages = Array.isArray(r.refImages)
@@ -123,7 +127,7 @@ class Persistence {
   collect(): FlowProject {
     return {
       format: 'icv',
-      version: '3.3',
+      version: '3.4',
       projectName: flowState.projectName,
       canvas: { ...flowState.canvas },
       nodes: flowState.nodes.map(n => ({
@@ -139,14 +143,14 @@ class Persistence {
     };
   }
 
-  /** 校验并恢复项目（format==='icv'；version 接受 3.3 与兼容读取 3.2；更旧版本不支持） */
+  /** 校验并恢复项目（format==='icv'；version 接受 3.4 与兼容读取 3.3/3.2；更旧版本不支持） */
   restore(raw: unknown): boolean {
     if (!raw || typeof raw !== 'object') {
       showToast('项目文件格式错误', false);
       return false;
     }
     const p = raw as Partial<FlowProject>;
-    if (p.format !== 'icv' || (p.version !== '3.3' && p.version !== '3.2')) {
+    if (p.format !== 'icv' || (p.version !== '3.4' && p.version !== '3.3' && p.version !== '3.2')) {
       showToast('旧版项目不支持，请新建', false);
       return false;
     }
@@ -166,7 +170,7 @@ class Persistence {
 
     flowState.replaceAll({
       format: 'icv',
-      version: '3.3',
+      version: '3.4',
       projectName: typeof p.projectName === 'string' ? p.projectName : '未命名项目',
       canvas: {
         scale: typeof p.canvas?.scale === 'number' ? p.canvas.scale : 1,

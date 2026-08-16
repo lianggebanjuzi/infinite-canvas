@@ -19,7 +19,6 @@ classDiagram
     class NodeType {
         <<enumeration>>
         image-gen
-        image-result
         text-gen
     }
     class TextGenParams {
@@ -32,7 +31,7 @@ classDiagram
     }
     class FlowProject {
         +string format
-        +string version  "3.3"
+        +string version  "3.4"
         +string projectName
         +FlowCanvasState canvas
         +FlowNode[] nodes

@@ -1,44 +1,39 @@
 // src/v1/nodes/text-gen.ts
-// 「文本反推」节点定义：挂参考图 → 反推该图的提示词（chat 模型）→ 输出文本（outputText）
-// 运行链路：run-engine 按类型分派 → runTextGen（同步调 Backend.chatV2，无批次/无轮询/无结果卡）
-// 联动：反推成功 → 直接 image-gen 下游的 params.prompt 被覆盖为新文本 → 下游标 stale（见架构 5.2）
+// 「文本」节点定义：卡片显示文本结果（outputText），点卡片文本可直接改；
+// 下方命令框输入处理指令（命令），文本模型按命令处理当前文本 → 结果写回卡片。
+// 运行链路：run-engine 按类型分派 → runTextGen（同步调 Backend.chatV2，无批次/无轮询/无产出节点）
+// 联动：结果变化 → 直接 image-gen 下游的 params.prompt 被覆盖为新文本 → 下游标 stale（见架构 5.2）
 
 import { nodeRegistry } from './node-registry';
 
 /** 节点级文本历史上限（跨文件共享约定：不硬编码） */
 export const TEXT_HISTORY_LIMIT = 20;
 
-/** 默认反推指令示例文案：仅作输入框占位提示用途（不再作为新建节点的默认值预填，见 defaultParams.instruction=''） */
-export const DEFAULT_INSTRUCTION = '反推这张图的提示词，中文，输出可直接用于生图';
-
 /** chat 默认模型 localStorage key（与绘图 icv_default_model 区分，互不污染） */
 export const DEFAULT_CHAT_MODEL_KEY = 'icv_default_chat_model';
 
 const def: NodeDefinition = {
   type: 'text-gen',
-  label: '文本反推',
-  defaultTitle: '文本反推',
+  label: '文本',
+  defaultTitle: '文本',
   defaultRatio: 3 / 4,
   defaultParams: {
-    instruction: '', // 新建为空：用户按需填写，不再预填 DEFAULT_INSTRUCTION（避免"先删再填"）
+    instruction: '', // 命令：临时输入，新建为空、发送后清空
     model: '',
   },
 
-  // 用户拍板：必须有参考图才能运行（覆盖架构师"推荐允许无图"）
-  canRun(node: FlowNode, ctx: FlowContext): boolean | string {
+  // 命令驱动：需要已选文本模型 + 命令非空；无参考图要求
+  canRun(node: FlowNode, _ctx: FlowContext): boolean | string {
     const p = node.params as unknown as TextGenParams;
-    if (!p.instruction || !p.instruction.trim()) return '请输入反推指令';
-    if (!p.model) return '请先选择对话模型';
-    const refs = ctx.getReferenceImages(node.id);
-    if (!refs || refs.length === 0) return '请先连接一张图片或添加参考图';
+    if (!p.model) return '请先选择文本模型';
+    if (!p.instruction || !p.instruction.trim()) return '请输入命令';
     return true;
   },
 
-  buildOptions(node: FlowNode, ctx: FlowContext): Record<string, unknown> {
+  buildOptions(node: FlowNode, _ctx: FlowContext): Record<string, unknown> {
     const p = node.params as unknown as TextGenParams;
     return {
       model: p.model || undefined,
-      images: ctx.getReferenceImages(node.id), // chat_v2 只收 data:image 前缀；当前参考图恒为 data URL
     };
   },
 };

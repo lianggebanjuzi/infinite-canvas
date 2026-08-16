@@ -1,7 +1,7 @@
 // smoke/test-textgen.cjs
 // text-gen 端到端桩测：Node + CommonJS（tsconfig.smoke.json 编译产物在 D:/tmp/icv-test）
-// 覆盖：节点注册/canRun 必须有图 → runTextGen 调 chatV2 链路 → 联动覆盖下游 prompt →
-//       历史 push+回填 → persistence 3.3 往返（含 3.2 老文件兼容）→ chat 模型列表隔离
+// 覆盖：节点注册/canRun 命令驱动（无需图）→ runTextGen 调 chatV2 链路 → 联动覆盖下游 prompt →
+//       历史 push+回填 → persistence 3.4 往返（含 3.2/3.3 老文件兼容 + image-result 迁移）→ chat 模型列表隔离
 //
 // 运行：node smoke/test-textgen.cjs （编译产物需先 tsc -p tsconfig.smoke.json）
 
@@ -67,7 +67,6 @@ async function section(title, fn) {
 // ───────────────────────── 加载被测模块 ─────────────────────────
 const { nodeRegistry } = require(`${BASE}/nodes/node-registry.js`);
 require(`${BASE}/nodes/image-gen.js`);
-require(`${BASE}/nodes/image-result.js`);
 require(`${BASE}/nodes/text-gen.js`);
 const { flowState } = require(`${BASE}/state/flow-state.js`);
 const { dirty } = require(`${BASE}/state/dirty.js`);
@@ -79,27 +78,24 @@ const { interactions } = require(`${BASE}/canvas/interactions.js`);
 
 // ───────────────────────── 用例 ─────────────────────────
 async function main() {
-  await section('T01a: 节点注册与 canRun 校验（含必须有参考图）', () => {
+  await section('T01a: 节点注册与 canRun 校验（命令驱动，无需参考图）', () => {
     const def = nodeRegistry.get('text-gen');
     check(!!def, 'text-gen 已注册到 nodeRegistry');
-    check(def.label === '文本反推', `label=文本反推 (${def.label})`);
+    check(def.label === '文本', `label=文本 (${def.label})`);
     check(def.creatable !== false, 'creatable 默认 true（进新建菜单）');
 
-    const noInstr = flowState.addNode('text-gen', 0, 0, { params: { instruction: '   ', model: 'p:m' } });
-    const r1 = def.canRun(noInstr, { getReferenceImages: () => ['data:image/png;base64,x'] });
-    check(typeof r1 === 'string' && r1.includes('反推指令'), `无指令 → 中文原因 (${r1})`);
+    const noCmd = flowState.addNode('text-gen', 0, 0, { params: { instruction: '   ', model: 'p:m' } });
+    const r1 = def.canRun(noCmd, { getReferenceImages: () => [] });
+    check(typeof r1 === 'string' && r1.includes('请输入命令'), `无命令 → 中文原因 (${r1})`);
 
-    const noModel = flowState.addNode('text-gen', 0, 0, { params: { instruction: '反推', model: '' } });
-    const r2 = def.canRun(noModel, { getReferenceImages: () => ['data:image/png;base64,x'] });
-    check(typeof r2 === 'string' && r2.includes('对话模型'), `无模型 → 中文原因 (${r2})`);
+    const noModel = flowState.addNode('text-gen', 0, 0, { params: { instruction: '翻译成英文', model: '' } });
+    const r2 = def.canRun(noModel, { getReferenceImages: () => [] });
+    check(typeof r2 === 'string' && r2.includes('文本模型'), `无模型 → 中文原因 (${r2})`);
 
-    const noRef = flowState.addNode('text-gen', 0, 0, { params: { instruction: '反推', model: 'p:m' } });
-    const r3 = def.canRun(noRef, { getReferenceImages: () => [] });
-    check(typeof r3 === 'string' && r3.includes('请先连接一张图片或添加参考图'), `无参考图 → 拦截提示（用户拍板 #3）(${r3})`);
-
-    const ok = flowState.addNode('text-gen', 0, 0, { params: { instruction: '反推', model: 'p:m' }, refImages: ['data:image/png;base64,x'] });
-    const r4 = def.canRun(ok, { getReferenceImages: () => ['data:image/png;base64,x'] });
-    check(r4 === true, '有指令+模型+参考图 → 可运行');
+    // 命令驱动：有命令 + 模型即可运行，无需参考图
+    const ok = flowState.addNode('text-gen', 0, 0, { params: { instruction: '翻译成英文', model: 'p:m' } });
+    const r3 = def.canRun(ok, { getReferenceImages: () => [] });
+    check(r3 === true, '有命令+模型（无参考图）→ 可运行');
   });
 
   await section('T01b: pushTextHistory（最新在前/去重/上限/通知）', () => {
@@ -124,10 +120,10 @@ async function main() {
     check(hist[0].text === '批量24', '裁尾后仍最新在前');
   });
 
-  await section('T01c: persistence 3.3 往返 + 3.2 老文件兼容', () => {
-    // 3.3 collect
+  await section('T01c: persistence 3.4 往返 + 3.2/3.3 老文件兼容（image-result 迁移）', () => {
+    // 3.4 collect
     flowState.replaceAll({
-      format: 'icv', version: '3.3', projectName: '往返',
+      format: 'icv', version: '3.4', projectName: '往返',
       canvas: { scale: 1, panX: 0, panY: 0 },
       nodes: [
         { id: 'tg', type: 'text-gen', x: 0, y: 0, ratio: 0.75, status: 'done', title: '文本反推', params: { instruction: '反推', model: 'p:m' }, imageUrl: null, outputText: '反推结果', textHistory: [{ text: '反推结果', ts: 1 }], refImages: ['data:image/png;base64,x'], error: null, lastRunAt: 1, parentId: null },
@@ -136,18 +132,23 @@ async function main() {
       edges: [{ id: 'e1', from: 'tg', to: 'ig' }], createdAt: 0, updatedAt: 0,
     });
     const collected = persistence.collect();
-    check(collected.version === '3.3', `collect().version === '3.3'`);
+    check(collected.version === '3.4', `collect().version === '3.4'`);
     const ctg = collected.nodes.find(n => n.id === 'tg');
     check(ctg.outputText === '反推结果', 'collect 保留 outputText');
     check(Array.isArray(ctg.textHistory) && ctg.textHistory[0].text === '反推结果', 'collect 保留 textHistory');
 
-    // 3.3 restore
-    const ok33 = persistence.restore(JSON.parse(JSON.stringify(collected)));
-    check(ok33 === true, 'restore 3.3 成功');
-    check(flowState.getNode('tg')?.outputText === '反推结果', '3.3 restore 还原 outputText');
-    check(flowState.getNode('tg')?.textHistory.length === 1, '3.3 restore 还原 textHistory');
+    // 3.4 restore
+    const ok34 = persistence.restore(JSON.parse(JSON.stringify(collected)));
+    check(ok34 === true, 'restore 3.4 成功');
+    check(flowState.getNode('tg')?.outputText === '反推结果', '3.4 restore 还原 outputText');
+    check(flowState.getNode('tg')?.textHistory.length === 1, '3.4 restore 还原 textHistory');
 
-    // 3.2 老文件（image-gen/image-result 语义不变；节点无 outputText/textHistory 字段）
+    // 3.3 老文件兼容（restore 接受 3.3）
+    const ok33 = persistence.restore({ ...JSON.parse(JSON.stringify(collected)), version: '3.3' });
+    check(ok33 === true, 'restore 3.3 兼容成功');
+    check(flowState.getNode('tg')?.outputText === '反推结果', '3.3 restore 还原 outputText');
+
+    // 3.2 老文件（含 image-result → 迁移为 image-gen；节点无 outputText/textHistory 字段）
     const old32 = {
       format: 'icv', version: '3.2', projectName: '旧项目',
       canvas: { scale: 1, panX: 0, panY: 0 },
@@ -163,7 +164,9 @@ async function main() {
     check(ig && ig.type === 'image-gen' && ig.params.prompt === '你好', '3.2 image-gen 参数不丢');
     check(ig.outputText === null && Array.isArray(ig.textHistory) && ig.textHistory.length === 0, '3.2 节点补默认 outputText=null/textHistory=[]');
     const ir = flowState.getNode('ir');
-    check(ir && ir.type === 'image-result' && ir.parentId === 'ig', '3.2 image-result 透传 parentId');
+    check(ir && ir.type === 'image-gen' && ir.parentId === 'ig', '3.2 image-result 迁移为 image-gen 且 parentId 保留');
+    check(ir.imageUrl === 'data:image/png;base64,z', '3.2 image-result 迁移后 imageUrl 保留');
+    check(ir.title === '生成结果' && ir.params.prompt === '' && ir.params.count === 1, '3.2 image-result 迁移后 title/params 默认补齐');
     // 更旧版本拒绝
     const old31 = { ...old32, version: '3.1' };
     check(persistence.restore(old31) === false, '3.1 更旧版本拒绝');
@@ -197,8 +200,10 @@ async function main() {
       check(tg.status === 'done', '运行成功 → status done');
       check(tg.outputText === '一只猫坐在窗台上，光线柔和', 'outputText 写入');
       check(tg.textHistory.length === 1 && tg.textHistory[0].text === '一只猫坐在窗台上，光线柔和', '历史 +1');
-      check(called && called.input === '反推这张图', 'chatV2 收到 instruction');
-      check(Array.isArray(called.opts.images) && called.opts.images[0].startsWith('data:image'), 'chatV2 收到参考图 data:image');
+      check(called && called.input === '反推这张图', 'chatV2 收到命令（无 outputText → user=命令）');
+      check(!called.opts || !('images' in called.opts), 'chatV2 不传 images（文本节点不传图）');
+      check(called.opts.model === 'p:chat', 'chatV2 携带所选文本模型');
+      check(typeof called.opts.metaPrompt === 'string' && called.opts.metaPrompt.includes('文案处理'), 'chatV2 带 system 文案处理提示词');
       const dg = flowState.getNode('downGen');
       check(dg.params.prompt === '一只猫坐在窗台上，光线柔和', '直接 image-gen 下游 prompt 被覆盖');
       check(dg.status === 'stale', '直接下游标 stale');
@@ -321,7 +326,7 @@ async function main() {
     const types = candidates.map(d => d.type);
     check(types.includes('text-gen'), `菜单候选含 text-gen (${types.join(',')})`);
     check(types.includes('image-gen'), '菜单候选含 image-gen');
-    check(!types.includes('image-result'), '菜单候选不含 image-result（creatable=false）');
+    check(!types.includes('image-result'), '菜单候选不含 image-result（类型已彻底移除）');
   });
 
   console.log(`\n══════════════════════════════════`);

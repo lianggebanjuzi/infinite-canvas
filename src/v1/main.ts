@@ -11,8 +11,6 @@ import './styles/app.css';
 
 // 注册节点定义（副作用：向 nodeRegistry 注册；统一「生成节点」唯一注册）
 import './nodes/image-gen';
-// 结果卡：只读结果载体（引擎自动创建，不进新建菜单）；必须在 image-gen 之后注册（菜单过滤依赖 creatable）
-import './nodes/image-result';
 // 文本反推：chat 模型反推参考图提示词，输出文本（outputText）；同步调 chat_v2
 import './nodes/text-gen';
 
@@ -28,6 +26,7 @@ import { bottomBar } from './ui/bottom-bar';
 // 挂起：空态引导卡停用（index.html 容器已注释；恢复时取消本行与 init() 调用的注释）
 // import { emptyState } from './ui/empty-state';
 import { settingsPanel } from './ui/settings-panel';
+import { outpaintPanel } from './ui/outpaint-panel';
 import { persistence } from './persistence';
 import { resolveDefaultModel, resolveDefaultChatModel } from './api';
 
@@ -79,6 +78,7 @@ function bindKeyboard(): void {
     // Escape 关闭浮层
     if (e.key === 'Escape') {
       settingsPanel.close();
+      outpaintPanel.close();
       document.getElementById('ctx-menu')?.classList.remove('show');
       document.getElementById('img-modal')?.classList.remove('show');
     }
@@ -157,6 +157,7 @@ async function init(): Promise<void> {
   bottomBar.init();
   // emptyState.init(); // 挂起：空态引导卡停用（恢复时取消注释）
   settingsPanel.init();
+  outpaintPanel.init();
 
   bindKeyboard();
   bindWindowControls();

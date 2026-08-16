@@ -105,7 +105,7 @@
       <!-- text-gen 历史反推结果列表（仅选中文本反推节点时显示，JS 填充） -->
       <div class="cmd-text-history" id="cmd-text-history"></div>
       <div class="cmd-controls">
-        <button class="cmd-chip" id="chip-model" title="选择绘图模型">
+        <button class="cmd-chip" id="chip-model" title="选择模型">
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><path d="M9 2v2M15 2v2M9 20v2M15 20v2M2 9h2M2 15h2M20 9h2M20 15h2"/></svg>
           <span id="chip-model-label">选择模型</span> <span class="chev">▾</span>
         </button>
@@ -121,7 +121,7 @@
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
           <span id="chip-count-label">1张</span> <span class="chev">▾</span>
         </button>
-        <button class="cmd-send" id="cmd-send" title="生成">
+        <button class="cmd-send" id="cmd-send" title="发送">
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
         </button>
       </div>
@@ -192,6 +192,45 @@
 
 <!-- 大图查看 -->
 <div class="img-modal" id="img-modal"><img id="img-modal-img" alt=""></div>
+
+<!-- 扩图弹层（image-gen 悬浮「扩图」入口；挂 .overlay 类 → interactions.ts 已把 .overlay 排除在画布交互外，天然防冲突） -->
+<div class="overlay outpaint-overlay" id="outpaint-overlay">
+  <div class="outpaint-panel">
+    <div class="outpaint-head">
+      <h2>扩图</h2>
+      <span class="outpaint-sub">白色区域将由 AI 补全</span>
+      <button class="outpaint-close" id="outpaint-close" title="关闭">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
+      </button>
+    </div>
+    <div class="outpaint-body">
+      <div class="outpaint-section-label">目标比例</div>
+      <div class="outpaint-ratios" id="outpaint-ratios">
+        <button class="outpaint-ratio" data-ratio="1:1">1:1</button>
+        <button class="outpaint-ratio" data-ratio="3:4">3:4</button>
+        <button class="outpaint-ratio" data-ratio="4:3">4:3</button>
+        <button class="outpaint-ratio" data-ratio="16:9">16:9</button>
+        <button class="outpaint-ratio" data-ratio="9:16">9:16</button>
+      </div>
+      <div class="outpaint-stage" id="outpaint-stage">
+        <div class="outpaint-stage-hint">拖动原图调整位置<br>滚轮或下方滑块缩放</div>
+        <img id="outpaint-img" alt="" draggable="false">
+      </div>
+      <div class="outpaint-zoom">
+        <span class="outpaint-zoom-label">缩放</span>
+        <input type="range" id="outpaint-zoom" min="0.2" max="3" step="0.05" value="1">
+      </div>
+      <div class="outpaint-desc">
+        <textarea id="outpaint-desc" placeholder="可选：补充希望扩展出的内容，如：花园里的白色绣球花、暖阳" spellcheck="false"></textarea>
+      </div>
+      <div class="outpaint-model" id="outpaint-model-label"></div>
+    </div>
+    <div class="outpaint-foot">
+      <button class="btn-ghost" id="outpaint-cancel">取消</button>
+      <button class="btn-primary" id="outpaint-confirm">开始扩图</button>
+    </div>
+  </div>
+</div>
 
 <!-- 隐藏文件选择（追加参考图） -->
 <input type="file" id="file-input" accept="image/*" style="display:none;">

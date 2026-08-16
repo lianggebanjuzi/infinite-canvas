@@ -38,8 +38,8 @@ class DirtyMarker {
   }
 
   /**
-   * 上游变更但跳过指定节点及其子树（批次成功建卡后调用，exceptIds=本批次新建结果卡 id 集合）：
-   * 让旧下游标 stale、新结果卡（刚 done）及其子树跳过，避免被立即打回 stale。
+   * 上游变更但跳过指定节点及其子树（批次成功建产出节点后调用，exceptIds=本批次新建产出节点 id 集合）：
+   * 让旧下游标 stale、新产出节点（刚 done）及其子树跳过，避免被立即打回 stale。
    * BFS 传播：从直接下游出发，遇到 exceptIds 中的节点即整棵子树跳过（不再向下递归）。
    */
   markUpstreamChangedExcept(fromId: string, exceptIds: Set<string>): void {

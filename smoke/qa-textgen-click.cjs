@@ -68,7 +68,6 @@ function check(cond, msg) {
 // ───────────────────────── 加载被测模块 ─────────────────────────
 require(`${BASE}/nodes/node-registry.js`);
 require(`${BASE}/nodes/image-gen.js`);
-require(`${BASE}/nodes/image-result.js`);
 require(`${BASE}/nodes/text-gen.js`);
 const { flowState } = require(`${BASE}/state/flow-state.js`);
 const { interactions } = require(`${BASE}/canvas/interactions.js`);
@@ -110,8 +109,9 @@ console.log('\n▶ Q1: 四类节点单击行为（修复核心）');
 }
 
 {
-  const n = flowState.addNode('image-result', 0, 0);
-  check(!simulateClick(n.id), 'image-result 结果卡单击 → 不弹文件选择器（既有排除保留）');
+  // 引擎产出的 image-gen 节点（旧 image-result 迁移后语义）：空卡单击 → 弹文件选择器（正常图片节点行为）
+  const n = flowState.addNode('image-gen', 0, 0, { parentId: 'some-gen', title: '生成结果' });
+  check(simulateClick(n.id), '引擎产出 image-gen 空卡单击 → 弹文件选择器（非只读，正常图片节点行为）');
 }
 
 {

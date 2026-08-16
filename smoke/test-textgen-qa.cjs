@@ -1,9 +1,9 @@
 // smoke/test-textgen-qa.cjs
 // QA 独立回归（Edward 新鲜视角，不复用工程师断言）：
 //   1) 联动覆盖边界：仅直接 image-gen 下游覆盖 / 间接只 stale 不覆盖 / text-gen 下游不覆盖 /
-//      image-result 下游不覆盖 / 空文本与异常不覆盖且 fail / 覆盖值 == 反推文本（trim 后）
+//      产出 image-gen 下游覆盖 prompt+stale / 空文本与异常不覆盖且 fail / 覆盖值 == 反推文本（trim 后）
 //   2) 历史独立：去重 / 上限 20 裁尾 / 回填动作（outputText + 覆盖直接 image-gen + stale + toast，不写历史）
-//   3) persistence 独立：3.3 往返无损 / 3.2 兼容补默认 / 3.1 拒绝 / 非法 textHistory 归一 / 非 string outputText 兜底
+//   3) persistence 独立：3.4 往返无损 / 3.2/3.3 兼容补默认 + image-result 迁移 / 3.1 拒绝 / 非法 textHistory 归一 / 非 string outputText 兜底
 //   4) 其它：chatV2 images 防御性过滤（仅 data:image）、节点注册唯一、文本卡 HTML 转义
 //
 // 运行：node smoke/test-textgen-qa.cjs （编译产物在 D:/tmp/icv-test，先 npx tsc -p tsconfig.smoke.json --outDir D:/tmp/icv-test）
@@ -86,7 +86,6 @@ async function section(title, fn) {
 // ───────────────────────── 加载被测模块 ─────────────────────────
 const { nodeRegistry } = require(`${BASE}/nodes/node-registry.js`);
 require(`${BASE}/nodes/image-gen.js`);
-require(`${BASE}/nodes/image-result.js`);
 require(`${BASE}/nodes/text-gen.js`);
 const { flowState } = require(`${BASE}/state/flow-state.js`);
 const { dirty } = require(`${BASE}/state/dirty.js`);
@@ -110,7 +109,7 @@ function mkNode(id, type, over = {}) {
 
 function replace(project) {
   flowState.replaceAll({
-    format: 'icv', version: '3.3', projectName: 'qa',
+    format: 'icv', version: '3.4', projectName: 'qa',
     canvas: { scale: 1, panX: 0, panY: 0 },
     ...project,
     createdAt: 0, updatedAt: 0,
@@ -155,20 +154,20 @@ async function main() {
     check(dtg.status === 'stale', 'text-gen 下游也标 stale（上游已变更）');
   });
 
-  await section('QA1b: image-result 下游不覆盖（无 prompt 语义，仅 stale）', async () => {
+  await section('QA1b: 产出 image-gen 下游被 applyTextToDownstream 覆盖（prompt + stale）', async () => {
     replace({
       nodes: [
         mkNode('tg', 'text-gen', { params: { instruction: '反推', model: 'p:c' }, refImages: ['data:image/png;base64,x'] }),
-        mkNode('ir', 'image-result', { imageUrl: 'data:image/png;base64,keep', parentId: null }),
+        mkNode('ig', 'image-gen', { imageUrl: 'data:image/png;base64,keep', params: { prompt: '旧', model: 'd:m' } }),
       ],
-      edges: [{ id: 'e1', from: 'tg', to: 'ir' }], // 直连（绕过 canConnect 校验，仅测试引擎行为）
+      edges: [{ id: 'e1', from: 'tg', to: 'ig' }], // 产出节点（image-gen）直连
     });
     setChat('结果文本');
     await runEngine.run('tg');
-    const ir = flowState.getNode('ir');
-    check(ir.imageUrl === 'data:image/png;base64,keep', '③ image-result 下游 imageUrl 不被改动');
-    check(ir.status === 'stale', '③ image-result 下游仅标 stale');
-    check(!('prompt' in ir.params), 'image-result 无 prompt 参数');
+    const ig = flowState.getNode('ig');
+    check(ig.imageUrl === 'data:image/png;base64,keep', '③ 产出 image-gen 下游 imageUrl 不被改动');
+    check(ig.params.prompt === '结果文本', '③ 产出 image-gen 下游 prompt 被覆盖（image-gen 语义）');
+    check(ig.status === 'stale', '③ 产出 image-gen 下游标 stale');
   });
 
   await section('QA1c: 空文本与异常 → fail + 不覆盖 + 不写历史', async () => {
@@ -187,8 +186,9 @@ async function main() {
     check(tg.outputText === '旧文本', '④ 空文本不覆盖 outputText');
     check(tg.textHistory.length === 1, '④ 空文本不写历史');
     check(flowState.getNode('dg').params.prompt === '旧prompt', '④ 空文本不覆盖下游 prompt');
-    // 异常
+    // 异常（命令是临时的：上一步失败后 instruction 已被清空，需重新给命令才能再跑）
     setChat(new Error('供应商未配置 API 地址'));
+    flowState.updateNodeParams('tg', { instruction: '反推' });
     await runEngine.run('tg');
     tg = flowState.getNode('tg');
     check(tg.status === 'fail', '④ 异常 → 节点 fail');
@@ -259,17 +259,17 @@ async function main() {
   });
 
   // ================= QA3: persistence 独立 =================
-  await section('QA3a: 3.3 往返无损（outputText/textHistory/params 全部保留）', () => {
+  await section('QA3a: 3.4 往返无损（outputText/textHistory/params 全部保留）', () => {
     replace({
       nodes: [
         mkNode('tg', 'text-gen', { status: 'done', title: '文本反推', params: { instruction: '反推', model: 'p:c' }, outputText: '反推结果', textHistory: [{ text: '反推结果', ts: 1 }, { text: '更早', ts: 0 }], refImages: ['data:image/png;base64,x'] }),
         mkNode('ig', 'image-gen', { status: 'stale', params: { prompt: '被覆盖的prompt', model: 'd:m', aspectRatio: '3:4', resolution: '2k', count: 2 }, refImages: ['data:image/png;base64,y'] }),
-        mkNode('ir', 'image-result', { status: 'done', imageUrl: 'data:image/png;base64,z', parentId: 'ig' }),
+        mkNode('ig2', 'image-gen', { status: 'done', title: '生成结果', imageUrl: 'data:image/png;base64,z', parentId: 'ig' }),
       ],
-      edges: [{ id: 'e1', from: 'tg', to: 'ig' }, { id: 'e2', from: 'ig', to: 'ir' }],
+      edges: [{ id: 'e1', from: 'tg', to: 'ig' }, { id: 'e2', from: 'ig', to: 'ig2' }],
     });
     const collected = persistence.collect();
-    check(collected.version === '3.3', 'collect().version === 3.3');
+    check(collected.version === '3.4', 'collect().version === 3.4');
     const ctg = collected.nodes.find(n => n.id === 'tg');
     check(ctg.outputText === '反推结果', 'collect 保留 outputText');
     check(Array.isArray(ctg.textHistory) && ctg.textHistory.length === 2 && ctg.textHistory[0].text === '反推结果', 'collect 保留 textHistory 全部条目');
@@ -277,14 +277,14 @@ async function main() {
     const cig = collected.nodes.find(n => n.id === 'ig');
     check(cig.params.prompt === '被覆盖的prompt' && cig.params.count === 2, 'collect 保留 image-gen 全参数');
     check(cig.outputText === null && Array.isArray(cig.textHistory) && cig.textHistory.length === 0, '非 text-gen 节点 outputText=null/textHistory=[]');
-    check(collected.nodes.find(n => n.id === 'ir').parentId === 'ig', 'collect 保留 image-result parentId');
+    check(collected.nodes.find(n => n.id === 'ig2').parentId === 'ig', 'collect 保留产出节点 parentId');
 
     const ok = persistence.restore(JSON.parse(JSON.stringify(collected)));
-    check(ok === true, 'restore 3.3 成功');
-    check(flowState.getNode('tg').outputText === '反推结果', '3.3 还原 outputText');
-    check(flowState.getNode('tg').textHistory.length === 2 && flowState.getNode('tg').textHistory[1].text === '更早', '3.3 还原 textHistory 顺序');
-    check(flowState.getNode('ig').params.prompt === '被覆盖的prompt', '3.3 还原 image-gen 参数');
-    check(flowState.getNode('ir').parentId === 'ig' && flowState.getNode('ir').imageUrl.startsWith('data:image'), '3.3 还原 image-result');
+    check(ok === true, 'restore 3.4 成功');
+    check(flowState.getNode('tg').outputText === '反推结果', '3.4 还原 outputText');
+    check(flowState.getNode('tg').textHistory.length === 2 && flowState.getNode('tg').textHistory[1].text === '更早', '3.4 还原 textHistory 顺序');
+    check(flowState.getNode('ig').params.prompt === '被覆盖的prompt', '3.4 还原 image-gen 参数');
+    check(flowState.getNode('ig2').parentId === 'ig' && flowState.getNode('ig2').imageUrl.startsWith('data:image'), '3.4 还原产出 image-gen 节点');
   });
 
   await section('QA3b: 3.2 老文件兼容（缺字段补默认；text-gen 也兼容）', () => {
@@ -303,7 +303,10 @@ async function main() {
     check(ok === true, 'restore 3.2 成功');
     check(flowState.getNode('ig').params.prompt === '你好', '3.2 image-gen 参数不丢');
     check(flowState.getNode('ig').outputText === null && flowState.getNode('ig').textHistory.length === 0, '3.2 image-gen 补默认 outputText=null/textHistory=[]');
-    check(flowState.getNode('ir').parentId === 'ig', '3.2 image-result 透传 parentId');
+    const ir = flowState.getNode('ir');
+    check(ir && ir.type === 'image-gen' && ir.parentId === 'ig', '3.2 image-result 迁移为 image-gen 且 parentId 保留');
+    check(ir.imageUrl === 'data:image/png;base64,z' && ir.title === '生成结果', '3.2 image-result 迁移后 imageUrl/title 保留');
+    check(ir.params.prompt === '' && ir.params.aspectRatio === '3:4' && ir.params.count === 1, '3.2 image-result 迁移后 params 默认补齐');
     const tg = flowState.getNode('tg');
     check(!!tg && tg.outputText === null && Array.isArray(tg.textHistory) && tg.textHistory.length === 0, '3.2 text-gen 补默认 outputText=null/textHistory=[]');
     check(tg.params.instruction === '反推' && tg.params.model === '', '3.2 text-gen 参数保留');
@@ -370,16 +373,21 @@ async function main() {
     delete global.pywebview.api.unified_chat_v2;
   });
 
-  await section('QA4b: 节点注册唯一性 + canRun 必须有参考图', () => {
+  await section('QA4b: 节点注册唯一性 + canRun 命令驱动（无需参考图）', () => {
     const types = nodeRegistry.list().map(d => d.type);
     check(types.filter(t => t === 'text-gen').length === 1, 'text-gen 仅注册一次');
-    check(types.filter(t => t === 'image-gen').length === 1 && types.filter(t => t === 'image-result').length === 1, 'image-gen/image-result 未重复注册');
+    check(types.filter(t => t === 'image-gen').length === 1, 'image-gen 仅注册一次（双卡模型唯一图片节点）');
+    check(!types.includes('image-result'), 'image-result 类型已彻底移除');
     const def = nodeRegistry.get('text-gen');
-    const noRef = flowState.addNode('text-gen', 0, 0, { params: { instruction: '反推', model: 'p:c' } });
-    const r = def.canRun(noRef, { getReferenceImages: () => [] });
-    check(typeof r === 'string' && r.includes('参考图'), `canRun 无参考图被拦截 (${r})`);
-    const withRef = flowState.addNode('text-gen', 0, 0, { params: { instruction: '反推', model: 'p:c' }, refImages: ['data:image/png;base64,x'] });
-    check(def.canRun(withRef, { getReferenceImages: () => ['data:image/png;base64,x'] }) === true, '有参考图可运行');
+    check(def.label === '文本', `label 已改为「文本」 (${def.label})`);
+    const noCmd = flowState.addNode('text-gen', 0, 0, { params: { instruction: '', model: 'p:c' } });
+    const r1 = def.canRun(noCmd, { getReferenceImages: () => [] });
+    check(typeof r1 === 'string' && r1.includes('请输入命令'), `canRun 无命令被拦截 (${r1})`);
+    const noModel = flowState.addNode('text-gen', 0, 0, { params: { instruction: '翻译', model: '' } });
+    const r2 = def.canRun(noModel, { getReferenceImages: () => [] });
+    check(typeof r2 === 'string' && r2.includes('文本模型'), `canRun 无文本模型被拦截 (${r2})`);
+    const ok = flowState.addNode('text-gen', 0, 0, { params: { instruction: '翻译成英文', model: 'p:c' } });
+    check(def.canRun(ok, { getReferenceImages: () => [] }) === true, '有命令+模型（无参考图）可运行');
   });
 
   await section('QA4c: 文本卡 HTML 转义（防注入）', () => {

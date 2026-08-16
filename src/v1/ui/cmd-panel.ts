@@ -8,9 +8,9 @@ import { dirty } from '../state/dirty';
 import { canvasView, CARD_W } from '../canvas/canvas-view';
 import { cardView } from '../canvas/card-view';
 import { interactions } from '../canvas/interactions';
-import { runEngine } from '../engine/run-engine';
-import { fetchImageModels, fetchChatModels } from '../api';
-import { DEFAULT_CHAT_MODEL_KEY, DEFAULT_INSTRUCTION } from '../nodes/text-gen';
+import { runEngine, applyTextToDownstream } from '../engine/run-engine';
+import { Backend, fetchImageModels, fetchChatModels } from '../api';
+import { DEFAULT_CHAT_MODEL_KEY } from '../nodes/text-gen';
 import { showToast } from './toast';
 
 const RATIO_OPTIONS = ['3:4', '2:3', '4:5', '9:16', '1:4', '1:8', '1:1', '4:3', '3:2', '5:4', '16:9', '21:9', '4:1', '8:1', 'Auto'];
@@ -19,9 +19,10 @@ const COUNT_OPTIONS = [1, 2, 3, 4];
 
 const DEL_SVG = '<svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>';
 
-/** 指令输入框占位提示：text-gen 用反推指令示例（DEFAULT_INSTRUCTION 仅作文案，不预填节点），其余用通用编辑指令 */
+/** 指令输入框占位提示：text-gen 用命令示例，图片节点文本反推模式用反推命令示例，其余用通用编辑指令 */
 const PROMPT_INPUT_PLACEHOLDER = '输入指令编辑这张图，如：把背景换成浅灰水泥墙，加一盆绿萝';
-const TEXT_GEN_INPUT_PLACEHOLDER = `输入反推指令，如：${DEFAULT_INSTRUCTION}`;
+const TEXT_GEN_INPUT_PLACEHOLDER = '输入命令，如：改得更专业、翻译成英文';
+const IMAGE_TEXT_REVERSE_PLACEHOLDER = '输入命令，如：反推这个图片';
 
 class CmdPanel {
   private el: HTMLElement | null = null;
@@ -33,6 +34,7 @@ class CmdPanel {
   private input!: HTMLTextAreaElement;
   private send!: HTMLButtonElement;
   private chipModelLabel!: HTMLElement;
+  private chipModelBtn!: HTMLElement;
   private chipRatioLabel!: HTMLElement;
   private chipResLabel!: HTMLElement;
   private chipCountLabel!: HTMLElement;
@@ -54,6 +56,7 @@ class CmdPanel {
     this.input = document.getElementById('cmd-input') as HTMLTextAreaElement;
     this.send = document.getElementById('cmd-send') as HTMLButtonElement;
     this.chipModelLabel = document.getElementById('chip-model-label') as HTMLElement;
+    this.chipModelBtn = document.getElementById('chip-model') as HTMLElement;
     this.chipRatioLabel = document.getElementById('chip-ratio-label') as HTMLElement;
     this.chipResLabel = document.getElementById('chip-res-label') as HTMLElement;
     this.chipCountLabel = document.getElementById('chip-count-label') as HTMLElement;
@@ -111,16 +114,20 @@ class CmdPanel {
     const node = selection.single();
     if (!node) return;
     if (node.type === 'text-gen') {
-      const instruction = this.input.value.trim();
-      flowState.updateNodeParams(node.id, { instruction });
+      // 命令是临时的：从输入框读命令执行；输入框被 sync 清空时退回节点已暂存的 command（params.instruction），
+      // 避免「输命令→点模型 chip（sync 清空输入框）→点发送」丢命令。执行后仍清空命令框（卡片只显示结果）。
+      const command = this.input.value.trim() || ((node.params as unknown as TextGenParams).instruction || '').trim();
+      flowState.updateNodeParams(node.id, { instruction: command });
+      void runEngine.run(node.id);
+      this.input.value = '';
     } else {
       const prompt = this.input.value.trim();
       flowState.updateNodeParams(node.id, { prompt });
+      void runEngine.run(node.id);
     }
-    void runEngine.run(node.id);
   }
 
-  /** 模型 chip：打开菜单前重新拉取模型（text-gen → chat 模型，其余 → 绘图模型），确保设置里新增/拉取的模型即时可见 */
+  /** 模型 chip：打开菜单前重新拉取模型（text-gen → chat 模型；image-gen → 绘图/文本模型类型切换），确保设置里新增/拉取的模型即时可见 */
   private async _openModelMenu(btn: HTMLElement): Promise<void> {
     const node = selection.single();
     if (!node) return;
@@ -128,9 +135,86 @@ class CmdPanel {
       this.chatModelOptions = await fetchChatModels();
       this._showChipMenu(btn, this.chatModelOptions.map(m => ({ id: m.id, name: m.name })), 'model');
     } else {
-      this.modelOptions = await fetchImageModels();
-      this._showChipMenu(btn, this.modelOptions.map(m => ({ id: m.id, name: m.name })), 'model');
+      // image-gen：绘图模型（默认，生成图）/ 文本模型（反推）类型切换
+      await this._openImageModelMenu(btn, node);
     }
+  }
+
+  /** image-gen 模型 chip：顶部「绘图模型 / 文本模型」两个 tab，切换类型并记住（写 params.modelType）；选中写对应 model 字段 */
+  private async _openImageModelMenu(btn: HTMLElement, node: FlowNode): Promise<void> {
+    const [imageModels, chatModels] = await Promise.all([fetchImageModels(), fetchChatModels()]);
+    this.modelOptions = imageModels;
+    this.chatModelOptions = chatModels;
+
+    document.querySelector('.param-menu')?.remove();
+    const rect = btn.getBoundingClientRect();
+    const menu = document.createElement('div');
+    menu.className = 'param-menu';
+    menu.style.left = rect.left + 'px';
+    menu.style.top = (rect.bottom + 5) + 'px';
+    const menuWidth = 200;
+    if (rect.left + menuWidth > window.innerWidth - 12) {
+      menu.style.left = (window.innerWidth - menuWidth - 12) + 'px';
+    }
+
+    const p = node.params as unknown as StyleTransferParams;
+    let currentType: 'draw' | 'text' = p.modelType === 'text' ? 'text' : 'draw';
+
+    const tabs = document.createElement('div');
+    tabs.className = 'param-menu-tabs';
+    const tabDraw = document.createElement('div');
+    tabDraw.className = 'param-menu-tab' + (currentType === 'draw' ? ' active' : '');
+    tabDraw.textContent = '绘图模型';
+    const tabText = document.createElement('div');
+    tabText.className = 'param-menu-tab' + (currentType === 'text' ? ' active' : '');
+    tabText.textContent = '文本模型';
+    tabs.appendChild(tabDraw);
+    tabs.appendChild(tabText);
+    menu.appendChild(tabs);
+
+    const listBox = document.createElement('div');
+    listBox.className = 'param-menu-list';
+    menu.appendChild(listBox);
+
+    const renderList = (type: 'draw' | 'text'): void => {
+      listBox.innerHTML = '';
+      const items = type === 'text' ? this.chatModelOptions : this.modelOptions;
+      const current = type === 'text' ? (p.textModel || '') : (p.model || '');
+      items.forEach(item => {
+        const div = document.createElement('div');
+        div.className = 'param-menu-item' + (item.id === current ? ' selected' : '');
+        div.textContent = item.name;
+        div.addEventListener('click', (ev) => {
+          ev.stopPropagation();
+          if (type === 'text') {
+            flowState.updateNodeParams(node.id, { modelType: 'text', textModel: item.id });
+          } else {
+            flowState.updateNodeParams(node.id, { modelType: 'draw', model: item.id });
+            if (item.id) localStorage.setItem('icv_default_model', item.id);
+          }
+          menu.remove();
+        });
+        listBox.appendChild(div);
+      });
+    };
+
+    const setTab = (type: 'draw' | 'text'): void => {
+      currentType = type;
+      flowState.updateNodeParams(node.id, { modelType: type });
+      tabDraw.className = 'param-menu-tab' + (type === 'draw' ? ' active' : '');
+      tabText.className = 'param-menu-tab' + (type === 'text' ? ' active' : '');
+      renderList(type);
+    };
+    tabDraw.addEventListener('click', (ev) => { ev.stopPropagation(); setTab('draw'); });
+    tabText.addEventListener('click', (ev) => { ev.stopPropagation(); setTab('text'); });
+
+    renderList(currentType);
+
+    document.body.appendChild(menu);
+    setTimeout(() => {
+      const close = () => { menu.remove(); document.removeEventListener('click', close); };
+      document.addEventListener('click', close);
+    }, 0);
   }
 
   private _showChipMenu(btn: HTMLElement, items: Array<{ id: string; name: string }>, paramType: string): void {
@@ -203,7 +287,7 @@ class CmdPanel {
     if (!this.el) return;
     const node = selection.single();
     if (!node) {
-      this.el.classList.remove('show', 'pos-above', 'readonly', 'textgen');
+      this.el.classList.remove('show', 'pos-above', 'textgen');
       return;
     }
 
@@ -211,34 +295,36 @@ class CmdPanel {
     this.ctxName.textContent = node.title || '节点';
     this.ctxThumb.style.backgroundImage = node.imageUrl ? `url('${node.imageUrl.replace(/'/g, "\\'")}')` : 'none';
 
-    // 结果卡只读模式：隐藏输入/chips/发送钮/参考图区，仅提示「结果卡（只读）」
-    if (node.type === 'image-result') {
-      this.el.classList.add('readonly');
-      this.ctxHint.textContent = '· 结果卡（只读）';
-      this._renderTextHistory(node); // 结果卡无历史，隐藏
-      this._position(node);
-      return;
-    }
-    this.el.classList.remove('readonly');
-
-    // text-gen 面板：隐藏绘图参数 chips（比例/分辨率/张数），模型 chip 切到对话模型
+    // text-gen 面板：隐藏绘图参数 chips（比例/分辨率/张数）与参考图区，模型 chip 切到文本模型；
+    // image-gen 文本反推模式：同样隐藏绘图参数 chips（无意义），但保留参考图区（反推依赖源图，可见可换）
     const isTextGen = node.type === 'text-gen';
+    const isImageReverse = node.type === 'image-gen' && (node.params as unknown as StyleTransferParams).modelType === 'text';
     this.el.classList.toggle('textgen', isTextGen);
+    this.el.classList.toggle('reverse', isImageReverse);
 
-    // 输入框占位提示跟随节点类型：text-gen 反推指令示例，其余通用编辑指令（切换选中节点时同步变化）
-    this.input.placeholder = isTextGen ? TEXT_GEN_INPUT_PLACEHOLDER : PROMPT_INPUT_PLACEHOLDER;
+    // chip/发送钮 title 文案随节点类型/模式切换（文本处理/图片反推/图片生成语义不同）
+    this.chipModelBtn.title = isTextGen || isImageReverse ? '选择文本模型' : '选择绘图模型';
+    this.send.title = isTextGen ? '处理文本' : (isImageReverse ? '反推文本' : '生成');
+
+    // 输入框占位提示跟随节点类型/模型类型（切换选中节点时同步变化）
+    if (isTextGen) {
+      this.input.placeholder = TEXT_GEN_INPUT_PLACEHOLDER;
+    } else if (isImageReverse) {
+      this.input.placeholder = IMAGE_TEXT_REVERSE_PLACEHOLDER;
+    } else {
+      this.input.placeholder = PROMPT_INPUT_PLACEHOLDER;
+    }
 
     this.ctxHint.textContent =
       node.status === 'stale' ? '· 上游已改，待重跑' :
-      node.status === 'done' ? (isTextGen ? '· 已完成反推' : '· 已完成') :
+      node.status === 'done' ? '· 已完成' :
       node.status === 'run' ? this._runHint(node.id) :
-      node.status === 'fail' ? (isTextGen ? '· 反推失败' : '· 生成失败') : '';
+      node.status === 'fail' ? (isTextGen ? '· 处理失败' : isImageReverse ? '· 反推失败' : '· 生成失败') : '';
 
-    // 输入框（用户未聚焦时回填）：text-gen 绑定 instruction，其余绑定 prompt
+    // 输入框（用户未聚焦时回填）：text-gen 命令是临时的，保持干净不回填；image-gen 回填 prompt（文本反推模式复用 prompt 作命令）
     if (document.activeElement !== this.input) {
       if (isTextGen) {
-        const tp = node.params as unknown as TextGenParams;
-        this.input.value = tp.instruction || '';
+        this.input.value = '';
       } else {
         const p = node.params as unknown as StyleTransferParams;
         this.input.value = p.prompt || '';
@@ -256,10 +342,11 @@ class CmdPanel {
     this._position(node);
   }
 
-  /** run 状态提示：text-gen「反推中」；批次「生成中 done/total」（无批次时退化为「生成中」） */
+  /** run 状态提示：text-gen「处理中」；图片节点文本反推「反推中」；批次「生成中 done/total」（无批次时退化为「生成中」） */
   private _runHint(nodeId: string): string {
     const node = flowState.getNode(nodeId);
-    if (node && node.type === 'text-gen') return '· 反推中';
+    if (node && node.type === 'text-gen') return '· 处理中';
+    if (node && node.type === 'image-gen' && (node.params as unknown as StyleTransferParams).modelType === 'text') return '· 反推中';
     const p = runEngine.getBatchProgress(nodeId);
     if (p && p.total > 0) return `· 生成中 ${p.done}/${p.total}`;
     return '· 生成中';
@@ -337,10 +424,7 @@ class CmdPanel {
   /** 历史回填动作（与运行成功时的覆盖动作完全一致）：写 outputText + 覆盖直接 image-gen 下游 prompt + 标 stale */
   private _refillHistoryItem(nodeId: string, item: TextGenHistoryItem): void {
     flowState.updateNode(nodeId, { outputText: item.text });
-    flowState.getDownstreams(nodeId)
-      .filter(d => d.type === 'image-gen')
-      .forEach(d => flowState.updateNodeParams(d.id, { prompt: item.text }));
-    dirty.markUpstreamChanged(nodeId);
+    applyTextToDownstream(nodeId, item.text);
     showToast('已回填历史反推文本');
   }
 
@@ -392,10 +476,19 @@ class CmdPanel {
 
   private _renderChips(node: FlowNode): void {
     const p = node.params as unknown as StyleTransferParams;
-    // 模型 chip 名称按节点类型查对应模型列表（text-gen → chat 模型）
-    const options = node.type === 'text-gen' ? this.chatModelOptions : this.modelOptions;
-    const model = options.find(m => m.id === p.model);
-    this.chipModelLabel.textContent = model ? model.name : (p.model || '选择模型');
+    // 模型 chip 名称按节点类型/模型类型查对应模型列表（text-gen → chat；image-gen 文本反推 → chat 的 textModel；其余 → 绘图）
+    let modelName: string;
+    if (node.type === 'text-gen') {
+      const model = this.chatModelOptions.find(m => m.id === p.model);
+      modelName = model ? model.name : (p.model || '选择模型');
+    } else if (p.modelType === 'text') {
+      const model = this.chatModelOptions.find(m => m.id === p.textModel);
+      modelName = model ? model.name : (p.textModel || '选择文本模型');
+    } else {
+      const model = this.modelOptions.find(m => m.id === p.model);
+      modelName = model ? model.name : (p.model || '选择模型');
+    }
+    this.chipModelLabel.textContent = modelName;
     this.chipRatioLabel.textContent = p.aspectRatio || '3:4';
     this.chipResLabel.textContent = (p.resolution || '2k').toUpperCase();
     this.chipCountLabel.textContent = `${p.count ?? 1}张`;

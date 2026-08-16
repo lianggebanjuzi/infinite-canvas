@@ -37,6 +37,8 @@ class Interactions {
   private pendingFileNodeId: string | null = null;
   private drag: DragState | null = null;
   private _dragSnapshots = new Map<string, { x: number; y: number }>();
+  /** 拖动守卫：最近一次节点按下-松开是否发生了位移（超过 DRAG_THRESHOLD）——卡片文本点击进入编辑前排除拖拽后的 click */
+  private _lastNodeDragMoved = false;
 
   init(): void {
     this.wrap = document.getElementById('canvas-wrap');
@@ -111,13 +113,19 @@ class Interactions {
       const cardEl = (e.target as Element).closest('.pcard') as HTMLElement | null;
       if (!cardEl) return;
       const node = flowState.getNode(cardEl.dataset.nodeId || '');
-      if (node && node.imageUrl) openImageModal(node.imageUrl);
+      if (!node) return;
+      // 有图 → 查看大图；空图片卡（无输出图且无参考图，非文本卡）双击 → 弹文件选择器加载参考图
+      if (node.imageUrl) { openImageModal(node.imageUrl); return; }
+      if (node.type !== 'text-gen' && (!node.refImages || node.refImages.length === 0)) {
+        this.openFilePickerForRef(node.id);
+      }
     });
   }
 
   private _onCardMouseDown(e: MouseEvent, cardEl: HTMLElement): void {
     e.stopPropagation();
     if ((e.target as Element).closest('.pcard-act') || (e.target as Element).closest('.port')) return;
+    this._lastNodeDragMoved = false; // 本次按下重置拖动守卫（随后 click 依据本次是否位移判定）
 
     const nodeId = cardEl.dataset.nodeId || '';
     const node = flowState.getNode(nodeId);
@@ -209,21 +217,14 @@ class Interactions {
     if (!d) return;
 
     if (d.mode === 'node') {
-      if (!d.moved) {
-        // 单击：仅"完全没有任何图"的卡（无输出图且无参考图占位）→ 打开文件选择追加参考图；
-        // 已有输出图或参考图占位时单击只选中、不弹框（查看大图走 dblclick / 悬浮展开按钮）；
-        // 结果卡只读：不弹文件选择
-        if (d.nodeId) {
-          const n = flowState.getNode(d.nodeId);
-          if (n && n.type !== 'image-result' && n.type !== 'text-gen' && !n.imageUrl && (!n.refImages || n.refImages.length === 0)) {
-            this.openFilePickerForRef(n.id);
-          }
-        }
-      } else {
+      this._lastNodeDragMoved = d.moved; // 记录本次按下-松开是否发生位移（拖动守卫：供 click 处理器排除拖拽后的误入编辑）
+      if (d.moved) {
         flowState.updatedAt = Date.now();
         flowState.dirty = true;
         flowState.notify();
       }
+      // 单击仅选中，不再自动弹文件选择器（曾因触发范围=整卡容易误触弹出；加载图改由三个明确入口：
+      // 双击空卡 / 指令面板「添加参考图」按钮 / 拖图到卡片）
       this._dragSnapshots.clear();
     }
 
@@ -250,6 +251,11 @@ class Interactions {
     if (!nodeId) return;
     this.pendingFileNodeId = nodeId;
     this.fileInput?.click();
+  }
+
+  /** 拖动守卫：本次节点按下-松开是否发生了位移（moved）——卡片文本点击进入编辑态前调用，moved=true 则不进入 */
+  wasNodeDragMoved(): boolean {
+    return this._lastNodeDragMoved;
   }
 
   private _startConnectDrag(e: MouseEvent, portEl: HTMLElement): void {
@@ -298,13 +304,23 @@ class Interactions {
     this._clearDroppable();
     if (!fromId) return;
 
-    // 松手点落在合法 in 端口 → 正常连线（现有行为）
-    const el = document.elementFromPoint(e.clientX, e.clientY) as HTMLElement | null;
-    const inPort = el?.closest('.port.in') as HTMLElement | null;
-    if (inPort) {
-      const toCard = inPort.closest('.pcard') as HTMLElement | null;
-      const toId = toCard?.dataset.nodeId;
-      if (toId) {
+    // 松手点元素（屏幕坐标）；命中悬浮面板（指令面板/操作条）时穿透：临时隐藏面板取下层元素，
+    // 使「拖线结束落在面板上方」仍能命中面板下层被遮住的卡片（松手在目标卡任意位置即连线）。
+    let el = document.elementFromPoint(e.clientX, e.clientY) as HTMLElement | null;
+    const panel = el?.closest('.cmd-panel, .action-bar') as HTMLElement | null;
+    if (panel) {
+      const prevDisplay = panel.style.display;
+      panel.style.display = 'none';
+      el = document.elementFromPoint(e.clientX, e.clientY) as HTMLElement | null;
+      panel.style.display = prevDisplay;
+    }
+
+    // 松手命中目标卡（非源卡、canConnect 允许）任意区域 → 连线（不必精确落 .port.in；
+    // .port.in 高亮提示由 _updateDroppable 在拖动中提供）
+    const targetCard = el?.closest('.pcard') as HTMLElement | null;
+    if (targetCard) {
+      const toId = targetCard.dataset.nodeId;
+      if (toId && toId !== fromId) {
         const res = flowState.connect(fromId, toId);
         if (!res.ok) showToast(res.error || '连线失败', false);
         else showToast('已创建连线');
@@ -318,14 +334,16 @@ class Interactions {
 
   // ───────────────────────── 拖线松手 → 新建节点菜单（P0） ─────────────────────────
 
-  /** 可作下游的节点类型（统一生成节点：仅 image-gen 一项；结果卡 creatable=false 不进新建菜单） */
+  /** 可作下游的节点类型（统一生成节点：仅 image-gen 一项；text-gen 不作为连线接收端，由菜单过滤） */
   private _newNodeCandidates(): NodeDefinition[] {
     return nodeRegistry.list().filter(d => d.creatable !== false);
   }
 
   /** 松手处弹「新建节点」菜单：选择类型 → 建节点并自动连上拖出的线 */
   private _showNewNodeMenu(screenX: number, screenY: number, fromId: string): void {
-    const candidates = this._newNodeCandidates();
+    // 过滤不可作 fromId 下游的类型：text-gen 永远不能作为连线接收端（canConnect 拒绝 to=text-gen），
+    // 列入候选会静默创建未连接节点；空白处右键新建（_showCanvasMenu）不受影响，仍可建独立 text-gen。
+    const candidates = this._newNodeCandidates().filter(d => d.type !== 'text-gen');
     if (candidates.length === 0) return;
 
     const menu = this._menuEl();
@@ -482,9 +500,9 @@ class Interactions {
       const r = ratio > 0 ? ratio : 3 / 4;
 
       if (targetNode) {
-        // 结果卡只读：拒绝挂载参考图
-        if (targetNode.type === 'image-result') {
-          showToast('结果卡为只读', false);
+        // 文本节点不接收图片：拒绝挂载参考图
+        if (targetNode.type === 'text-gen') {
+          showToast('文本节点不接收图片', false);
           return;
         }
         flowState.addRefImage(targetNode.id, src);
@@ -529,9 +547,9 @@ class Interactions {
           if (this.pendingFileNodeId) {
             const nodeId = this.pendingFileNodeId;
             const target = flowState.getNode(nodeId);
-            // 结果卡只读：拒绝选图挂载
-            if (target && target.type === 'image-result') {
-              showToast('结果卡为只读', false);
+            // 文本节点不接收图片：拒绝选图挂载
+            if (target && target.type === 'text-gen') {
+              showToast('文本节点不接收图片', false);
               this.pendingFileNodeId = null;
               return;
             }
@@ -621,10 +639,7 @@ class Interactions {
 
   private _showCardMenu(x: number, y: number, node: FlowNode): void {
     const menu = this._menuEl();
-    // 结果卡只读：无运行/重新运行/查看失败原因，仅删除
-    const isResult = node.type === 'image-result';
     menu.innerHTML = `
-      ${isResult ? '<div class="ctx-hint">结果卡（只读）</div>' : `
       <div class="ctx-item" data-act="run">
         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 3l14 9-14 9V3Z"/></svg>
         运行当前卡
@@ -639,7 +654,6 @@ class Interactions {
         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 3 14h7l-1 8 10-12h-7l1-8Z"/></svg>
         重新运行
       </div>` : ''}
-      `}
       <div class="ctx-sep"></div>
       <div class="ctx-item danger" data-act="delete">
         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></svg>
@@ -730,12 +744,6 @@ class Interactions {
       }
       case 'insert-step': {
         const edgeId = this._menuEl().dataset.edgeId || '';
-        const edge = flowState.edges.find(e => e.id === edgeId);
-        const toNode = edge ? flowState.getNode(edge.to) : undefined;
-        if (toNode && toNode.type === 'image-result') {
-          showToast('结果卡前不能插步骤', false);
-          break;
-        }
         const node = flowState.insertStep(edgeId);
         if (node) {
           dirty.markUpstreamChanged(node.id);

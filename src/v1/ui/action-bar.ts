@@ -8,6 +8,7 @@ import { canvasView, CARD_W } from '../canvas/canvas-view';
 import { cardView } from '../canvas/card-view';
 import { showToast } from './toast';
 import { cmdPanel } from './cmd-panel';
+import { outpaintPanel } from './outpaint-panel';
 
 class ActionBar {
   private el: HTMLElement | null = null;
@@ -47,15 +48,20 @@ class ActionBar {
       }
       return;
     }
-    // 扩图/多角度/打光/高清放大：第二版能力
+    if (action === 'expand') {
+      // 扩图：打开弹层（选目标比例 + 原图拖放/缩放 → canvas 合成 → banana 系列模型带图补全 → 新建产出节点连右侧）
+      void outpaintPanel.open(node.id);
+      return;
+    }
+    // 多角度/打光/高清放大：第二版能力
     showToast('该能力将在后续版本开放', false);
   }
 
   sync(): void {
     if (!this.el) return;
     const node = selection.single();
-    // 结果卡只读：隐藏操作条
-    if (!node || node.type === 'image-result') {
+    // 文本节点：隐藏操作条
+    if (!node || node.type === 'text-gen') {
       this.el.classList.remove('show', 'pos-below');
       return;
     }

@@ -136,14 +136,8 @@ class LinkView {
     return del;
   }
 
-  /** 中点 + 号 → 真插入：断开原连线并在中点插入新「生成节点」（结果卡前不能插步骤） */
+  /** 中点 + 号 → 真插入：断开原连线并在中点插入新「生成节点」 */
   private _insertStep(edgeId: string): void {
-    const edge = flowState.edges.find(e => e.id === edgeId);
-    const toNode = edge ? flowState.getNode(edge.to) : undefined;
-    if (toNode && toNode.type === 'image-result') {
-      showToast('结果卡前不能插步骤', false);
-      return;
-    }
     const node = flowState.insertStep(edgeId);
     if (!node) { showToast('插入步骤失败', false); return; }
     dirty.markUpstreamChanged(node.id); // 原下游因上游变化标 stale

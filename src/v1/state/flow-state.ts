@@ -70,28 +70,49 @@ export class FlowState {
     return result;
   }
 
-  /** 结果卡归属查询：返回所有 parentId===parentId 的子节点（重跑顶掉旧结果卡用） */
+  /** 引擎产出节点归属查询：返回所有 parentId===parentId 的子节点（重跑顶掉旧产出用） */
   getChildren(parentId: string): FlowNode[] {
     return this.nodes.filter(n => n.parentId === parentId);
   }
 
   /**
-   * 删除某生成节点的全部结果卡（重跑顶掉）：逐个 removeNode（清理连线与选中），
-   * 并把被删结果卡的下游标 stale（先标后删，边仍在可 BFS 到达；仅一次 notify 由 removeNode 触发）。
+   * 清理某生成节点的全部「纯引擎产出」子节点（重跑顶掉）：
+   * 删除条件 = parentId===genId 且 出边为空 且 入边集合 == {gen→child}
+   * （即：纯引擎产出、未被手动改造/手动连线的节点）。
+   * 不满足 → 保留该子节点并标 stale（其下游也标 stale）+ toast「有手动连线的结果节点，已保留并标待重跑」。
+   * txt2img 无子节点时自然无操作。逐个 removeNode（清理连线与选中）；仅一次 notify 由 removeNode 触发。
    */
   removeChildren(parentId: string): void {
     const children = this.nodes.filter(n => n.parentId === parentId);
     if (children.length === 0) return;
     let changed = false;
+    let keptManual = false;
     children.forEach(child => {
-      // 被删结果卡的下游（用户手动连的节点）结果已不可信 → 标 stale
-      this.getAllDownstreams(child.id).forEach(n => {
-        if (n.status === 'run' || n.status === 'stale') return;
-        n.status = 'stale';
-        changed = true;
-      });
-      this.removeNode(child.id);
+      // 纯引擎产出判定：出边为空 且 入边恰为 {parent→child} 一条（未被手动连线/手动改造）
+      const outEdges = this.getEdgesFrom(child.id);
+      const inEdges = this.getEdgesTo(child.id);
+      const pureEngineOutput = outEdges.length === 0
+        && inEdges.length === 1
+        && inEdges[0].from === parentId;
+      if (pureEngineOutput) {
+        // 被删产出节点的下游（用户手动连的节点）结果已不可信 → 标 stale
+        this.getAllDownstreams(child.id).forEach(n => {
+          if (n.status === 'run' || n.status === 'stale') return;
+          n.status = 'stale';
+          changed = true;
+        });
+        this.removeNode(child.id);
+      } else {
+        // 手动改造/手动连线的产出节点：保留并标 stale（其下游也标 stale）
+        keptManual = true;
+        [child, ...this.getAllDownstreams(child.id)].forEach(n => {
+          if (n.status === 'run' || n.status === 'stale') return;
+          n.status = 'stale';
+          changed = true;
+        });
+      }
     });
+    if (keptManual) showToast('有手动连线的结果节点，已保留并标待重跑', false);
     if (changed) {
       this.updatedAt = Date.now();
       this.dirty = true;
@@ -106,8 +127,6 @@ export class FlowState {
   getReferenceImages(id: string): string[] {
     const node = this.getNode(id);
     if (!node) return [];
-    // 结果卡只读：只返回自身 refImages（恒空 → []），不展开上游
-    if (node.type === 'image-result') return [...(node.refImages || [])];
     const result: string[] = [];
     const seen = new Set<string>();
     (node.refImages || []).forEach(url => {
@@ -224,6 +243,7 @@ export class FlowState {
       error: null,
       lastRunAt: null,
       parentId: null,
+        trace: null,
       ...extra,
     };
     this.nodes.push(node);
@@ -257,7 +277,7 @@ export class FlowState {
 
     // 连线后数据流已变化：to 及其所有下游子孙的结果不可信 → 标 stale（与 removeEdge 口径一致：
     // idle/done 转 stale，run 中不覆盖，stale 保持 stale）。
-    // suppressStale=true 仅用于引擎自动建卡连线（生成节点→刚建的结果卡），避免刚 done 的卡被立即打回 stale；
+    // suppressStale=true 仅用于引擎自动建卡连线（生成节点→刚建的产出节点），避免刚 done 的节点被立即打回 stale；
     // 手动连线语义不变（仍标 stale）。
     if (!opts.suppressStale) {
       const toNode = this.getNode(to);
@@ -280,8 +300,8 @@ export class FlowState {
     if (!this.getNode(from) || !this.getNode(to)) return '节点不存在';
     if (from === to) return '不能连接自己';
     if (this.edges.some(e => e.from === from && e.to === to)) return '已有相同连线';
-    // 结果卡只读：无入端口，不能作为 to（引擎自动建卡连线走 addEdge 直连，不经 canConnect）
-    if (this.getNode(to)?.type === 'image-result') return '结果卡不能作为输入';
+    // 文本节点不接收上游图片：text-gen 不能作为连线接收端（to），但仍可作 from 喂下游 image-gen
+    if (this.getNode(to)?.type === 'text-gen') return '文本节点不能作为输入';
     if (this._wouldCycle(from, to)) return '不能形成循环';
     return null;
   }
@@ -321,9 +341,9 @@ export class FlowState {
     const to = this.getNode(edge.to);
     if (!from || !to) return null;
 
-    // 结果卡前不能插步骤（结果卡只读无入端口，canConnect 亦拒绝 to=结果卡）
-    if (to.type === 'image-result') {
-      showToast('结果卡前不能插步骤', false);
+    // 文本节点不能作为连线接收端（to）：其前方不插步骤（canConnect 亦拒绝 to=text-gen；防御旧文件残留边）
+    if (to.type === 'text-gen') {
+      showToast('文本节点前不能插步骤', false);
       return null;
     }
 
@@ -390,6 +410,7 @@ export class FlowState {
       error: n.error ?? null,
       lastRunAt: n.lastRunAt ?? null,
       parentId: typeof n.parentId === 'string' && n.parentId ? n.parentId : null,
+        trace: n.trace ?? null,
     }));
     this.edges = project.edges.map(e => ({ ...e }));
     // 打开/创建项目即视为"用过画布"：删空后不再弹首启引导卡（含打开空项目场景）

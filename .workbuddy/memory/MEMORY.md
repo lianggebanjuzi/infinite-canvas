@@ -33,3 +33,4 @@
 - **用户在别的电脑打开项目时的开场白**：先 git pull 拉最新代码 → 读 `.workbuddy/memory/` 日志 → 汇报项目状态/上次进度/待办 → 再继续干活。新电脑则先 git clone + 装依赖（pip install -r requirements.txt + npm install && npm run build）。
 - **收工固定动作**：把改动提交到 git（提交说明写人话：改了什么/为什么）→ push 到 GitHub → 在当日开发日志记一笔今天做了什么 → 告知提交号与状态。
 - 铁律：开工先 pull、收工必 push；完成一个功能就提交一次。换电脑不会丢进度，任何电脑 git log + memory 日志都是同一份历史。
+- ⚠️ **2026-08-15 用户纠偏（覆盖收工必 push 的默认）**：用户明确反感未经请求的 git 操作，原话"我没有让你上传git，你上传个毛啊"。**push（上传 GitHub）必须事先征得用户同意**；本地 commit 作为留档可做但要做完主动告知，用户不认可也可省。开工 pull 照旧。

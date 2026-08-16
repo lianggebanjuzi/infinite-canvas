@@ -53,6 +53,42 @@ export async function fetchChatModels(): Promise<Array<{ id: string; name: strin
 
 const DEFAULT_MODEL_KEY = 'icv_default_model';
 
+/** gemini / nano-banana / seedream 系模型判定（小写包含匹配）：扩图必须走 gemini_native 系（gpt-image/dall-e 忽略参考图，不能用） */
+function isGeminiFamily(text: string): boolean {
+  const t = (text || '').toLowerCase();
+  return /gemini/.test(t) || /nano[-_]?banana/.test(t) || /seedream/.test(t);
+}
+
+/**
+ * 判定完整模型 id（"provider:model" 或裸 model id）是否属于 gemini/nano-banana/seedream 系。
+ * 只检查冒号后的模型段，避免 provider id 误命中。
+ */
+export function isGeminiImageModel(modelId: string): boolean {
+  if (!modelId) return false;
+  const bare = modelId.split(':').pop() || '';
+  return isGeminiFamily(bare);
+}
+
+/** 拉取可用的扩图模型（gemini/nano-banana/seedream 系 drawing 模型；不暴露选择 UI，自动解析用） */
+export async function fetchOutpaintModels(): Promise<Array<{ id: string; name: string }>> {
+  const models = await fetchImageModels();
+  return models.filter(m => isGeminiImageModel(m.id) || isGeminiFamily(m.name));
+}
+
+/**
+ * 解析扩图模型（不暴露选择 UI，弹层打开时调用）：
+ * ① 节点当前 params.model（若属 gemini/nano-banana/seedream 系）→ ② fetchOutpaintModels() 第一个
+ * → ③ 返回 ''（调用方 toast「请先在设置中配置 Nano Banana 系列模型」并禁用确认按钮）。
+ */
+export async function resolveOutpaintModel(node: FlowNode | null | undefined): Promise<string> {
+  if (node) {
+    const cur = (node.params?.model as string | undefined) || '';
+    if (cur && isGeminiImageModel(cur)) return cur;
+  }
+  const models = await fetchOutpaintModels();
+  return models.length > 0 && models[0].id ? models[0].id : '';
+}
+
 /** 解析默认绘图模型：优先 localStorage，否则取第一个可用模型并记忆 */
 export async function resolveDefaultModel(): Promise<string> {
   const saved = localStorage.getItem(DEFAULT_MODEL_KEY);
