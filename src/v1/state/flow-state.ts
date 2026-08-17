@@ -258,6 +258,7 @@ export class FlowState {
       title: def.defaultTitle,
       params: { ...def.defaultParams },
       imageUrl: null,
+      imageOrigin: null,
       outputText: null,
       textHistory: [],
       refImages: [],

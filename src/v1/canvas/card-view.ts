@@ -10,6 +10,7 @@ import { applyCardStatus } from '../ui/status-visuals';
 import { applyTextToDownstream } from '../engine/run-engine';
 import { showToast } from '../ui/toast';
 import { assetStore } from '../asset-store';
+import { Backend } from '../api';
 
 const ICON_EXPAND = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></svg>';
 const ICON_CHECK = '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>';
@@ -107,12 +108,13 @@ class CardView {
         assetStore.unadoptByUrl(url);
         showToast('已取消采纳');
       } else {
-        assetStore.adoptByUrl(url, node.id);
+        // 采纳：展示图 URL + 原图引用一并写入资产记录（查看大图按需加载用）
+        assetStore.adoptByUrl(url, node.id, undefined, node.imageOrigin?.path);
         showToast('已采纳（自动锁定）');
       }
     } else {
       const next = !assetStore.isLockedByImageUrl(url);
-      assetStore.setLockedByUrl(url, node.id, next);
+      assetStore.setLockedByUrl(url, node.id, next, node.imageOrigin?.path);
       showToast(next ? '已锁定' : '已解锁');
     }
   }
@@ -198,12 +200,12 @@ class CardView {
     el.classList.toggle('empty', !mainSrc && !isTextGen);
     el.classList.toggle('selected', selection.isSelected(node.id));
 
-    // 查看大图
+    // 查看大图（按需加载原图：有 imageOrigin.path 时桥接取原图，失败回退缩略图）
     const act = el.querySelector('.pcard-act') as HTMLButtonElement | null;
     if (act) {
       act.onclick = (e: MouseEvent) => {
         e.stopPropagation();
-        if (mainSrc) openImageModal(mainSrc);
+        if (mainSrc) void openImageModal(mainSrc, node.imageOrigin);
       };
     }
   }
@@ -322,15 +324,49 @@ function escapeHtml(text: string): string {
     .replace(/'/g, '&#39;');
 }
 
-/** 大图查看（简单全屏浮层） */
-export function openImageModal(src: string): void {
+/**
+ * 大图查看（简单全屏浮层，图片性能优化版）：
+ * 先显示缩略图 src + loading（旧图 base64 直接显示）；
+ * 有 origin.path → Backend.loadLocalImage 按需取原图（一次性，用完即弃不常驻）；
+ * 成功替换为原图 data_url；失败/无 origin → 保持缩略图并 toast。
+ */
+export async function openImageModal(
+  src: string,
+  origin?: { path?: string; url?: string } | null,
+): Promise<void> {
   const modal = document.getElementById('img-modal') as HTMLElement | null;
   const img = document.getElementById('img-modal-img') as HTMLImageElement | null;
+  const loading = document.getElementById('img-modal-loading') as HTMLElement | null;
   if (!modal || !img) return;
+
+  // 1. 先显示缩略图（几十 KB 秒开）+ loading
   img.src = src;
   modal.classList.add('show');
+  if (loading) loading.style.display = 'flex';
+
   const close = () => modal.classList.remove('show');
   modal.onclick = close;
+
+  // 2. 无原图引用（旧节点/旧历史 base64 直显）→ 直接完成
+  const path = origin?.path;
+  if (!path) {
+    if (loading) loading.style.display = 'none';
+    return;
+  }
+
+  // 3. 按需加载原图：桥接取原图 base64，一次性替换，失败回退缩略图
+  try {
+    const res = await Backend.loadLocalImage(path);
+    if (res.status === 'success' && res.data_url) {
+      img.src = res.data_url;
+    } else {
+      showToast('原图加载失败，已显示缩略图', false);
+    }
+  } catch {
+    showToast('原图加载失败，已显示缩略图', false);
+  } finally {
+    if (loading) loading.style.display = 'none';
+  }
 }
 
 export const cardView = new CardView();

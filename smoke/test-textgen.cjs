@@ -256,23 +256,27 @@ async function main() {
   await section('T02d: chat 模型列表与绘图模型互斥', () => {
     global.pywebview.api.load_providers = async () => ({
       providers: [
-        { id: 'p1', name: '供应商一', short_name: 'S1', enabled: true, models: [
-          { id: 'draw-1', name: '绘图模型', type: 'drawing', enabled: true },
-          { id: 'chat-1', name: '对话模型A', type: 'chat', enabled: true },
-          { id: 'chat-off', name: '禁用对话', type: 'chat', enabled: false },
+        { id: 'p1', name: '供应商一', short_name: 'S1', enabled: true, keys: [
+          { id: 'key_1', name: 'key1', api_key: 'sk-1', enabled: true, models: [
+            { id: 'draw-1', name: '绘图模型', type: 'drawing', enabled: true },
+            { id: 'chat-1', name: '对话模型A', type: 'chat', enabled: true },
+            { id: 'chat-off', name: '禁用对话', type: 'chat', enabled: false },
+          ] },
         ] },
-        { id: 'p2', name: '供应商二', short_name: 'S2', enabled: false, models: [
-          { id: 'chat-2', name: '对话模型B', type: 'chat', enabled: true },
+        { id: 'p2', name: '供应商二', short_name: 'S2', enabled: false, keys: [
+          { id: 'key_1', name: 'key1', api_key: '', enabled: true, models: [
+            { id: 'chat-2', name: '对话模型B', type: 'chat', enabled: true },
+          ] },
         ] },
       ],
     });
     return Promise.all([fetchChatModels(), fetchImageModels()]).then(([chat, draw]) => {
-      check(chat.length === 1 && chat[0].id === 'p1:chat-1', `chat 列表只含 enabled chat 模型 (${JSON.stringify(chat)})`);
-      check(draw.length === 1 && draw[0].id === 'p1:draw-1', '绘图列表只含 drawing 模型');
+      check(chat.length === 1 && chat[0].id === 'p1:key_1:chat-1', `chat 列表只含 enabled chat 模型 (${JSON.stringify(chat)})`);
+      check(draw.length === 1 && draw[0].id === 'p1:key_1:draw-1', '绘图列表只含 drawing 模型');
       check(chat[0].name.includes('S1'), 'chat 模型名带 provider 前缀');
       return resolveDefaultChatModel().then(id => {
-        check(id === 'p1:chat-1', `resolveDefaultChatModel 返回第一个 chat 模型 (${id})`);
-        check(global.localStorage.getItem('icv_default_chat_model') === 'p1:chat-1', 'chat 默认模型写入 icv_default_chat_model');
+        check(id === 'p1:key_1:chat-1', `resolveDefaultChatModel 返回第一个 chat 模型 (${id})`);
+        check(global.localStorage.getItem('icv_default_chat_model') === 'p1:key_1:chat-1', 'chat 默认模型写入 icv_default_chat_model');
       });
     });
   });

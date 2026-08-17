@@ -25,6 +25,9 @@ interface HistoryItem {
   refImageUrls?: string[];
   refImageHashes?: string[];
   outputType?: string;
+  thumbnail?: string;       // 显式缩略图（新行；读侧 src=thumbnail||imageUrl 回退）
+  originalPath?: string;    // 原图本地绝对路径（查看大图按需加载用）
+  originalUrl?: string;     // file:// 引用（备用）
   text?: string; // 文本记录：无图，展示 outputText 片段
 }
 
@@ -40,6 +43,9 @@ export interface HistoryImageMeta {
   refImageUrls?: string[];
   refImageHashes?: string[];
   outputType?: string;
+  thumbnail?: string;       // 展示图=缩略图
+  originalPath?: string;    // 原图本地绝对路径
+  originalUrl?: string;     // file:// 引用（备用）
 }
 
 const ICON_CHECK = '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>';
@@ -94,7 +100,7 @@ class HistoryDrawer {
     this.mutex = fn;
   }
 
-  /** 生成图自动入列（带搜索/复现元数据） */
+  /** 生成图自动入列（带搜索/复现元数据；展示图=缩略图 + 原图引用） */
   addImage(src: string, meta: HistoryImageMeta = {}): void {
     if (!src) return;
     this.items.unshift({
@@ -110,17 +116,22 @@ class HistoryDrawer {
       refImageUrls: meta.refImageUrls,
       refImageHashes: meta.refImageHashes,
       outputType: meta.outputType,
+      thumbnail: meta.thumbnail,
+      originalPath: meta.originalPath,
+      originalUrl: meta.originalUrl,
     });
     this.render();
     if (!this.open) this.openDrawer(true);
   }
 
-  /** 载入 history.jsonl（打开项目时调用）：image 行优先 entry.imageUrl（新行），缺失回退 nodeId 解析当前节点 imageUrl */
+  /** 载入 history.jsonl（打开项目时调用）：image 行 thumbnail 优先、imageUrl 回退，缺失再回退 nodeId 解析当前节点 imageUrl */
   loadFromHistory(entries: HistoryEntry[]): void {
     const resolved: HistoryItem[] = [];
     entries.forEach(e => {
       if (e.kind === 'image') {
-        let src = typeof e.imageUrl === 'string' && e.imageUrl ? e.imageUrl : '';
+        // 双轨兼容：新行 thumbnail 优先（缩略图），旧行回退 imageUrl（原 base64，仅打开慢）
+        let src = typeof e.thumbnail === 'string' && e.thumbnail ? e.thumbnail : '';
+        if (!src) src = typeof e.imageUrl === 'string' && e.imageUrl ? e.imageUrl : '';
         if (!src) {
           const node = flowState.getNode(e.nodeId);
           src = node && node.imageUrl ? node.imageUrl : '';
@@ -139,6 +150,9 @@ class HistoryDrawer {
           refImageUrls: Array.isArray(e.refImageUrls) ? e.refImageUrls : [],
           refImageHashes: Array.isArray(e.refImageHashes) ? e.refImageHashes : [],
           outputType: e.outputType,
+          thumbnail: typeof e.thumbnail === 'string' ? e.thumbnail : undefined,
+          originalPath: typeof e.originalPath === 'string' ? e.originalPath : undefined,
+          originalUrl: typeof e.originalUrl === 'string' ? e.originalUrl : undefined,
         });
       } else {
         resolved.push({ src: '', timestamp: e.createdAt, kind: 'text', text: e.outputText || '' });
@@ -321,12 +335,15 @@ class HistoryDrawer {
     return item ? this._toEntry(item) : null;
   }
 
-  /** HistoryItem → HistoryEntry（图库复现用；会话内条目携带完整参数） */
+  /** HistoryItem → HistoryEntry（图库复现用；会话内条目携带完整参数 + 缩略图/原图引用） */
   private _toEntry(item: HistoryItem): HistoryEntry {
     return {
       kind: 'image',
       nodeId: item.nodeId || '',
       imageUrl: item.src,
+      thumbnail: item.thumbnail,
+      originalPath: item.originalPath,
+      originalUrl: item.originalUrl,
       prompt: item.prompt || '',
       model: item.model || '',
       aspectRatio: item.aspectRatio || '3:4',

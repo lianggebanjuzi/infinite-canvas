@@ -1,0 +1,108 @@
+classDiagram
+    class UnifiedAPIRouter {
+        +generate_image_async(prompt, options) dict
+        +generate_image(prompt, options) dict
+        +_save_images_to_local(parsed, save_dir) dict
+        +_resolve_drawing_model(model_str) tuple
+        +_resolve_chat_model(model_str) tuple
+        +_make_thumbnail_data_url(data_url) str|None
+    }
+    class ImageAPI {
+        +make_thumbnail_data_url(image_bytes, max_edge, quality) str|None
+        +load_local_image(file_path) dict
+        +_generate_thumbnail(image_path, max_size) str|None
+        +save_image_to_local(image_data, filename) dict
+    }
+    class BackendTaskResult {
+        +string status
+        +result: ImageGenResult
+    }
+    class ImageGenResult {
+        +boolean success
+        +string image_url  「缩略图 data URL（主视觉）」
+        +string[] images   「缩略图列表」
+        +string thumbnail  「显式缩略图（= image_url）」
+        +string[] thumbnails
+        +string original_path  「原图本地绝对路径（按需加载用）」
+        +string[] original_paths
+        +string original_url   「file:// 引用（信息性，不直接渲染）」
+        +string[] original_urls
+        +boolean saved_to_disk
+    }
+    class PollResult {
+        +boolean success
+        +string imageUrl  「展示图（缩略图；旧后端=原图 base64）」
+        +string thumbnail
+        +string originalPath
+        +string originalUrl
+        +boolean savedToDisk
+        +number code
+        +string error
+    }
+    class RunEngine {
+        +run(nodeId) Promise
+        +runOneWorker(genId, prompt, options, layout, progress, isTxt2Img, index, refs) Promise
+        +_writeBackToSelf(genId, imageUrl, origin) Promise
+        +createResultCard(genId, imageUrl, layout, overrides, trace, origin) Promise~FlowNode~
+    }
+    class FlowNode {
+        +string id
+        +string imageUrl  「展示图（缩略图）」
+        +ImageOrigin imageOrigin  「原图引用 {path, url?}」
+        +GenerationTrace trace
+        +string[] refImages
+    }
+    class ImageOrigin {
+        +string path  「原图本地绝对路径」
+        +string url   「file:// 引用（备用）」
+    }
+    class HistoryEntry {
+        +string kind
+        +string imageUrl  「旧行=原图 base64；新行=缩略图」
+        +string thumbnail
+        +string originalPath
+        +string originalUrl
+    }
+    class ImageAssetRecord {
+        +string key  「hashRef(展示图 URL)」
+        +string imageUrl  「展示图（缩略图）」
+        +string thumbnail
+        +string originalPath
+        +boolean adopted
+        +boolean locked
+    }
+    class HistoryDrawer {
+        +addImage(src, meta) void
+        +loadFromHistory(entries) void
+        +getEntryByImageUrl(url) HistoryEntry|null
+    }
+    class AssetStore {
+        +adoptByUrl(url, nodeId, meta) void
+        +setLockedByUrl(url, nodeId, locked) void
+        +getAdoptedAssets() AssetAsset[]
+    }
+    class FrontendAPI {
+        +fetchImageModels() Array~{id,name}~
+        +fetchChatModels() Array~{id,name}~
+        +resolveDefaultModel() string
+        +Backend.loadLocalImage(filePath) Promise
+    }
+    class SettingsPanel {
+        +_renderDefaultModelSelect() HTMLElement
+        +_renderKeyCard(p, k, ctx) HTMLElement
+    }
+    class CardView {
+        +updateCard(el, node) void
+        +openImageModal(src, origin) Promise
+    }
+
+    UnifiedAPIRouter ..> ImageAPI : make_thumbnail_data_url
+    UnifiedAPIRouter --> ImageGenResult : _save_images_to_local 构造
+    RunEngine --> PollResult : pollTask 返回
+    RunEngine --> FlowNode : 写 imageUrl=缩略图 + imageOrigin
+    FlowNode --> ImageOrigin : 原图引用
+    CardView ..> FrontendAPI : 查看大图 loadLocalImage
+    HistoryDrawer --> AssetStore : 角标订阅
+    AssetStore --> ImageAssetRecord : 采纳/锁定记录
+    SettingsPanel --> FrontendAPI : fetchImageModels（label 简化+去重）
+    FrontendAPI ..> HistoryEntry : 读新字段

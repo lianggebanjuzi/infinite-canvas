@@ -1,6 +1,8 @@
 // src/v1/ui/settings-panel.ts
 // 设置/供应商面板（温馨园艺风，A7）
-// 完整供应商管理：列表 / 添加 / 编辑（url·key·模型）/ 默认绘图模型 / 自定义下拉与确认弹窗
+// 完整供应商管理：列表 / 添加 / 编辑（url·provider 字段 + 多 Key 卡片）/ 默认绘图模型 / 自定义下拉与确认弹窗
+// multi-key：同一供应商（同一 api_url）下挂多个 Key，每个 Key 独立模型组；
+//            Key 级改动即时持久化（增删/改名/启停/拉取模型/模型操作），「保存」按钮只管 provider 级字段
 
 import { Backend } from '../api';
 import { showToast } from './toast';
@@ -20,6 +22,16 @@ const MODEL_TYPE_OPTIONS: SelectOption[] = [
   { value: 'drawing', label: '绘图' },
   { value: 'chat', label: '对话' },
 ];
+
+/** key 卡片回调上下文（由 _renderEditor 注入，隔离各 key 卡的持久化通道） */
+interface KeyCardCtx {
+  /** 当前编辑中的 API 地址（provider 级输入框实时值） */
+  getUrl(): string;
+  /** keys 数组变更回调（更新本地副本 + this.providers + 顶部默认模型下拉） */
+  onKeysChange(next: BackendProviderKey[]): void;
+  /** 重新渲染 key 卡片列表（增删 key 后调用） */
+  onRenderKeys(): void;
+}
 
 class SettingsPanel {
   private overlay: HTMLElement | null = null;
@@ -221,23 +233,35 @@ class SettingsPanel {
     }
   }
 
-  /** 顶部「默认绘图模型」自定义下拉，数据源 = 所有 enabled 供应商的 drawing 模型 */
+  /** 顶部「默认绘图模型」自定义下拉：数据源 = 所有 enabled 供应商 × enabled key 的 drawing 模型（三段 id）；
+   *  label 简化为「供应商短名 - 模型名」（去 key 名）+ 跨 key 重名去重（保留第一个 enabled key 条目） */
   private _renderDefaultModelSelect(): HTMLElement {
     this.defaultSelect?.destroy();
 
     const drawing: SelectOption[] = [];
+    const seen = new Set<string>();
     this.providers.forEach(p => {
       if (!p.enabled) return;
-      (p.models || []).forEach(m => {
-        if (m.enabled === false || m.type !== 'drawing') return;
-        drawing.push({ value: `${p.id}:${m.id}`, label: `${p.short_name || p.name} - ${m.name}` });
+      const displayName = p.short_name || p.name;
+      (p.keys || []).forEach(k => {
+        if (k.enabled === false) return;
+        (k.models || []).forEach(m => {
+          if (m.enabled === false || m.type !== 'drawing') return;
+          const dedupeKey = `${p.id}:${m.id}`;
+          if (seen.has(dedupeKey)) return; // 跨 key 重名去重：保留第一个 enabled key 条目
+          seen.add(dedupeKey);
+          // 三段式完整 id + label 去 key 名（前端不暴露 Key 概念）
+          drawing.push({ value: `${p.id}:${k.id}:${m.id}`, label: `${displayName} - ${m.name}` });
+        });
       });
     });
 
+    // 宽容回显：旧两段 id（provider:model）也能在当前列表中找到同名模型并回显三段值
     const current = localStorage.getItem(DEFAULT_MODEL_KEY) || '';
+    const currentValue = this._matchDefaultOption(drawing, current);
     this.defaultSelect = createSelect({
       options: drawing,
-      value: current,
+      value: currentValue,
       placeholder: '暂无可用绘图模型',
       onChange: (v) => {
         localStorage.setItem(DEFAULT_MODEL_KEY, v);
@@ -268,14 +292,29 @@ class SettingsPanel {
     }
   }
 
-  /** 紧凑卡片视图：名称 / 简称·类型 / 模型数量 / 启用开关 / 编辑 / 删除 */
+  /** 默认模型下拉宽容回显：三段命中；旧两段 id 在 options 中找同名模型并返回三段 id；未命中返回 '' */
+  private _matchDefaultOption(options: SelectOption[], saved: string): string {
+    if (!saved) return '';
+    if (options.some(o => o.value === saved)) return saved;
+    const parts = saved.split(':');
+    if (parts.length === 2) {
+      const [pid, mid] = parts;
+      const hit = options.find(o => o.value.startsWith(`${pid}:`) && o.value.endsWith(`:${mid}`));
+      if (hit) return hit.value;
+    }
+    return '';
+  }
+
+  /** 紧凑卡片视图：名称 / 简称·类型 / 模型数量（跨 key 汇总）/ 启用开关 / 编辑 / 删除 */
   private _renderCard(p: BackendProvider): HTMLElement {
     const card = document.createElement('div');
     card.className = 'provider-card';
 
-    const models = p.models || [];
-    const chatCount = models.filter(m => (m.type || 'chat') === 'chat').length;
-    const drawCount = models.filter(m => m.type === 'drawing').length;
+    // 模型计数跨 key 汇总（multi-key：每个 key 的 models 相加）
+    const keys = p.keys || [];
+    const allModels = keys.reduce((acc, k) => acc.concat(k.models || []), [] as BackendModel[]);
+    const chatCount = allModels.filter(m => (m.type || 'chat') === 'chat').length;
+    const drawCount = allModels.filter(m => m.type === 'drawing').length;
 
     card.innerHTML = `
       <div class="provider-card-head">
@@ -284,7 +323,7 @@ class SettingsPanel {
           <div class="provider-type">${escapeHtml(p.short_name || '')} · ${escapeHtml(typeLabel(p.type))}</div>
         </div>
         <div class="provider-actions">
-          <span class="provider-counts">对话 ${chatCount} · 绘图 ${drawCount}</span>
+          <span class="provider-counts">对话 ${chatCount} · 绘图 ${drawCount}${keys.length ? ` · ${keys.length} Key` : ''}</span>
           <button class="switch ${p.enabled ? 'on' : ''}" data-id="${escapeHtml(p.id)}" title="启用/停用"></button>
           <button class="mini-btn" data-edit="${escapeHtml(p.id)}">编辑</button>
           <button class="mini-btn danger" data-del="${escapeHtml(p.id)}">删除</button>
@@ -304,15 +343,14 @@ class SettingsPanel {
     return card;
   }
 
-  /** 供应商编辑详情区（列表内展开） */
+  /** 供应商编辑详情区（provider 级字段 + 多 Key 卡片列表；key 级改动即时持久化） */
   private _renderEditor(p: BackendProvider): HTMLElement {
     const card = document.createElement('div');
     card.className = 'provider-card provider-editor';
 
-    // 模型本地副本（模型改动即时保存；字段改动由「保存」统一持久化）
-    let models: BackendModel[] = (p.models || []).map(m => ({ ...m }));
+    // Key 本地副本（key 级改动即时持久化；「保存」按钮只管 provider 级字段）
+    let keys: BackendProviderKey[] = (p.keys || []).map(k => ({ ...k, models: (k.models || []).map(m => ({ ...m })) }));
     let proxyOn = p.use_proxy !== false;
-    let keyVisible = false;
     const providerId = p.id;
 
     // ── 头部 ──
@@ -329,7 +367,7 @@ class SettingsPanel {
     head.appendChild(backBtn);
     card.appendChild(head);
 
-    // ── 简称 ──
+    // ── 简称（provider 级） ──
     const shortField = document.createElement('div');
     shortField.className = 'settings-field';
     shortField.innerHTML = '<span class="settings-label">简称</span>';
@@ -340,7 +378,7 @@ class SettingsPanel {
     shortField.appendChild(shortInput);
     card.appendChild(shortField);
 
-    // ── API 地址 ──
+    // ── API 地址（provider 级） ──
     const urlField = document.createElement('div');
     urlField.className = 'settings-field';
     urlField.innerHTML = '<span class="settings-label">API 地址</span>';
@@ -372,38 +410,7 @@ class SettingsPanel {
     urlField.appendChild(urlBody);
     card.appendChild(urlField);
 
-    // ── API 密钥 ──
-    const keyField = document.createElement('div');
-    keyField.className = 'settings-field';
-    keyField.innerHTML = '<span class="settings-label">API 密钥</span>';
-    const keyBody = document.createElement('div');
-    keyBody.className = 'settings-field-body inline';
-    const keyInput = document.createElement('input');
-    keyInput.className = 'settings-input';
-    keyInput.type = 'password';
-    keyInput.value = p.api_key || '';
-    keyInput.placeholder = 'sk-...';
-    keyInput.spellcheck = false;
-    const eyeBtn = document.createElement('button');
-    eyeBtn.className = 'mini-btn';
-    eyeBtn.textContent = '显示';
-    eyeBtn.title = '显示/隐藏密钥';
-    eyeBtn.addEventListener('click', () => {
-      keyVisible = !keyVisible;
-      keyInput.type = keyVisible ? 'text' : 'password';
-      eyeBtn.textContent = keyVisible ? '隐藏' : '显示';
-    });
-    const testBtn = document.createElement('button');
-    testBtn.className = 'mini-btn';
-    testBtn.textContent = '测试连接';
-    testBtn.addEventListener('click', () => void testConnection());
-    keyBody.appendChild(keyInput);
-    keyBody.appendChild(eyeBtn);
-    keyBody.appendChild(testBtn);
-    keyField.appendChild(keyBody);
-    card.appendChild(keyField);
-
-    // ── 使用代理 ──
+    // ── 使用代理（provider 级） ──
     const proxyField = document.createElement('div');
     proxyField.className = 'settings-field';
     proxyField.innerHTML = '<span class="settings-label">使用代理</span>';
@@ -424,14 +431,167 @@ class SettingsPanel {
     proxyField.appendChild(proxyBody);
     card.appendChild(proxyField);
 
-    // ── 模型管理 ──
+    // ── Key 管理区（multi-key；文案弱化为「密钥组」，Key 概念收敛到设置面板） ──
+    const keysSection = document.createElement('div');
+    keysSection.className = 'keys-section';
+    const keysHead = document.createElement('div');
+    keysHead.className = 'keys-section-head';
+    const keysLabel = document.createElement('span');
+    keysLabel.className = 'settings-label';
+    keysLabel.textContent = '密钥组管理（每个密钥组独立模型组）';
+    const addKeyBtn = document.createElement('button');
+    addKeyBtn.className = 'mini-btn';
+    addKeyBtn.textContent = '添加密钥组';
+    addKeyBtn.addEventListener('click', () => void this._addKey(providerId, syncKeys, renderKeys));
+    keysHead.appendChild(keysLabel);
+    keysHead.appendChild(addKeyBtn);
+    keysSection.appendChild(keysHead);
+
+    const keysWrap = document.createElement('div');
+    keysWrap.className = 'keys-list';
+    keysSection.appendChild(keysWrap);
+    card.appendChild(keysSection);
+
+    // ── 底部操作（保存 = provider 级字段：简称/URL/代理） ──
+    const actions = document.createElement('div');
+    actions.className = 'provider-editor-actions';
+    const saveBtn = document.createElement('button');
+    saveBtn.className = 'btn-secondary';
+    saveBtn.textContent = '保存';
+    saveBtn.addEventListener('click', () => void saveFields());
+    const cancelBtn = document.createElement('button');
+    cancelBtn.className = 'btn-ghost';
+    cancelBtn.textContent = '关闭';
+    cancelBtn.addEventListener('click', () => { this.editingId = null; this._render(); });
+    actions.appendChild(cancelBtn);
+    actions.appendChild(saveBtn);
+    card.appendChild(actions);
+
+    // ── 内部函数 ──
+
+    /** keys 数组变更：更新本地副本 + this.providers + 顶部默认模型下拉 */
+    const syncKeys = (next: BackendProviderKey[]): void => {
+      keys = next;
+      const provider = this.providers.find(x => x.id === providerId);
+      if (provider) provider.keys = next;
+      this._refreshDefaultModelSelect();
+    };
+
+    /** 重渲染 key 卡片列表（增删 key 后调用，保留 provider 级字段输入） */
+    const renderKeys = (): void => {
+      keysWrap.innerHTML = '';
+      if (keys.length === 0) {
+        const empty = document.createElement('div');
+        empty.className = 'key-empty';
+        empty.textContent = '暂无密钥组，点击「添加密钥组」创建';
+        keysWrap.appendChild(empty);
+        return;
+      }
+      keys.forEach(k => keysWrap.appendChild(this._renderKeyCard(p, k, {
+        getUrl: () => urlInput.value.trim(),
+        onKeysChange: syncKeys,
+        onRenderKeys: renderKeys,
+      })));
+    };
+
+    const saveFields = async (): Promise<void> => {
+      try {
+        const res = await Backend.updateProvider(providerId, {
+          short_name: shortInput.value.trim(),
+          api_url: urlInput.value.trim(),
+          use_proxy: proxyOn,
+        });
+        if (res.status === 'success') showToast('已保存');
+        else showToast(res.message || '保存失败', false);
+      } catch (e) {
+        showToast('保存失败：' + (e as Error).message, false);
+      }
+    };
+
+    renderKeys();
+    return card;
+  }
+
+  /** 单张 key 卡片：名称/密钥/启停/拉取模型/测试连接/模型管理/删除（key 级改动即时持久化） */
+  private _renderKeyCard(p: BackendProvider, k: BackendProviderKey, ctx: KeyCardCtx): HTMLElement {
+    const card = document.createElement('div');
+    card.className = 'key-card' + (k.enabled === false ? ' disabled' : '');
+    const providerId = p.id;
+    const keyId = k.id;
+    let models: BackendModel[] = (k.models || []).map(m => ({ ...m }));
+    let keyVisible = false;
+
+    // ── 头部：key 名输入 + 启停 + 删除 ──
+    const head = document.createElement('div');
+    head.className = 'key-card-head';
+    const nameInput = document.createElement('input');
+    nameInput.className = 'key-name-input';
+    nameInput.value = k.name || '';
+    nameInput.placeholder = '密钥组名称';
+    nameInput.spellcheck = false;
+    nameInput.addEventListener('change', () => {
+      void persistKey({ name: nameInput.value.trim() || nameInput.value });
+    });
+    const keySwitch = document.createElement('button');
+    keySwitch.className = 'switch' + (k.enabled !== false ? ' on' : '');
+    keySwitch.title = '启用/停用密钥组';
+    keySwitch.addEventListener('click', () => {
+      const nextEnabled = k.enabled === false;
+      keySwitch.classList.toggle('on', nextEnabled);
+      card.classList.toggle('disabled', !nextEnabled);
+      void persistKey({ enabled: nextEnabled });
+    });
+    const delBtn = document.createElement('button');
+    delBtn.className = 'mini-btn danger';
+    delBtn.textContent = '删除';
+    delBtn.addEventListener('click', () => void deleteKey());
+    head.appendChild(nameInput);
+    head.appendChild(keySwitch);
+    head.appendChild(delBtn);
+    card.appendChild(head);
+
+    // ── 密钥字段（key 级） ──
+    const keyField = document.createElement('div');
+    keyField.className = 'settings-field';
+    keyField.innerHTML = '<span class="settings-label">API 密钥</span>';
+    const keyBody = document.createElement('div');
+    keyBody.className = 'settings-field-body inline';
+    const keyInput = document.createElement('input');
+    keyInput.className = 'settings-input';
+    keyInput.type = 'password';
+    keyInput.value = k.api_key || '';
+    keyInput.placeholder = 'sk-...';
+    keyInput.spellcheck = false;
+    keyInput.addEventListener('change', () => {
+      void persistKey({ api_key: keyInput.value });
+    });
+    const eyeBtn = document.createElement('button');
+    eyeBtn.className = 'mini-btn';
+    eyeBtn.textContent = '显示';
+    eyeBtn.title = '显示/隐藏密钥';
+    eyeBtn.addEventListener('click', () => {
+      keyVisible = !keyVisible;
+      keyInput.type = keyVisible ? 'text' : 'password';
+      eyeBtn.textContent = keyVisible ? '隐藏' : '显示';
+    });
+    const testBtn = document.createElement('button');
+    testBtn.className = 'mini-btn';
+    testBtn.textContent = '测试连接';
+    testBtn.addEventListener('click', () => void testConnection());
+    keyBody.appendChild(keyInput);
+    keyBody.appendChild(eyeBtn);
+    keyBody.appendChild(testBtn);
+    keyField.appendChild(keyBody);
+    card.appendChild(keyField);
+
+    // ── 模型管理（key 级） ──
     const modelSection = document.createElement('div');
     modelSection.className = 'model-section';
     const modelHead = document.createElement('div');
     modelHead.className = 'model-section-head';
     const modelLabel = document.createElement('span');
     modelLabel.className = 'settings-label';
-    modelLabel.textContent = '模型管理';
+    modelLabel.textContent = '模型管理'; // 简化：不带 key 名（前端不暴露 Key 概念）
     const fetchBtn = document.createElement('button');
     fetchBtn.className = 'mini-btn';
     fetchBtn.textContent = '拉取模型';
@@ -472,22 +632,22 @@ class SettingsPanel {
     modelSection.appendChild(addRow);
     card.appendChild(modelSection);
 
-    // ── 底部操作 ──
-    const actions = document.createElement('div');
-    actions.className = 'provider-editor-actions';
-    const saveBtn = document.createElement('button');
-    saveBtn.className = 'btn-secondary';
-    saveBtn.textContent = '保存';
-    saveBtn.addEventListener('click', () => void saveFields());
-    const cancelBtn = document.createElement('button');
-    cancelBtn.className = 'btn-ghost';
-    cancelBtn.textContent = '关闭';
-    cancelBtn.addEventListener('click', () => { this.editingId = null; this._render(); });
-    actions.appendChild(cancelBtn);
-    actions.appendChild(saveBtn);
-    card.appendChild(actions);
-
     // ── 内部函数 ──
+
+    /** 即时持久化 key 字段（成功后同步本地/供应商副本 + 顶部默认模型下拉） */
+    const persistKey = async (updates: Record<string, unknown>): Promise<void> => {
+      try {
+        const res = await Backend.updateKey(providerId, keyId, updates);
+        if (res.status === 'success') {
+          if (res.keys) ctx.onKeysChange(res.keys);
+          showToast('已保存');
+        } else {
+          showToast(res.message || '保存失败', false);
+        }
+      } catch (e) {
+        showToast('保存失败：' + (e as Error).message, false);
+      }
+    };
 
     const renderModelRows = (): void => {
       modelList.innerHTML = '';
@@ -537,45 +697,35 @@ class SettingsPanel {
       return row;
     };
 
-    const syncProviderModels = (next: BackendModel[]): void => {
+    /** 模型列表变化后同步本地 + 供应商副本 + 顶部默认模型下拉 */
+    const syncModels = (next: BackendModel[]): void => {
+      models = next;
       const provider = this.providers.find(x => x.id === providerId);
-      if (provider) provider.models = next;
+      if (provider) {
+        const key = (provider.keys || []).find(x => x.id === keyId);
+        if (key) key.models = next;
+      }
       this._refreshDefaultModelSelect();
     };
 
     const persistModels = async (next: BackendModel[]): Promise<void> => {
       try {
-        const res = await Backend.updateProvider(providerId, { models: next });
+        const res = await Backend.updateKey(providerId, keyId, { models: next });
         if (res.status === 'success') {
-          models = next;
-          syncProviderModels(next);
+          if (res.keys) ctx.onKeysChange(res.keys);
+          syncModels(next);
           renderModelRows();
           showToast('已保存');
         } else {
-          showToast('保存失败', false);
+          showToast(res.message || '保存失败', false);
         }
       } catch (e) {
         showToast('保存失败：' + (e as Error).message, false);
       }
     };
 
-    const saveFields = async (): Promise<void> => {
-      try {
-        const res = await Backend.updateProvider(providerId, {
-          short_name: shortInput.value.trim(),
-          api_url: urlInput.value.trim(),
-          api_key: keyInput.value,
-          use_proxy: proxyOn,
-        });
-        if (res.status === 'success') showToast('已保存');
-        else showToast('保存失败', false);
-      } catch (e) {
-        showToast('保存失败：' + (e as Error).message, false);
-      }
-    };
-
     const testConnection = async (): Promise<void> => {
-      const url = urlInput.value.trim();
+      const url = ctx.getUrl();
       const key = keyInput.value;
       if (!url) { showToast('请先填写 API 地址', false); return; }
       if (!key) { showToast('请先填写 API 密钥', false); return; }
@@ -589,24 +739,17 @@ class SettingsPanel {
     };
 
     const fetchModels = async (): Promise<void> => {
-      const url = urlInput.value.trim();
+      const url = ctx.getUrl();
       const key = keyInput.value;
       if (!url || !key) { showToast('请先填写 API 地址与密钥', false); return; }
       try {
-        // 先保存当前 url/key（复用 fetchDrawingModels 的姿势）
-        await Backend.updateProvider(providerId, {
-          short_name: shortInput.value.trim(),
-          api_url: url,
-          api_key: key,
-          use_proxy: proxyOn,
-        });
         const res = await Backend.fetchModels(url, key);
         if (res.status !== 'success' || !res.models) {
           showToast(res.message || '拉取模型失败', false);
           return;
         }
         // 合并逻辑：按后端返回的 type 字段分类合并（chat 归 chat、drawing 归 drawing），
-        // 不再把拉回结果无条件标 drawing。同 ID 保留旧 enabled 状态；旧列表里拉回未出现的模型保留（含手动添加）。
+        // 同 ID 保留旧 enabled 状态；旧列表里拉回未出现的模型保留（含手动添加）。
         const existingMap: Record<string, BackendModel> = {};
         models.forEach(m => { existingMap[m.id] = m; });
 
@@ -630,14 +773,14 @@ class SettingsPanel {
         });
 
         const merged: BackendModel[] = [...Object.values(chatById), ...Object.values(drawingById)];
-        const upd = await Backend.updateProvider(providerId, { models: merged });
+        const upd = await Backend.updateKey(providerId, keyId, { models: merged });
         if (upd.status === 'success') {
-          models = merged;
-          syncProviderModels(merged);
+          if (upd.keys) ctx.onKeysChange(upd.keys);
+          syncModels(merged);
           renderModelRows();
           showToast(`已拉取 ${Object.keys(chatById).length} 个对话模型、${Object.keys(drawingById).length} 个绘图模型`);
         } else {
-          showToast('模型保存失败', false);
+          showToast(upd.message || '模型保存失败', false);
         }
       } catch (e) {
         showToast('拉取失败：' + (e as Error).message, false);
@@ -673,11 +816,34 @@ class SettingsPanel {
       });
       if (!ok) return;
       try {
-        const res = await Backend.removeModel(providerId, modelId);
+        const res = await Backend.removeModel(providerId, keyId, modelId);
         if (res.status === 'success') {
           models = models.filter(m => m.id !== modelId);
-          syncProviderModels(models);
+          syncModels(models);
           renderModelRows();
+          showToast('已删除');
+        } else {
+          showToast(res.message || '删除失败', false);
+        }
+      } catch (e) {
+        showToast('删除失败：' + (e as Error).message, false);
+      }
+    };
+
+    const deleteKey = async (): Promise<void> => {
+      const ok = await confirmDialog({
+        title: '删除密钥组',
+        message: `确定删除密钥组「${nameInput.value || keyId}」？该密钥组下的模型将失效，已引用其模型的节点需重新选择模型。`,
+        confirmText: '删除',
+        cancelText: '取消',
+        danger: true,
+      });
+      if (!ok) return;
+      try {
+        const res = await Backend.deleteKey(providerId, keyId);
+        if (res.status === 'success') {
+          if (res.keys) ctx.onKeysChange(res.keys);
+          ctx.onRenderKeys();
           showToast('已删除');
         } else {
           showToast(res.message || '删除失败', false);
@@ -689,6 +855,22 @@ class SettingsPanel {
 
     renderModelRows();
     return card;
+  }
+
+  /** 添加密钥组（后端生成 key_${uuid} + 默认名 keyN），成功后重渲染 key 列表 */
+  private async _addKey(providerId: string, onKeysChange: (next: BackendProviderKey[]) => void, onRenderKeys: () => void): Promise<void> {
+    try {
+      const res = await Backend.addKey(providerId);
+      if (res.status === 'success' && res.keys) {
+        onKeysChange(res.keys);
+        onRenderKeys();
+        showToast('已添加密钥组');
+      } else {
+        showToast(res.message || '添加失败', false);
+      }
+    } catch (e) {
+      showToast('添加失败：' + (e as Error).message, false);
+    }
   }
 
   private async _toggleProvider(id: string, enabled: boolean): Promise<void> {

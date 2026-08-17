@@ -120,8 +120,8 @@ class Interactions {
       if (!cardEl) return;
       const node = flowState.getNode(cardEl.dataset.nodeId || '');
       if (!node) return;
-      // 有图 → 查看大图；空图片卡（无输出图且无参考图，非文本卡）双击 → 弹文件选择器加载参考图
-      if (node.imageUrl) { openImageModal(node.imageUrl); return; }
+      // 有图 → 查看大图（按需加载原图：带 imageOrigin 路径）；空图片卡（无输出图且无参考图，非文本卡）双击 → 弹文件选择器加载参考图
+      if (node.imageUrl) { void openImageModal(node.imageUrl, node.imageOrigin); return; }
       if (node.type !== 'text-gen' && (!node.refImages || node.refImages.length === 0)) {
         this.openFilePickerForRef(node.id);
       }

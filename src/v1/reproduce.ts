@@ -121,14 +121,26 @@ class ReproduceService {
     if (!model) return true;
     try {
       const models = await fetchImageModels();
-      if (models.length > 0 && !models.some(m => m.id === model)) {
-        showToast('模型不可用，已保留原参数', false);
-        return false;
+      if (models.length > 0) {
+        // multi-key：完整 id 是三段（provider:key:model）；旧项目 trace 可能是两段（provider:model），宽容匹配
+        const available = models.some(m => m.id === model) || this._tolerantMatch(models, model);
+        if (!available) {
+          showToast('模型不可用，已保留原参数', false);
+          return false;
+        }
       }
     } catch {
       // 拉取失败不阻断
     }
     return true;
+  }
+
+  /** 旧两段 id（provider:model）宽容匹配：在已过滤模型中找同名模型（与 api.ts 惰性重写同语义） */
+  private _tolerantMatch(models: Array<{ id: string }>, saved: string): boolean {
+    const parts = saved.split(':');
+    if (parts.length !== 2) return false;
+    const [pid, mid] = parts;
+    return models.some(m => m.id.startsWith(`${pid}:`) && m.id.endsWith(`:${mid}`));
   }
 
   /** 从 trace 配方创建复现节点（image-gen 独立节点，modelType 强制 draw；参数 = trace） */

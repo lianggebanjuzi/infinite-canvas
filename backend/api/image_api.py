@@ -11,6 +11,27 @@ from datetime import datetime
 from backend.api.gemini_compat import resolve_image_api_base
 
 
+def make_thumbnail_data_url(image_bytes: bytes, max_edge: int = 1024, quality: int = 85) -> str | None:
+    """bytes → JPEG q85 / 最长边 max_edge 缩略图 base64 data URL；失败返回 None（调用方回退原图）。
+
+    - 同一原图确定性生成 → 同一 JPEG 字节 → 资产指纹 hashRef(展示图 URL) 稳定（跨会话可复现）。
+    - 主生成链路（unified_api._save_images_to_local）逐图调用；任何异常静默返回 None，不阻断出图。
+    """
+    try:
+        import io
+        from PIL import Image
+
+        img = Image.open(io.BytesIO(image_bytes))
+        img.thumbnail((max_edge, max_edge), Image.Resampling.LANCZOS)
+        buf = io.BytesIO()
+        img.convert('RGB').save(buf, 'JPEG', quality=quality, optimize=True)
+        b64 = base64.b64encode(buf.getvalue()).decode('utf-8')
+        return f"data:image/jpeg;base64,{b64}"
+    except Exception as e:
+        print(f"生成缩略图失败: {e}")
+        return None
+
+
 class ImageAPI:
 
     def __init__(self, settings_api, unified_api=None):
@@ -238,7 +259,11 @@ class ImageAPI:
                 return {"success": False, "error": f"未找到供应商: {provider_id}"}
 
             api_url = provider.get('api_url', '').rstrip('/')
+            # multi-key：顶层 api_key 已迁移进 keys[0]，兼容读 keys[0]（旧顶层字段作为兜底）
             api_key = provider.get('api_key', '')
+            if not api_key:
+                keys = provider.get('keys') or []
+                api_key = keys[0].get('api_key', '') if keys else ''
             if ',' in api_key:
                 api_key = api_key.split(',')[0].strip()
 

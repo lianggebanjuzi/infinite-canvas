@@ -305,7 +305,7 @@ async function main() {
     reset();
     // fetchImageModels 走 utils/api → pywebview.api.load_providers（Backend 层无此方法，须桩在 pywebview）
     global.pywebview.api.load_providers = async () => ({
-      providers: [{ id: 'p', enabled: true, short_name: 'p', models: [{ id: 'm1', type: 'drawing', enabled: true }] }],
+      providers: [{ id: 'p', enabled: true, short_name: 'p', keys: [{ id: 'key_1', name: 'key1', api_key: '', enabled: true, models: [{ id: 'm1', type: 'drawing', enabled: true }] }] }],
     });
     const ok1 = await reproduceService.checkModelAvailable('p:m1');
     check(ok1 === true, '可用模型返回 true');

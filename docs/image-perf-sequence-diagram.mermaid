@@ -1,0 +1,54 @@
+sequenceDiagram
+    autonumber
+    actor U as 用户
+    participant RE as RunEngine
+    participant PO as Poller
+    participant PV as pywebview.api (main.py)
+    participant UR as UnifiedAPIRouter
+    participant IA as ImageAPI(缩略图工具)
+    participant FS as 本地磁盘
+    participant CV as CardView/img-modal
+    participant BA as Backend(loadLocalImage)
+    participant SP as SettingsPanel
+    participant API as FrontendAPI(fetchImageModels)
+    participant PA as ProviderAPI
+
+    U->>RE: 运行生成节点
+    RE->>PV: Backend.generateImage(prompt, options)
+    PV->>UR: generate_image_async(prompt, options)
+    UR-->>RE: {success, task_id}
+    RE->>PO: pollTask(task_id) 轮询
+    PO->>PV: get_task_result(task_id)
+
+    Note over UR: 后台线程 generate_image()
+    UR->>UR: 解析模型 → 调上游 → _parse_image_response
+    UR->>UR: _save_images_to_local(parsed)
+    UR->>FS: 逐图保存原图（原目录/配置目录/tempfile）
+    UR->>IA: make_thumbnail_data_url(bytes, 1024, 85)
+    IA-->>UR: data:image/jpeg;base64,...（几十 KB）
+    UR-->>PV: {success, image_url=缩略图, thumbnail, original_path, saved_to_disk}
+
+    PO-->>RE: {success, imageUrl=缩略图, originalPath, savedToDisk}
+    RE->>RE: _writeBackToSelf / createResultCard
+    RE->>RE: node.imageUrl=缩略图, node.imageOrigin={path: originalPath}
+    RE->>CV: flowState.notify() → card 重建（主视觉=缩略图）
+
+    U->>CV: 点击卡片「查看大图」（缩略图已显示 + loading）
+    CV->>BA: Backend.loadLocalImage(node.imageOrigin.path)
+    BA->>PV: load_local_image(file_path)
+    PV->>FS: 读原图文件
+    PV-->>CV: {status:success, data_url: 原图 base64}
+    CV->>CV: img.src = 原图 data_url（一次性，用完即弃不常驻）
+    Note over CV: 失败 → 回退缩略图放大 + toast「原图加载失败」
+    CV-->>U: 大图展示
+
+    Note over U,CV: 多 Key 合并展示（label 简化 + 重名去重）
+    U->>SP: 打开节点模型列表 / 设置默认模型下拉
+    SP->>API: fetchImageModels()
+    API->>PV: load_providers()
+    PV->>PA: load_providers()（读时归一化 keys[]）
+    PA-->>API: providers（enabled provider → enabled key → enabled drawing model）
+    API->>API: 三层遍历：id=三段式；label=`${短名} - ${模型名}`（去 key 名）
+    API->>API: 去重：`${p.id}:${m.id}` 已见 → 跳过（保留第一个 enabled key 条目）
+    API-->>SP: [{id: 'p:k1:m', name: 'flux - Nano Banana Pro'}, ...]
+    U->>SP: 选择模型 → params.model=三段 id（后端路由零改动）

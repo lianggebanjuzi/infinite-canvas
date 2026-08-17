@@ -579,6 +579,11 @@ body { font-family: var(--font); background: var(--bg-app); color: var(--text-1)
 }
 .img-modal.show { display:flex; }
 .img-modal img { max-width:88vw; max-height:86vh; border-radius: var(--r-md); box-shadow: var(--shadow-bar); cursor:default; }
+.img-modal-loading {
+  position:absolute; top:50%; left:50%; transform:translate(-50%,-50%);
+  padding:8px 16px; border-radius: var(--r-md); background: rgba(20,18,15,.78);
+  color:#fff; font-size:12px; letter-spacing:.5px; pointer-events:none;
+}
 
 /* ═══════════ 扩图弹层（image-gen 悬浮「扩图」入口） ═══════════ */
 .outpaint-panel {
@@ -738,6 +743,27 @@ body { font-family: var(--font); background: var(--bg-app); color: var(--text-1)
 /* 卡片信息区 */
 .provider-card-info { flex:1; min-width:0; }
 .provider-counts { font-size:11px; color: var(--text-3); white-space:nowrap; }
+
+/* ═══════════ 多 Key 管理（multi-key：每个 Key 独立模型组） ═══════════ */
+.keys-section { margin-top:4px; }
+.keys-section-head { display:flex; align-items:center; gap:10px; margin-bottom:8px; }
+.keys-section-head .settings-label { flex:1; font-size:12px; color: var(--text-2); }
+.keys-list { display:flex; flex-direction:column; gap:10px; margin-bottom:10px; }
+.key-card {
+  border:1px solid var(--border-soft); border-radius: var(--r-md); padding:10px 12px;
+  background: var(--bg-app); transition: border-color .15s, opacity .15s;
+}
+.key-card:hover { border-color: var(--border-strong); }
+.key-card.disabled { opacity:.72; }
+.key-card-head { display:flex; align-items:center; gap:8px; margin-bottom:8px; }
+.key-name-input {
+  flex:1; min-width:0; padding:6px 10px; border:1px solid var(--border-strong);
+  border-radius: var(--r-sm); background: var(--bg-app); color: var(--text-1);
+  font-family:var(--font); font-size:12.5px; outline:none;
+}
+.key-name-input:focus { border-color: var(--accent); }
+.key-card .settings-field { margin-bottom:10px; }
+.key-empty { padding:14px 0; text-align:center; color: var(--text-3); font-size:12px; }
 
 /* 通用操作按钮 */
 .btn-secondary {

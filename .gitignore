@@ -46,3 +46,4 @@ tsc-errors*.txt
 .icv-smoke/
 # QA 集成编译产物（tsconfig.qa-main.json 输出）
 .icv-main/
+.qa-verify/_filetest/

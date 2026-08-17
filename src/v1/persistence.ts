@@ -39,6 +39,17 @@ function normalizeTextHistory(raw: unknown): TextGenHistoryItem[] {
  * - text-gen：params 归一 { instruction, model }（instruction 缺省置空，不预填），outputText/textHistory 归一（3.2 旧文件缺字段时补默认值）。
  * 连线 / 标题 / 参数保留。
  */
+
+/** 原图引用归一：缺省/非法 → null（旧项目无 imageOrigin 双轨兼容；有则 {path, url?}） */
+function normalizeImageOrigin(raw: unknown): ImageOrigin | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const o = raw as { path?: unknown; url?: unknown };
+  const path = typeof o.path === 'string' && o.path ? o.path : '';
+  if (!path) return null;
+  const url = typeof o.url === 'string' && o.url ? o.url : undefined;
+  return { path, url };
+}
+
 function migrateNode(raw: unknown): FlowNode | null {
   if (!raw || typeof raw !== 'object') return null;
   const r = raw as Record<string, unknown>;
@@ -64,6 +75,7 @@ function migrateNode(raw: unknown): FlowNode | null {
       title: typeof r.title === 'string' ? r.title : '生成结果',
       params: { prompt: '', model: '', aspectRatio: '3:4', resolution: '2k', count: 1, ...rawParams },
       imageUrl: typeof r.imageUrl === 'string' ? r.imageUrl : null,
+      imageOrigin: normalizeImageOrigin(r.imageOrigin),
       outputText: null,
       textHistory: [],
       refImages: [],
@@ -87,6 +99,7 @@ function migrateNode(raw: unknown): FlowNode | null {
       // instruction 缺省置空（不预填 DEFAULT_INSTRUCTION；旧文件已有值由 rawParams 覆盖保留）
       params: { instruction: '', model: '', ...rawParams },
       imageUrl: null,
+      imageOrigin: null,
       outputText: typeof r.outputText === 'string' ? r.outputText : null,
       textHistory: normalizeTextHistory(r.textHistory),
       refImages: Array.isArray(r.refImages)
@@ -109,6 +122,7 @@ function migrateNode(raw: unknown): FlowNode | null {
     title: typeof r.title === 'string' ? r.title : '图片生成',
     params: { prompt: '', model: '', aspectRatio: '3:4', resolution: '2k', count: 1, ...rawParams },
     imageUrl: typeof r.imageUrl === 'string' ? r.imageUrl : null,
+    imageOrigin: normalizeImageOrigin(r.imageOrigin),
     outputText: null,
     textHistory: [],
     refImages: [],

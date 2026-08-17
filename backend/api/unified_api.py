@@ -26,6 +26,7 @@ from backend.api.errors import (
     UpstreamError, UpstreamTimeoutError, UnknownError,
     ValidationError, ModelNotSupportedError
 )
+from backend.api.image_api import make_thumbnail_data_url
 from backend.api.gemini_compat import (
     extract_image_urls_from_text,
     nearest_aspect_ratio,
@@ -181,7 +182,7 @@ class UnifiedAPIRouter:
         统一对话接口
         messages: [{"role": "system"/"user"/"assistant", "content": "..."}]
         options: {
-            "model": "provider_id:model_id",  # 可选，默认用第一个可用的 chat 模型
+            "model": "provider_id:key_id:model_id",  # 可选（旧两段 id 自动兼容），默认用第一个可用的 chat 模型
             "temperature": 0.7,
             "max_tokens": 2000
         }
@@ -189,15 +190,15 @@ class UnifiedAPIRouter:
         """
         options = options or {}
 
-        provider, model_entry = self._resolve_chat_model(options.get('model'))
+        provider, key, model_entry = self._resolve_chat_model(options.get('model'))
         if not provider:
             raise AppError(503, "没有可用的对话模型，请先在设置中配置")
 
-        if not (provider.get('api_url') or '').strip() or not (provider.get('api_key') or '').strip():
+        if not (provider.get('api_url') or '').strip() or not (key.get('api_key') or '').strip():
             raise AppError(503, f"供应商「{provider.get('name', '')}」尚未填写 API 地址或密钥，请到设置中补充")
 
         api_url   = provider['api_url'].rstrip('/')
-        api_key   = provider['api_key']
+        api_key   = key['api_key']
         use_proxy = provider.get('use_proxy', True)
         proxies   = None if use_proxy else {"http": None, "https": None}
 
@@ -232,7 +233,7 @@ class UnifiedAPIRouter:
         user_input: str - 用户输入
         options: {
             "metaPrompt": "系统提示词",  # 可选
-            "model": "provider_id:model_id",  # 可选
+            "model": "provider_id:key_id:model_id",  # 可选（旧两段 id 自动兼容）
             "images": ["data:image/..."]  # 可选，多模态图片
         }
         """
@@ -301,7 +302,7 @@ class UnifiedAPIRouter:
         """
         统一图片生成接口（同步，阻塞等待结果）
         options: {
-            "model": "provider_id:model_id",  # 可选
+            "model": "provider_id:key_id:model_id",  # 可选（旧两段 id 自动兼容）
             "resolution": "1k"/"2k"/"4k",  # 默认 "1k"
             "aspectRatio": "Auto"/"1:1"/"16:9"/...,
             "count": 1,
@@ -314,15 +315,15 @@ class UnifiedAPIRouter:
         if not prompt or not prompt.strip():
             raise ValidationError("提示词不能为空")
 
-        provider, model_entry = self._resolve_drawing_model(options.get('model'))
+        provider, key, model_entry = self._resolve_drawing_model(options.get('model'))
         if not provider:
             raise AppError(503, "没有可用的图片模型，请先在设置中配置")
 
-        if not (provider.get('api_url') or '').strip() or not (provider.get('api_key') or '').strip():
+        if not (provider.get('api_url') or '').strip() or not (key.get('api_key') or '').strip():
             raise AppError(503, f"供应商「{provider.get('name', '')}」尚未填写 API 地址或密钥，请到设置中补充后再生成")
 
         api_url   = provider['api_url'].rstrip('/')
-        api_key   = provider['api_key']
+        api_key   = key['api_key']
         use_proxy = provider.get('use_proxy', True)
         proxies   = None if use_proxy else {"http": None, "https": None}
 
@@ -442,96 +443,166 @@ class UnifiedAPIRouter:
 
     def _resolve_chat_model(self, model_str=None):
         """
-        解析对话模型
-        model_str: "provider_id:model_id" 或 None
-        返回: (provider_dict, ModelEntry)
+        解析对话模型（multi-key：三段 id provider:key:model）
+        model_str: "provider_id:key_id:model_id" / 旧两段 "provider_id:model_id" / None
+        返回: (provider_dict, key_dict, ModelEntry|None)
+        解析优先级：
+          三段精确（key 删除/停用 → AppError「模型所属 Key 已删除或停用，请重新选择模型」）
+          → 两段回退（provider 各 enabled key 依次匹配同名模型，放宽为全部 enabled key）
+          → 全量第一个可用 chat 模型 → (None, None, None)
         """
         providers = self._load_providers()
-        provider_id, model_id = None, None
+        parts = (model_str or '').split(':') if model_str else []
 
-        if model_str and ':' in model_str:
-            provider_id, model_id = model_str.split(':', 1)
-
-        if provider_id:
+        # ── 三段 id：精确命中 key，用 key.api_key 出图/对话 ──
+        if len(parts) >= 3:
+            provider_id, key_id, model_id = parts[0], parts[1], ':'.join(parts[2:])
             for p in providers:
                 if p.get('id') != provider_id or not p.get('enabled'):
                     continue
-                for m in p.get('models', []):
+                keys = p.get('keys') or []
+                key  = next((k for k in keys if k.get('id') == key_id), None)
+                if key is None or not key.get('enabled', True):
+                    raise AppError(503, "模型所属 Key 已删除或停用，请重新选择模型")
+                for m in key.get('models', []):
                     if not m.get('enabled', True):
                         continue
-                    # 优先匹配用户指定的 model_id
-                    if model_id and m['id'] != model_id:
+                    if m.get('id') != model_id:
                         continue
                     m_type = m.get('type', '')
                     if m_type == 'chat' or (not m_type and self._is_chat_model(m['id'])):
-                        return p, ModelEntry(
+                        return p, key, ModelEntry(
                             id=m['id'], name=m.get('name', m['id']),
                             type=ModelType.CHAT,
                             api_format=self._detect_api_format(m['id'], ModelType.CHAT),
                             enabled=m.get('enabled', True)
                         )
+                # key 存在但模型已删除/停用：同样提示重选模型（旧节点引用失效）
+                raise AppError(503, "模型所属 Key 已删除或停用，请重新选择模型")
+            # provider 未找到/停用 → 回退全量第一个可用模型
+            return self._first_available_model(providers, ModelType.CHAT)
 
-        # 未指定 provider 或未找到指定模型时，回退到第一个可用的 chat 模型
-        for p in providers:
-            if not (p.get('enabled') and p.get('api_key') and p.get('api_url')):
-                continue
-            for m in p.get('models', []):
-                if not m.get('enabled', True):
-                    continue
-                m_type = m.get('type', '')
-                if m_type == 'chat' or (not m_type and self._is_chat_model(m['id'])):
-                    return p, ModelEntry(
-                        id=m['id'], name=m.get('name', m['id']),
-                        type=ModelType.CHAT,
-                        api_format=self._detect_api_format(m['id'], ModelType.CHAT),
-                        enabled=m.get('enabled', True)
-                    )
-
-        return None, None
-
-    def _resolve_drawing_model(self, model_str=None):
-        """解析图片生成模型"""
-        providers = self._load_providers()
-        provider_id, model_id = None, None
-
-        if model_str and ':' in model_str:
-            provider_id, model_id = model_str.split(':', 1)
-
-        if provider_id:
+        # ── 两段 id（旧项目/旧 localStorage）：provider 各 enabled key 依次匹配同名模型 ──
+        if len(parts) == 2:
+            provider_id, model_id = parts
             for p in providers:
                 if p.get('id') != provider_id or not p.get('enabled'):
                     continue
-                for m in p.get('models', []):
+                for key in p.get('keys') or []:
+                    if not key.get('enabled', True):
+                        continue
+                    for m in key.get('models', []):
+                        if not m.get('enabled', True):
+                            continue
+                        if m.get('id') != model_id:
+                            continue
+                        m_type = m.get('type', '')
+                        if m_type == 'chat' or (not m_type and self._is_chat_model(m['id'])):
+                            return p, key, ModelEntry(
+                                id=m['id'], name=m.get('name', m['id']),
+                                type=ModelType.CHAT,
+                                api_format=self._detect_api_format(m['id'], ModelType.CHAT),
+                                enabled=m.get('enabled', True)
+                            )
+            # 未命中 → 回退全量第一个可用模型
+            return self._first_available_model(providers, ModelType.CHAT)
+
+        # ── 未指定/空 → 全量第一个可用模型 ──
+        return self._first_available_model(providers, ModelType.CHAT)
+
+    def _resolve_drawing_model(self, model_str=None):
+        """解析图片生成模型（multi-key：与 _resolve_chat_model 同构）"""
+        providers = self._load_providers()
+        parts = (model_str or '').split(':') if model_str else []
+
+        # ── 三段 id：精确命中 key，用 key.api_key 出图 ──
+        if len(parts) >= 3:
+            provider_id, key_id, model_id = parts[0], parts[1], ':'.join(parts[2:])
+            for p in providers:
+                if p.get('id') != provider_id or not p.get('enabled'):
+                    continue
+                keys = p.get('keys') or []
+                key  = next((k for k in keys if k.get('id') == key_id), None)
+                if key is None or not key.get('enabled', True):
+                    raise AppError(503, "模型所属 Key 已删除或停用，请重新选择模型")
+                for m in key.get('models', []):
                     if not m.get('enabled', True):
                         continue
-                    # 优先匹配用户指定的 model_id
-                    if model_id and m['id'] != model_id:
+                    if m.get('id') != model_id:
                         continue
                     m_type = m.get('type', '')
                     if m_type == 'drawing' or (not m_type and not self._is_chat_model(m['id'])):
-                        return p, ModelEntry(
+                        return p, key, ModelEntry(
                             id=m['id'], name=m.get('name', m['id']),
                             type=ModelType.DRAWING,
                             api_format=self._detect_api_format(m['id'], ModelType.DRAWING),
                             enabled=m.get('enabled', True)
                         )
+                # key 存在但模型已删除/停用：同样提示重选模型（旧节点引用失效）
+                raise AppError(503, "模型所属 Key 已删除或停用，请重新选择模型")
+            # provider 未找到/停用 → 回退全量第一个可用模型
+            return self._first_available_model(providers, ModelType.DRAWING)
 
-        for p in providers:
-            if not (p.get('enabled') and p.get('api_key') and p.get('api_url')):
-                continue
-            for m in p.get('models', []):
-                if not m.get('enabled', True):
+        # ── 两段 id（旧项目/旧 localStorage）：provider 各 enabled key 依次匹配同名模型 ──
+        if len(parts) == 2:
+            provider_id, model_id = parts
+            for p in providers:
+                if p.get('id') != provider_id or not p.get('enabled'):
                     continue
-                m_type = m.get('type', '')
-                if m_type == 'drawing' or (not m_type and not self._is_chat_model(m['id'])):
-                    return p, ModelEntry(
+                for key in p.get('keys') or []:
+                    if not key.get('enabled', True):
+                        continue
+                    for m in key.get('models', []):
+                        if not m.get('enabled', True):
+                            continue
+                        if m.get('id') != model_id:
+                            continue
+                        m_type = m.get('type', '')
+                        if m_type == 'drawing' or (not m_type and not self._is_chat_model(m['id'])):
+                            return p, key, ModelEntry(
+                                id=m['id'], name=m.get('name', m['id']),
+                                type=ModelType.DRAWING,
+                                api_format=self._detect_api_format(m['id'], ModelType.DRAWING),
+                                enabled=m.get('enabled', True)
+                            )
+            # 未命中 → 回退全量第一个可用模型
+            return self._first_available_model(providers, ModelType.DRAWING)
+
+        # ── 未指定/空 → 全量第一个可用模型 ──
+        return self._first_available_model(providers, ModelType.DRAWING)
+
+    def _first_available_model(self, providers, model_type):
+        """
+        全量第一个可用模型（enabled provider + api_url 非空 → enabled key + api_key 非空
+        → enabled 同型模型）。绘图/对话同构，返回 (provider_dict, key_dict, ModelEntry|None)。
+        """
+        for p in providers:
+            if not p.get('enabled'):
+                continue
+            if not (p.get('api_url') or '').strip():
+                continue
+            for key in p.get('keys') or []:
+                if not key.get('enabled', True):
+                    continue
+                if not (key.get('api_key') or '').strip():
+                    continue
+                for m in key.get('models', []):
+                    if not m.get('enabled', True):
+                        continue
+                    m_type = m.get('type', '')
+                    if model_type == ModelType.CHAT:
+                        is_match = (m_type == 'chat' or (not m_type and self._is_chat_model(m['id'])))
+                    else:
+                        is_match = (m_type == 'drawing' or (not m_type and not self._is_chat_model(m['id'])))
+                    if not is_match:
+                        continue
+                    return p, key, ModelEntry(
                         id=m['id'], name=m.get('name', m['id']),
-                        type=ModelType.DRAWING,
-                        api_format=self._detect_api_format(m['id'], ModelType.DRAWING),
+                        type=model_type,
+                        api_format=self._detect_api_format(m['id'], model_type),
                         enabled=m.get('enabled', True)
                     )
-
-        return None, None
+        return None, None, None
 
     def _is_chat_model(self, model_id):
         m_type, _ = self._detect_model_type(model_id)
@@ -1331,52 +1402,88 @@ class UnifiedAPIRouter:
         return None
 
     # ─────────────────────────────────────────
-    # 内部方法：图片本地保存（保留 base64 格式返回给前端）
+    # 内部方法：图片本地保存（返回缩略图 + 原图路径引用，图片性能优化）
     # ─────────────────────────────────────────
     def _save_images_to_local(self, parsed, save_dir=''):
         """
-        将图片保存到本地做持久化，但始终保留 base64 格式返回给前端。
-        - base64 → 解码保存，前端仍收到原始 base64
-        - URL    → 下载保存后转换为 base64 返回给前端
-        返回结果增加 saved_to_disk: bool —— 是否写入用户配置目录（P2/P3；
-        tempfile 兜底为 false，前端据此 toast「图片保存路径未设置…」且不阻断）。
+        主链路后处理：原图落盘 + 缩略图生成 + 路径收集（图片性能优化）。
+        - 逐图流程：归一原始图（base64 data URL / http URL → 下载转 base64）→ 原图落盘收集 original_path
+          → 生成 JPEG q85 / 最长边 1024px 缩略图 data URL → 展示图（image_url/images）切换为缩略图。
+        - 返回结构（新）：thumbnail/thumbnails（data URL）、original_path/original_paths（绝对路径，正斜杠）、
+          original_url/original_urls（file:// 引用，仅信息性，禁止直接用于渲染）。
+        - 双轨回退：逐图缩略图失败 → 该图 image 保留原 base64、original_* 对应项置 None（不阻断）；
+          http 下载失败 → 保持原 URL（沿用旧语义）。
+        - saved_to_disk: bool —— 是否写入用户配置目录（tempfile 兜底为 false，前端据此提示不阻断）。
         """
         configured_dir = self._configured_image_save_dir()
         # 本次保存目标：显式传入目录优先；否则用户配置目录；都无 → 内部 _get_save_dir 回退 tempfile（saved_to_disk=false）
         target = save_dir if (save_dir and os.path.isdir(save_dir)) else configured_dir
         saved_to_disk = bool(target)
 
+        thumbnails = []
+        original_paths = []
+        original_urls = []
+
         def process(img):
-            if not isinstance(img, str):
-                return img
+            # 默认：展示图 = 原输入（缩略图失败/下载失败时回退）
+            display = img
+            thumb = None
+            orig_path = None
+            orig_url = None
 
-            if img.startswith('data:image'):
-                # 保留原始 base64，同时保存到磁盘
-                file_path = self._save_base64_to_dir(img, save_dir)
+            original_data_url = img if isinstance(img, str) else None
+            if isinstance(img, str) and img.startswith('http'):
+                # http → 下载转 base64（下载成功才可能生成缩略图；失败保持原 URL）
+                original_data_url = self._download_url_to_base64(img)
+                if original_data_url:
+                    display = original_data_url
+                else:
+                    original_data_url = None
+
+            if isinstance(original_data_url, str) and original_data_url.startswith('data:image'):
+                # 原图落盘（失败不影响返回；缩略图仍可基于 bytes 生成）
+                file_path = self._save_base64_to_dir(original_data_url, save_dir)
                 if file_path:
-                    print(f"[UnifiedAPI] base64 图片已保存: {file_path}")
-                return img
+                    orig_path = file_path  # 绝对路径，正斜杠（_save_base64_to_dir 已 replace('\\','/')）
+                    orig_url = f"file:///{file_path}"
+                # 生成缩略图 data URL（JPEG q85 / 最长边 1024px；失败回退原 base64）
+                try:
+                    _, data = original_data_url.split(',', 1)
+                    image_bytes = b64lib.b64decode(data)
+                except Exception:
+                    image_bytes = None
+                thumb = make_thumbnail_data_url(image_bytes) if image_bytes else None
+                if thumb:
+                    display = thumb
+                else:
+                    # 双轨回退：缩略图失败 → 该图 image 保留原 base64、无 original_* 对应项（不阻断）
+                    orig_path = None
+                    orig_url = None
 
-            elif img.startswith('http'):
-                # 下载并转换为 base64，确保前端始终收到 base64 格式
-                base64_data = self._download_url_to_base64(img)
-                if base64_data:
-                    # 下载后也保存一份到本地
-                    file_path = self._save_base64_to_dir(base64_data, save_dir)
-                    if file_path:
-                        print(f"[UnifiedAPI] URL 图片已下载保存: {file_path}")
-                    return base64_data
-                return img
-
-            return img
+            thumbnails.append(thumb)
+            original_paths.append(orig_path)
+            original_urls.append(orig_url)
+            return display
 
         if parsed.get('images'):
-            parsed['images'] = [process(u) for u in parsed['images']]
-        if parsed.get('image_url'):
+            processed = [process(u) for u in parsed['images']]
+            parsed['images'] = processed
+            parsed['thumbnails'] = thumbnails
+            parsed['original_paths'] = original_paths
+            parsed['original_urls'] = original_urls
             parsed['image_url'] = (
-                parsed['images'][0] if parsed.get('images')
-                else parsed['image_url']
+                processed[0] if processed
+                else parsed.get('image_url')
             )
+            parsed['thumbnail'] = thumbnails[0] if thumbnails else None
+            parsed['original_path'] = original_paths[0] if original_paths else None
+            parsed['original_url'] = original_urls[0] if original_urls else None
+        elif parsed.get('image_url'):
+            single = process(parsed['image_url'])
+            parsed['image_url'] = single
+            parsed['thumbnail'] = thumbnails[0] if thumbnails else None
+            parsed['original_path'] = original_paths[0] if original_paths else None
+            parsed['original_url'] = original_urls[0] if original_urls else None
         parsed['saved_to_disk'] = saved_to_disk
         return parsed
 

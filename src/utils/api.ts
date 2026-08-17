@@ -40,10 +40,13 @@ declare const pywebview: {
     add_provider(name: string, type: string, short_name?: string): Promise<{ status: string; id?: string }>;
     update_provider(provider_id: string, updates: Record<string, unknown>): Promise<{ status: string }>;
     delete_provider(provider_id: string): Promise<{ status: string }>;
+    add_key(provider_id: string, key_name?: string): Promise<{ status: string; key_id?: string; key?: unknown; keys?: unknown[]; message?: string }>;
+    delete_key(provider_id: string, key_id: string): Promise<{ status: string; keys?: unknown[]; message?: string }>;
+    update_key(provider_id: string, key_id: string, updates: Record<string, unknown>): Promise<{ status: string; key?: unknown; keys?: unknown[]; message?: string }>;
     fetch_models(api_url: string, api_key: string): Promise<{ models?: unknown[] }>;
     test_api_connection(api_url: string, api_key: string): Promise<{ success: boolean; message: string }>;
-    add_chat_model(provider_id: string, model_id: string, model_name: string): Promise<{ status: string }>;
-    remove_model(provider_id: string, model_id: string): Promise<{ status: string }>;
+    add_chat_model(provider_id: string, key_id?: string, model_id?: string, model_name?: string): Promise<{ status: string; message?: string }>;
+    remove_model(provider_id: string, key_id: string, model_id: string): Promise<{ status: string; message?: string }>;
     generate_image(prompt: string, config?: Record<string, unknown>): Promise<{ task_id: string }>;
     generate_image_async(prompt: string, config?: Record<string, unknown>): Promise<{ task_id: string }>;
     get_task_result(task_id: string): Promise<{ status: string; result?: unknown }>;
@@ -55,7 +58,7 @@ declare const pywebview: {
     unified_chat_v2(user_input: string, options?: Record<string, unknown>): Promise<{ content?: string; reply?: string; text?: string }>;
     save_image_to_local(image_data: unknown, filename?: string): Promise<{ path?: string }>;
     save_image_as(image_data: unknown, filename?: string): Promise<{ path?: string }>;
-    load_local_image(file_path: string): Promise<{ base64?: string }>;
+    load_local_image(file_path: string): Promise<{ status: string; data_url?: string; message?: string }>;
     outpaint(image_base64: string, direction: string, ratio: string, prompt: string, provider_id: string, model_id?: string, resolution?: string, user_mask?: unknown): Promise<{ url?: string }>;
     copy_to_clipboard(canvas_data: unknown): Promise<{ status: string }>;
     paste_from_clipboard(): Promise<{ cards?: unknown[]; connections?: unknown[] }>;
@@ -88,6 +91,18 @@ export const API = {
         return await pywebview.api.add_provider(name, type, shortName);
     },
 
+    async addKey(providerId: string, keyName = '') {
+        return await pywebview.api.add_key(providerId, keyName);
+    },
+
+    async deleteKey(providerId: string, keyId: string) {
+        return await pywebview.api.delete_key(providerId, keyId);
+    },
+
+    async updateKey(providerId: string, keyId: string, updates: Record<string, unknown>) {
+        return await pywebview.api.update_key(providerId, keyId, updates);
+    },
+
     async updateProvider(providerId: string, updates: Record<string, unknown>) {
         return await pywebview.api.update_provider(providerId, updates);
     },
@@ -104,12 +119,12 @@ export const API = {
         return await pywebview.api.fetch_models(apiUrl, apiKey);
     },
 
-    async addChatModel(providerId: string, modelId: string, modelName: string) {
-        return await pywebview.api.add_chat_model(providerId, modelId, modelName);
+    async addChatModel(providerId: string, keyId: string, modelId: string, modelName: string) {
+        return await pywebview.api.add_chat_model(providerId, keyId, modelId, modelName);
     },
 
-    async removeModel(providerId: string, modelId: string) {
-        return await pywebview.api.remove_model(providerId, modelId);
+    async removeModel(providerId: string, keyId: string, modelId: string) {
+        return await pywebview.api.remove_model(providerId, keyId, modelId);
     },
 
     async generateImageV2(prompt: string, options?: Record<string, unknown>) {

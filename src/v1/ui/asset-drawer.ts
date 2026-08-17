@@ -138,10 +138,12 @@ class AssetDrawer {
     if (!this.grid) return;
     const div = document.createElement('div');
     div.className = 'history-thumb asset-thumb';
-    const hasUrl = !!item.url;
+    // 图片性能优化：卡片主视觉 = 缩略图（thumbnailUrl 优先，旧记录回退 url 原 base64）
+    const thumbUrl = item.thumbnailUrl || item.url;
+    const hasUrl = !!thumbUrl;
     if (hasUrl) {
       div.draggable = true;
-      div.style.backgroundImage = `url('${item.url.replace(/'/g, "\\'")}')`;
+      div.style.backgroundImage = `url('${thumbUrl.replace(/'/g, "\\'")}')`;
     } else {
       // 旧记录无 imageUrl（incremental-2 写入）：图源缺失占位卡（可取消采纳/锁定，无缩略图、无可拖 URL）
       div.classList.add('asset-missing');
@@ -161,11 +163,11 @@ class AssetDrawer {
         <button class="ht-act" data-act="reproduce">复现</button>
       </div>`;
 
-    // 拖入手势（复用 history-image 拖拽语义；无 URL 的占位卡不可拖）
+    // 拖入手势（复用 history-image 拖拽语义；拖入画布传递缩略图 data URL，构图参考足够；无 URL 的占位卡不可拖）
     if (hasUrl) {
       div.addEventListener('dragstart', (e: DragEvent) => {
-        e.dataTransfer!.setData('application/history-image', item.url);
-        e.dataTransfer!.setData('text/plain', item.url);
+        e.dataTransfer!.setData('application/history-image', thumbUrl);
+        e.dataTransfer!.setData('text/plain', thumbUrl);
         div.style.opacity = '0.6';
       });
       div.addEventListener('dragend', () => { div.style.opacity = ''; });
@@ -188,7 +190,8 @@ class AssetDrawer {
         assetStore.setLocked(item.record.key, item.record.nodeId, nextLocked);
         showToast(nextLocked ? '已锁定' : '已解锁');
       } else if (act === 'view') {
-        if (hasUrl) this._viewImage(item.url);
+        // 查看大图：缩略图先显示 + 按需加载原图（有 originalPath 时桥接取原图，失败回退缩略图）
+        if (hasUrl) this._viewImage(thumbUrl, item);
       } else if (act === 'reproduce') {
         // S9：复现（meta 优先；缺失时 _toEntry 内部经 historyDrawer 反查）
         void reproduceService.reproduceFromHistory(this._toEntry(item));
@@ -198,10 +201,10 @@ class AssetDrawer {
     this.grid.appendChild(div);
   }
 
-  /** 查看大图（复用 #img-modal） */
-  private _viewImage(url: string): void {
+  /** 查看大图（复用 #img-modal；origin.path = 原图本地路径，按需加载） */
+  private _viewImage(url: string, item: AssetAsset): void {
     if (!url) return;
-    openImageModal(url);
+    void openImageModal(url, item.originalPath ? { path: item.originalPath } : null);
   }
 
   /** AssetAsset → HistoryEntry（复现 S9 / 搜索 S8 用）：meta 内存缓存优先；缺失时经 historyDrawer.getEntryByImageUrl 反查 */

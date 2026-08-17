@@ -5,21 +5,30 @@
 import { API } from '../utils/api';
 import { DEFAULT_CHAT_MODEL_KEY } from './nodes/text-gen';
 
-/** 拉取可用的绘图模型列表（原 src/cards/ai-draw-api._getImageModels 内联：API.loadProviders + enabled/drawing 过滤 + `${providerId}:${modelId}` 拼接） */
+/** 拉取可用的绘图模型列表（三层遍历：enabled provider → enabled key → enabled drawing model；三段 id）。
+ * label 简化：`${供应商短名} - ${模型名}`（去 key 名）；跨 key 重名模型按 `${p.id}:${m.id}` 去重，
+ * 只保留第一个 enabled key 条目（id 路由到该 key；后端 keys[] 与三段解析零改动）。 */
 export async function fetchImageModels(): Promise<Array<{ id: string; name: string }>> {
   try {
     const result = (await API.loadProviders()) as BackendProviderList;
     const providers = result?.providers || [];
     const models: Array<{ id: string; name: string }> = [];
-
+    const seen = new Set<string>();
     providers.forEach(p => {
       if (!p.enabled) return;
       const displayName = p.short_name || p.name.slice(0, 6);
-      (p.models || [])
-        .filter(m => m.enabled !== false && m.type === 'drawing')
-        .forEach(m => {
-          models.push({ id: `${p.id}:${m.id}`, name: `${displayName} - ${m.name}` });
-        });
+      (p.keys || []).forEach(k => {
+        if (k.enabled === false) return;
+        (k.models || [])
+          .filter(m => m.enabled !== false && m.type === 'drawing')
+          .forEach(m => {
+            const dedupeKey = `${p.id}:${m.id}`;
+            if (seen.has(dedupeKey)) return; // 跨 key 重名去重：保留第一个 enabled key 条目
+            seen.add(dedupeKey);
+            // 三段式完整 id：${providerId}:${keyId}:${modelId}；label 去 key 名
+            models.push({ id: `${p.id}:${k.id}:${m.id}`, name: `${displayName} - ${m.name}` });
+          });
+      });
     });
 
     return models.length ? models : [{ id: '', name: '未找到绘图模型，请先在设置中配置' }];
@@ -28,21 +37,27 @@ export async function fetchImageModels(): Promise<Array<{ id: string; name: stri
   }
 }
 
-/** 拉取可用的对话模型列表（text-gen 专用：与 fetchImageModels 同构，过滤 type==='chat'） */
+/** 拉取可用的对话模型列表（text-gen 专用：与 fetchImageModels 同构，过滤 type==='chat'；label 简化 + 重名去重） */
 export async function fetchChatModels(): Promise<Array<{ id: string; name: string }>> {
   try {
     const result = (await API.loadProviders()) as BackendProviderList;
     const providers = result?.providers || [];
     const models: Array<{ id: string; name: string }> = [];
-
+    const seen = new Set<string>();
     providers.forEach(p => {
       if (!p.enabled) return;
       const displayName = p.short_name || p.name.slice(0, 6);
-      (p.models || [])
-        .filter(m => m.enabled !== false && m.type === 'chat')
-        .forEach(m => {
-          models.push({ id: `${p.id}:${m.id}`, name: `${displayName} - ${m.name}` });
-        });
+      (p.keys || []).forEach(k => {
+        if (k.enabled === false) return;
+        (k.models || [])
+          .filter(m => m.enabled !== false && m.type === 'chat')
+          .forEach(m => {
+            const dedupeKey = `${p.id}:${m.id}`;
+            if (seen.has(dedupeKey)) return; // 跨 key 重名去重：保留第一个 enabled key 条目
+            seen.add(dedupeKey);
+            models.push({ id: `${p.id}:${k.id}:${m.id}`, name: `${displayName} - ${m.name}` });
+          });
+      });
     });
 
     return models.length ? models : [{ id: '', name: '未找到对话模型，请先在设置中配置' }];
@@ -60,8 +75,8 @@ function isGeminiFamily(text: string): boolean {
 }
 
 /**
- * 判定完整模型 id（"provider:model" 或裸 model id）是否属于 gemini/nano-banana/seedream 系。
- * 只检查冒号后的模型段，避免 provider id 误命中。
+ * 判定完整模型 id（"provider:key:model" / 旧两段 "provider:model" / 裸 model id）是否属于
+ * gemini/nano-banana/seedream 系。只检查冒号后的模型段，避免 provider id 误命中。
  */
 export function isGeminiImageModel(modelId: string): boolean {
   if (!modelId) return false;
@@ -89,28 +104,53 @@ export async function resolveOutpaintModel(node: FlowNode | null | undefined): P
   return models.length > 0 && models[0].id ? models[0].id : '';
 }
 
-/** 解析默认绘图模型：优先 localStorage，否则取第一个可用模型并记忆 */
-export async function resolveDefaultModel(): Promise<string> {
-  const saved = localStorage.getItem(DEFAULT_MODEL_KEY);
-  if (saved) return saved;
-  const models = await fetchImageModels();
-  if (models.length > 0 && models[0].id) {
-    localStorage.setItem(DEFAULT_MODEL_KEY, models[0].id);
-    return models[0].id;
+/**
+ * 宽容匹配模型 id（multi-key）：
+ * 三段 id 精确命中；旧两段 id（provider:model）在已过滤的模型列表中找同名模型并返回三段 id；
+ * 未命中返回 ''。任何写回一律三段（惰性重写，旧 localStorage 逐步自愈）。
+ */
+function matchModelId(models: Array<{ id: string }>, saved: string): string {
+  if (!saved) return '';
+  if (models.some(m => m.id === saved)) return saved;
+  const parts = saved.split(':');
+  if (parts.length === 2) {
+    const [pid, mid] = parts;
+    const hit = models.find(m => m.id.startsWith(`${pid}:`) && m.id.endsWith(`:${mid}`));
+    if (hit) return hit.id;
   }
   return '';
 }
 
-/** 解析默认对话模型（text-gen 专用）：优先 localStorage（icv_default_chat_model），否则取第一个可用 chat 模型并记忆 */
-export async function resolveDefaultChatModel(): Promise<string> {
-  const saved = localStorage.getItem(DEFAULT_CHAT_MODEL_KEY);
-  if (saved) return saved;
-  const models = await fetchChatModels();
-  if (models.length > 0 && models[0].id) {
-    localStorage.setItem(DEFAULT_CHAT_MODEL_KEY, models[0].id);
-    return models[0].id;
+/** 解析默认绘图模型：localStorage 宽容解析（旧两段 id 惰性重写为三段）+ 回退第一个可用模型并记忆 */
+export async function resolveDefaultModel(): Promise<string> {
+  const models = await fetchImageModels();
+  const fallback = models.length > 0 && models[0].id ? models[0].id : '';
+  const saved = localStorage.getItem(DEFAULT_MODEL_KEY);
+  if (saved) {
+    const resolved = matchModelId(models, saved);
+    if (resolved) {
+      if (resolved !== saved) localStorage.setItem(DEFAULT_MODEL_KEY, resolved);
+      return resolved;
+    }
   }
-  return '';
+  if (fallback) localStorage.setItem(DEFAULT_MODEL_KEY, fallback);
+  return fallback;
+}
+
+/** 解析默认对话模型（text-gen 专用）：与 resolveDefaultModel 同构（icv_default_chat_model） */
+export async function resolveDefaultChatModel(): Promise<string> {
+  const models = await fetchChatModels();
+  const fallback = models.length > 0 && models[0].id ? models[0].id : '';
+  const saved = localStorage.getItem(DEFAULT_CHAT_MODEL_KEY);
+  if (saved) {
+    const resolved = matchModelId(models, saved);
+    if (resolved) {
+      if (resolved !== saved) localStorage.setItem(DEFAULT_CHAT_MODEL_KEY, resolved);
+      return resolved;
+    }
+  }
+  if (fallback) localStorage.setItem(DEFAULT_CHAT_MODEL_KEY, fallback);
+  return fallback;
 }
 
 export const Backend = {
@@ -133,6 +173,12 @@ export const Backend = {
 
   async getTaskResult(taskId: string): Promise<BackendTaskResult> {
     return (await API.unifiedGetTaskResult(taskId)) as BackendTaskResult;
+  },
+
+  // ── 本地图片（图片性能优化：查看大图按需取原图） ──
+  /** 按本地绝对路径读取原图 → base64 data_url（pywebview 桥接；一次性，用完即弃不常驻） */
+  async loadLocalImage(filePath: string): Promise<{ status: string; data_url?: string; message?: string }> {
+    return (await API.loadLocalImage(filePath)) as { status: string; data_url?: string; message?: string };
   },
 
   // ── 对话链路（text-gen 专用：同步阻塞，无 task 轮询） ──
@@ -207,6 +253,49 @@ export const Backend = {
     return await API.addProvider(name, type, shortName);
   },
 
+  // ── 多 Key（multi-key：每个 Key 独立模型组） ──
+  async addKey(providerId: string, keyName = ''): Promise<{
+    status: string;
+    key_id?: string;
+    key?: BackendProviderKey;
+    keys?: BackendProviderKey[];
+    message?: string;
+  }> {
+    return (await API.addKey(providerId, keyName)) as {
+      status: string;
+      key_id?: string;
+      key?: BackendProviderKey;
+      keys?: BackendProviderKey[];
+      message?: string;
+    };
+  },
+
+  async deleteKey(providerId: string, keyId: string): Promise<{
+    status: string;
+    keys?: BackendProviderKey[];
+    message?: string;
+  }> {
+    return (await API.deleteKey(providerId, keyId)) as {
+      status: string;
+      keys?: BackendProviderKey[];
+      message?: string;
+    };
+  },
+
+  async updateKey(providerId: string, keyId: string, updates: Record<string, unknown>): Promise<{
+    status: string;
+    key?: BackendProviderKey;
+    keys?: BackendProviderKey[];
+    message?: string;
+  }> {
+    return (await API.updateKey(providerId, keyId, updates)) as {
+      status: string;
+      key?: BackendProviderKey;
+      keys?: BackendProviderKey[];
+      message?: string;
+    };
+  },
+
   async updateProvider(providerId: string, updates: Record<string, unknown>): Promise<{ status: string; message?: string }> {
     return await API.updateProvider(providerId, updates);
   },
@@ -223,8 +312,8 @@ export const Backend = {
     return await API.testConnection(apiUrl, apiKey);
   },
 
-  async removeModel(providerId: string, modelId: string): Promise<{ status: string; message?: string }> {
-    return await API.removeModel(providerId, modelId);
+  async removeModel(providerId: string, keyId: string, modelId: string): Promise<{ status: string; message?: string }> {
+    return await API.removeModel(providerId, keyId, modelId);
   },
 
   // ── 设置（incremental-3：图片保存路径配置区用；settings-panel.ts 调用） ──

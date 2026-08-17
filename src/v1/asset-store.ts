@@ -59,9 +59,10 @@ class AssetStore {
 
   // ───────────────────────── 写入口（唯一写路径） ─────────────────────────
 
-  /** 采纳（认可 + 自动置锁定，B2）。imageUrl 采纳时写入（资产库显示用）；meta 内存缓存（复现 S9 用） */
-  adopt(key: string, nodeId: string, imageUrl?: string, meta?: AdoptMeta): void {
-    const rec = this._getOrCreate(key, nodeId, imageUrl);
+  /** 采纳（认可 + 自动置锁定，B2）。imageUrl 采纳时写入（资产库显示用）；originalPath 写入原图引用；
+   *  meta 内存缓存（复现 S9 用） */
+  adopt(key: string, nodeId: string, imageUrl?: string, originalPath?: string, meta?: AdoptMeta): void {
+    const rec = this._getOrCreate(key, nodeId, imageUrl, originalPath);
     if (imageUrl) this.urlByKey.set(key, imageUrl);
     if (meta) this.metaByKey.set(key, meta);
     if (rec.adopted) return;
@@ -82,16 +83,20 @@ class AssetStore {
   }
 
   /** 锁定/解锁（未采纳的图也可单独锁定，B3）。对无记录图解锁时直接返回，不产生无意义空记录（QA O3）。 */
-  setLocked(key: string, nodeId: string, locked: boolean, imageUrl?: string): void {
+  setLocked(key: string, nodeId: string, locked: boolean, imageUrl?: string, originalPath?: string): void {
     let rec = this.records.get(key);
     if (!rec) {
       if (!locked) return; // 无记录且要解锁：无事可做，不建空记录
-      rec = this._getOrCreate(key, nodeId, imageUrl);
+      rec = this._getOrCreate(key, nodeId, imageUrl, originalPath);
     } else if (nodeId) {
       // nodeId 冗余：图当前所在节点可能已变化，随写更新（与 _getOrCreate 一致，空串不覆盖防误清）
       rec.nodeId = nodeId;
     }
-    if (imageUrl) this.urlByKey.set(key, imageUrl);
+    if (imageUrl) {
+      this.urlByKey.set(key, imageUrl);
+      if (!rec.thumbnail) rec.thumbnail = imageUrl; // 缩略图=展示图 URL（首次写入，不覆盖已有值）
+    }
+    if (originalPath && !rec.originalPath) rec.originalPath = originalPath; // 原图引用（首次写入）
     if (rec.locked === locked) return;
     rec.locked = locked;
     rec.updatedAt = Date.now();
@@ -115,10 +120,10 @@ class AssetStore {
 
   // ───────────────────────── URL 便捷入口（UI 层统一走这里，禁止手算 hash） ─────────────────────────
 
-  /** 按图 URL 采纳（内部转 key + 写 imageUrl，S3 资产库缩略图数据源） */
-  adoptByUrl(url: string, nodeId: string, meta?: AdoptMeta): void {
+  /** 按图 URL 采纳（内部转 key + 写 imageUrl/缩略图/原图引用，S3 资产库缩略图数据源） */
+  adoptByUrl(url: string, nodeId: string, meta?: AdoptMeta, originalPath?: string): void {
     if (!url) return;
-    this.adopt(this._keyOf(url), nodeId, url, meta);
+    this.adopt(this._keyOf(url), nodeId, url, originalPath, meta);
   }
 
   /** 按图 URL 取消采纳 */
@@ -129,9 +134,9 @@ class AssetStore {
   }
 
   /** 按图 URL 锁定/解锁 */
-  setLockedByUrl(url: string, nodeId: string, locked: boolean): void {
+  setLockedByUrl(url: string, nodeId: string, locked: boolean, originalPath?: string): void {
     if (!url) return;
-    this.setLocked(this._keyOf(url), nodeId, locked, url);
+    this.setLocked(this._keyOf(url), nodeId, locked, url, originalPath);
   }
 
   /** 按图 URL 追加标签 */
@@ -170,14 +175,18 @@ class AssetStore {
     return rec ?? null;
   }
 
-  /** 已采纳资产列表（S3：adopted=true，按 updatedAt 倒序）；url 优先级 = record.imageUrl → urlByKey 缓存 */
+  /** 已采纳资产列表（S3：adopted=true，按 updatedAt 倒序）；url 优先级 = record.imageUrl → urlByKey 缓存；
+   *  thumbnailUrl = record.thumbnail || url（缩略图优先）；originalPath = 原图引用 */
   getAdoptedAssets(): AssetAsset[] {
     const list: AssetAsset[] = [];
     this.records.forEach(rec => {
       if (!rec.adopted) return;
+      const url = rec.imageUrl || this.urlByKey.get(rec.key) || '';
       list.push({
         record: { ...rec, tags: [...rec.tags], projectName: [...(rec.projectName || [])] },
-        url: rec.imageUrl || this.urlByKey.get(rec.key) || '',
+        url,
+        thumbnailUrl: rec.thumbnail || rec.imageUrl || this.urlByKey.get(rec.key) || '',
+        originalPath: typeof rec.originalPath === 'string' ? rec.originalPath : undefined,
         meta: this.metaByKey.get(rec.key),
       });
     });
@@ -235,7 +244,7 @@ class AssetStore {
     return this._persist();
   }
 
-  private _getOrCreate(key: string, nodeId: string, imageUrl?: string): ImageAssetRecord {
+  private _getOrCreate(key: string, nodeId: string, imageUrl?: string, originalPath?: string): ImageAssetRecord {
     const existing = this.records.get(key);
     if (existing) {
       // nodeId 冗余：图当前所在节点可能已变化，随写更新
@@ -243,12 +252,17 @@ class AssetStore {
       // imageUrl 只在采纳/锁定时写入：旧记录缺失时补全，已有值不覆盖（共享知识 6）
       if (imageUrl && !existing.imageUrl) existing.imageUrl = imageUrl;
       if (imageUrl) this.urlByKey.set(key, imageUrl);
+      // 缩略图=展示图 URL；原图引用首写不覆盖（图片性能优化）
+      if (imageUrl && !existing.thumbnail) existing.thumbnail = imageUrl;
+      if (originalPath && !existing.originalPath) existing.originalPath = originalPath;
       return existing;
     }
     const rec: ImageAssetRecord = {
       key,
       nodeId: nodeId || '',
       imageUrl: imageUrl || '',
+      thumbnail: imageUrl || '',
+      originalPath: originalPath || '',
       projectName: [],
       adopted: false,
       locked: false,
@@ -261,12 +275,14 @@ class AssetStore {
     return rec;
   }
 
-  /** 从磁盘记录归一（兼容脏数据/旧格式：缺 imageUrl → ''、缺 projectName → []，共享知识 6） */
+  /** 从磁盘记录归一（兼容脏数据/旧格式：缺 imageUrl → ''、缺 projectName → []，共享知识 6；缩略图/原图引用缺省） */
   private _normalize(r: ImageAssetRecord): ImageAssetRecord {
     return {
       key: typeof r.key === 'string' ? r.key : String(r.key || ''),
       nodeId: typeof r.nodeId === 'string' ? r.nodeId : '',
       imageUrl: typeof r.imageUrl === 'string' ? r.imageUrl : '',
+      thumbnail: typeof r.thumbnail === 'string' ? r.thumbnail : '',
+      originalPath: typeof r.originalPath === 'string' ? r.originalPath : '',
       projectName: Array.isArray(r.projectName) ? r.projectName.filter(n => typeof n === 'string') : [],
       adopted: !!r.adopted,
       locked: !!r.locked,

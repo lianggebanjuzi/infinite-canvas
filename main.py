@@ -203,6 +203,16 @@ class InfiniteCanvasAPI:
     def delete_provider(self, provider_id):
         return self.provider.delete_provider(provider_id)
 
+    # ── 多 Key 管理（multi-key） ──
+    def add_key(self, provider_id, key_name=''):
+        return self.provider.add_key(provider_id, key_name)
+
+    def delete_key(self, provider_id, key_id):
+        return self.provider.delete_key(provider_id, key_id)
+
+    def update_key(self, provider_id, key_id, updates):
+        return self.provider.update_key(provider_id, key_id, updates)
+
     def test_api_connection(self, api_url, api_key):
         try:
             return self.provider.test_api_connection(api_url, api_key)
@@ -222,11 +232,11 @@ class InfiniteCanvasAPI:
     # ─────────────────────────────────────────
     # 对话模型管理
     # ─────────────────────────────────────────
-    def add_chat_model(self, provider_id, model_id, model_name):
-        return self.provider.add_chat_model(provider_id, model_id, model_name)
+    def add_chat_model(self, provider_id, key_id=None, model_id=None, model_name=None):
+        return self.provider.add_chat_model(provider_id, key_id, model_id, model_name)
 
-    def remove_model(self, provider_id, model_id):
-        return self.provider.remove_model(provider_id, model_id)
+    def remove_model(self, provider_id, key_id, model_id):
+        return self.provider.remove_model(provider_id, key_id, model_id)
 
     # ─────────────────────────────────────────
     # AI 图片生成（全部走 UnifiedAPIRouter）

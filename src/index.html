@@ -230,7 +230,7 @@
 <div class="overlay" id="settings-overlay">
   <div class="settings-panel">
     <div class="settings-head">
-      <h2>设置 · 供应商</h2>
+      <h2>设置 · 供应商 / 密钥组</h2>
       <button class="settings-close" id="btn-close-settings" title="关闭">
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
       </button>
@@ -245,8 +245,11 @@
   </div>
 </div>
 
-<!-- 大图查看 -->
-<div class="img-modal" id="img-modal"><img id="img-modal-img" alt=""></div>
+<!-- 大图查看（图片性能优化：先显示缩略图 + loading，再按需加载原图） -->
+<div class="img-modal" id="img-modal">
+  <img id="img-modal-img" alt="">
+  <div class="img-modal-loading" id="img-modal-loading">加载原图中…</div>
+</div>
 
 <!-- 扩图弹层（image-gen 悬浮「扩图」入口；挂 .overlay 类 → interactions.ts 已把 .overlay 排除在画布交互外，天然防冲突） -->
 <div class="overlay outpaint-overlay" id="outpaint-overlay">

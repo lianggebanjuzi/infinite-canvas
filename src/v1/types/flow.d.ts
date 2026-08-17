@@ -40,6 +40,12 @@ interface GenerationTrace {
 }
 
 
+/** 原图引用（图片性能优化：卡片主视觉=缩略图，查看大图按需经 load_local_image 取原图） */
+interface ImageOrigin {
+  path: string;   // 原图本地绝对路径（正斜杠 C:/...）
+  url?: string;   // file:// 引用（备用；禁止直接用于渲染）
+}
+
 /** 画布节点：宽固定 260，高 = 260 / ratio */
 interface FlowNode {
   id: string;
@@ -50,7 +56,8 @@ interface FlowNode {
   status: NodeStatus;
   title: string;             // 左上悬浮标签
   params: Record<string, unknown>;  // 节点参数（见 StyleTransferParams / TextGenParams）
-  imageUrl: string | null;   // 本节点输出图（卡片主视觉），与 refImages 严格分离
+  imageUrl: string | null;   // 本节点输出图（卡片主视觉=缩略图，与 refImages 严格分离）
+  imageOrigin?: ImageOrigin | null; // 原图引用（查看大图按需加载用；旧节点缺省 null）
   outputText: string | null; // 新增：text-gen 输出文本；其余类型恒 null
   textHistory: TextGenHistoryItem[]; // 新增：节点级文本历史；非 text-gen 恒 []
   refImages: string[];       // 用户主动挂载的参考图（默认 []；上游可作参考图的图由 getReferenceImages 派生）
@@ -155,7 +162,10 @@ type HistoryEntry =
   | {
       kind: 'image';
       nodeId: string;
-      imageUrl?: string;        // 新行：该产出图 URL（旧行缺失时回退按 nodeId 解析当前节点 imageUrl）
+      imageUrl?: string;        // 展示图 URL（新行=缩略图；旧行缺失时回退按 nodeId 解析当前节点 imageUrl）
+      thumbnail?: string;       // 显式缩略图（新行；读侧 thumbnail 优先、imageUrl 回退）
+      originalPath?: string;    // 原图本地绝对路径（查看大图按需加载用）
+      originalUrl?: string;     // file:// 引用（备用）
       prompt: string;
       model: string;
       aspectRatio: string;
@@ -178,11 +188,13 @@ type HistoryEntry =
       parentId?: string | null;
     };
 
-/** 资产索引记录（采纳/锁定单一数据源；键 = 图指纹 hashRef(imageUrl)，冗余 nodeId 供保护回溯） */
+/** 资产索引记录（采纳/锁定单一数据源；键 = 图指纹 hashRef(展示图 URL)，冗余 nodeId 供保护回溯） */
 interface ImageAssetRecord {
-  key: string;            // hashRef(imageUrl) 图指纹主键（唯一定位「一张图」而非「一个节点」）
+  key: string;            // hashRef(展示图 URL) 图指纹主键（唯一定位「一张图」而非「一个节点」）
   nodeId: string;         // 图当前所在节点（冗余；同一 nodeId 被重跑覆盖后旧图指纹不变，仍作用旧图）
-  imageUrl?: string;      // 图 URL（incremental-3 起采纳时写入，资产库独立显示用；旧记录缺失 → 占位）
+  imageUrl?: string;      // 展示图 URL（incremental-3 起采纳时写入，资产库独立显示用；旧记录缺失 → 占位）
+  thumbnail?: string;     // 显式缩略图（=展示图 URL；新记录冗余写入，读侧 thumbnail||imageUrl 回退）
+  originalPath?: string;  // 原图本地绝对路径（查看大图按需加载用；冗余写入，P1 可升级指纹键）
   projectName: string[];  // 采纳过的项目名列表（A5：跨项目溯源；只追加去重，不删除；旧记录缺失 → []）
   adopted: boolean;       // 已采纳（认可；采纳自动置 locked）
   locked: boolean;        // 已锁定（保护：removeChildren 不删 / _writeBackToSelf 不覆盖）
@@ -207,7 +219,9 @@ interface AdoptMeta {
 /** 资产库条目（getAdoptedAssets 输出：记录 + 可渲染 URL + 内存元数据） */
 interface AssetAsset {
   record: ImageAssetRecord;
-  url: string;
+  url: string;                 // 展示图 URL（兼容字段：thumbnailUrl || imageUrl 兜底）
+  thumbnailUrl?: string;       // 缩略图 URL（图片性能优化：资产库卡片主视觉）
+  originalPath?: string;       // 原图本地绝对路径（查看大图按需加载用）
   meta?: AdoptMeta;
 }
 

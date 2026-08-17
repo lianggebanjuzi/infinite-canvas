@@ -190,6 +190,11 @@ class RunEngine {
         showToast('图片保存路径未设置，生成图不会落盘到本地', false);
       }
 
+      // 原图引用（图片性能优化：卡片主视觉=缩略图，大图按需加载用）
+      const origin: ImageOrigin | null = result.originalPath
+        ? { path: result.originalPath, url: result.originalUrl }
+        : null;
+
       // 产出节点：x 固定在源节点右侧，y 向下避让同列已有卡片（与 runImageReverse 口径一致）
       const x = node.x + CARD_W + RESULT_GAP_X;
       let y = node.y;
@@ -204,7 +209,7 @@ class RunEngine {
         model: opts.model,
         aspectRatio: opts.aspectRatio || '1:1',
         resolution: opts.resolution || '4k',
-      }, { outputType: 'outpaint', refs: refs });
+      }, { outputType: 'outpaint', refs: refs }, origin);
 
       // 新产出节点从 stale 传播豁免；源节点旧下游标 stale（与引擎其它成功链路口径一致）
       this._createdCardIds.clear();
@@ -405,6 +410,9 @@ class RunEngine {
             resolution: typeof p.resolution === 'string' ? p.resolution : '2k',
             count: typeof p.count === 'number' ? p.count : 1,
             outputType: 'img2img',
+            thumbnail: after.imageUrl, // 展示图=缩略图
+            originalPath: after.imageOrigin?.path,
+            originalUrl: after.imageOrigin?.url,
           });
           flowState.updateNode(nodeId, { imageUrl: null });
         }
@@ -445,6 +453,10 @@ class RunEngine {
       if (result.success && result.imageUrl) {
         // P3：该张图未落盘到用户配置目录（tempfile 兜底）→ 标记，批次结束统一 toast
         if (result.savedToDisk === false) this._sawNotSavedToDisk = true;
+        // 原图引用（图片性能优化：卡片主视觉=缩略图，大图按需加载用）
+        const origin: ImageOrigin | null = result.originalPath
+          ? { path: result.originalPath, url: result.originalUrl }
+          : null;
         if (isTxt2Img && index === 0) {
           // 保护点 2：源节点当前 imageUrl（旧图）被锁定 → 不写回自身，改走新建产出节点（旧图保留，Q3）
           const gen = flowState.getNode(genId);
@@ -453,12 +465,12 @@ class RunEngine {
             const card = await this.createResultCard(genId, result.imageUrl, layout, {}, {
               outputType: 'txt2img',
               refs,
-            });
+            }, origin);
             this._createdCardIds.add(card.id);
             progress.done += 1;
           } else {
             // 文生图第 1 张（按 index=0，非完成顺序）写回源节点自身 imageUrl
-            await this._writeBackToSelf(genId, result.imageUrl);
+            await this._writeBackToSelf(genId, result.imageUrl, origin);
             progress.done += 1;
           }
         } else {
@@ -466,7 +478,7 @@ class RunEngine {
           const card = await this.createResultCard(genId, result.imageUrl, layout, {}, {
             outputType: isTxt2Img ? 'txt2img' : 'img2img',
             refs,
-          });
+          }, origin);
           this._createdCardIds.add(card.id);
           progress.done += 1;
         }
@@ -484,13 +496,14 @@ class RunEngine {
   /**
    * 文生图第 1 张写回源节点自身：旧 imageUrl 先入历史图库保留，再覆盖为新图（不建新节点、不清空 imageUrl）。
    * 写回后源节点即「有输出图」，下游仍可自动取作参考图（getReferenceImages 语义不变）。
+   * origin：原图引用（缩略图 + 原图路径，查看大图按需加载用）；旧后端无 original_path 时为 null。
    */
-  private async _writeBackToSelf(genId: string, imageUrl: string): Promise<void> {
+  private async _writeBackToSelf(genId: string, imageUrl: string, origin: ImageOrigin | null = null): Promise<void> {
     const node = flowState.getNode(genId);
     if (!node) return;
     if (node.imageUrl && node.imageUrl !== imageUrl) {
       const p = node.params as unknown as StyleTransferParams;
-      historyDrawer.addImage(node.imageUrl, { // 旧图入历史图库保留（带搜索元数据）
+      historyDrawer.addImage(node.imageUrl, { // 旧图入历史图库保留（带搜索元数据 + 原图引用）
         nodeId: node.id,
         prompt: typeof p.prompt === 'string' ? p.prompt : '',
         model: typeof p.model === 'string' ? p.model : '',
@@ -498,14 +511,26 @@ class RunEngine {
         resolution: typeof p.resolution === 'string' ? p.resolution : '2k',
         count: typeof p.count === 'number' ? p.count : 1,
         outputType: 'txt2img',
+        thumbnail: node.imageUrl, // 展示图=缩略图
+        originalPath: node.imageOrigin?.path,
+        originalUrl: node.imageOrigin?.url,
       });
     }
     const ratio = await loadImageRatio(imageUrl);
     flowState.setNodeImage(genId, imageUrl, ratio && ratio > 0 ? ratio : undefined);
     // 文生图第 1 张写回自身：source of truth = node.trace，并追加一条 kind:'image' 流水
+    node.imageOrigin = origin; // 原图引用（缩略图 + 原图路径）
     const trace = historyPersist.buildImageTrace(node, [], 'txt2img', imageUrl);
     node.trace = trace;
-    void historyPersist.appendTrace({ kind: 'image', nodeId: node.id, ...trace, imageUrl });
+    void historyPersist.appendTrace({
+      kind: 'image',
+      nodeId: node.id,
+      ...trace,
+      imageUrl,
+      thumbnail: imageUrl,
+      originalPath: origin?.path,
+      originalUrl: origin?.url,
+    });
   }
 
   /**
@@ -523,6 +548,7 @@ class RunEngine {
     layout: ResultLayout,
     paramOverrides: Record<string, unknown> = {},
     trace: { outputType: GenerationTrace['outputType']; refs: string[] } = { outputType: 'img2img', refs: [] },
+    origin: ImageOrigin | null = null,
   ): Promise<FlowNode> {
     const gen = flowState.getNode(genId);
     if (!gen) throw new Error('生成节点已删除，产出节点创建失败');
@@ -536,6 +562,7 @@ class RunEngine {
     const node = flowState.addNode('image-gen', layout.x, y, {
       parentId: genId,
       imageUrl,
+      imageOrigin: origin, // 原图引用（缩略图 + 原图路径，查看大图按需加载用）
       ratio: r,
       status: 'done',
       error: null,
@@ -567,8 +594,19 @@ class RunEngine {
       refImageUrls: trace.refs,
       refImageHashes: nodeTrace.refImageHashes,
       outputType: trace.outputType,
+      thumbnail: imageUrl, // 展示图=缩略图
+      originalPath: origin?.path,
+      originalUrl: origin?.url,
     });
-    void historyPersist.appendTrace({ kind: 'image', nodeId: node.id, ...nodeTrace, imageUrl });
+    void historyPersist.appendTrace({
+      kind: 'image',
+      nodeId: node.id,
+      ...nodeTrace,
+      imageUrl,
+      thumbnail: imageUrl,
+      originalPath: origin?.path,
+      originalUrl: origin?.url,
+    });
     return node;
   }
 

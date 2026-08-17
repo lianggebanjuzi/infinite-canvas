@@ -11,7 +11,10 @@ export interface PollOptions {
 
 export interface PollResult {
   success: boolean;
-  imageUrl?: string;
+  imageUrl?: string;        // 展示图（新后端=缩略图 data URL；旧后端无缩略图时为原图 base64）
+  thumbnail?: string;       // 显式缩略图（新后端，= imageUrl）
+  originalPath?: string;    // 原图本地绝对路径（查看大图按需加载用）
+  originalUrl?: string;     // file:// 引用（备用）
   savedToDisk?: boolean; // incremental-3：生成图是否写入用户配置目录（tempfile 兜底为 false；后端旧版无该字段时为 undefined）
   code?: number;
   error?: string;
@@ -55,6 +58,9 @@ export async function pollTask(taskId: string, opts: PollOptions = {}): Promise<
         return {
           success: true,
           imageUrl: r.image_url,
+          thumbnail: typeof r.thumbnail === 'string' ? r.thumbnail : undefined,
+          originalPath: typeof r.original_path === 'string' ? r.original_path : undefined,
+          originalUrl: typeof r.original_url === 'string' ? r.original_url : undefined,
           savedToDisk: typeof r.saved_to_disk === 'boolean' ? r.saved_to_disk : undefined,
         };
       }

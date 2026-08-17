@@ -134,7 +134,9 @@ class ComparePanel {
       assetStore.unadoptByUrl(url);
       showToast('已取消采纳');
     } else {
-      assetStore.adoptByUrl(url, nodeId);
+      // 采纳：展示图 URL + 原图引用一并写入资产记录（查看大图按需加载用）
+      const node = flowState.getNode(nodeId);
+      assetStore.adoptByUrl(url, nodeId, undefined, node?.imageOrigin?.path);
       showToast('已采纳（自动锁定）');
     }
   }
@@ -142,7 +144,8 @@ class ComparePanel {
   /** 格内锁定/解锁（C6 P1：复用图库锁定语义，同一数据源） */
   private _cellLock(url: string, nodeId: string): void {
     flowHistory.record();
-    assetStore.setLockedByUrl(url, nodeId, !assetStore.isLockedByImageUrl(url));
+    const node = flowState.getNode(nodeId);
+    assetStore.setLockedByUrl(url, nodeId, !assetStore.isLockedByImageUrl(url), node?.imageOrigin?.path);
     showToast(assetStore.isLockedByImageUrl(url) ? '已锁定' : '已解锁');
   }
 

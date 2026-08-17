@@ -1,6 +1,15 @@
 // src/v1/types/backend.d.ts
 // ICV v1 后端调用返回类型（ambient，对应 backend/api/* 的返回结构）
 
+/** Key 条目（对应 provider.keys[]，multi-key：每个 Key 独立模型组） */
+interface BackendProviderKey {
+  id: string;
+  name: string;
+  api_key: string;
+  enabled: boolean;
+  models: BackendModel[];
+}
+
 /** 供应商配置（对应 provider_api.load_providers 返回项） */
 interface BackendProvider {
   id: string;
@@ -8,10 +17,11 @@ interface BackendProvider {
   type: string;
   short_name: string;
   enabled: boolean;
-  api_key?: string;
   api_url?: string;
   use_proxy?: boolean;
-  models?: BackendModel[];
+  keys?: BackendProviderKey[];   // 新结构（load_providers 归一化后必有）
+  api_key?: string;              // legacy：读兼容，新代码不写
+  models?: BackendModel[];       // legacy：读兼容，新代码不写
 }
 
 /** 模型条目 */
@@ -32,8 +42,14 @@ interface BackendTaskResult {
   status: string;            // pending | done | not_found
   result?: {
     success?: boolean;
-    image_url?: string;
+    image_url?: string;      // 展示图（新后端=缩略图 data URL；旧后端=原图 base64）
     images?: string[];
+    thumbnail?: string;      // 显式缩略图（新后端，= image_url）
+    thumbnails?: string[];
+    original_path?: string;  // 原图本地绝对路径（查看大图按需加载用；正斜杠）
+    original_paths?: string[];
+    original_url?: string;   // file:// 引用（信息性，禁止直接渲染）
+    original_urls?: string[];
     saved_to_disk?: boolean; // incremental-3：生成图是否写入用户配置目录（tempfile 兜底为 false）
     error?: string;
     error_code?: number;
