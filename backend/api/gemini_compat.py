@@ -1,6 +1,7 @@
 # backend/api/gemini_compat.py
-"""Gemini generateContent 与中转站兼容：宽高比枚举、文本中的图片 URL 提取。"""
+"""Gemini generateContent 与中转站兼容：宽高比枚举、文本中的图片 URL 提取、URL 版本前缀归一化。"""
 import re
+from urllib.parse import urlparse
 
 # Google Gemini image_config.aspect_ratio 枚举（不支持 Auto）
 GEMINI_IMAGE_ASPECT_RATIOS = frozenset({
@@ -83,6 +84,45 @@ def normalize_gemini_image_size(val):
         return up
     low = s.lower()
     return _RESOLUTION_TO_IMAGE_SIZE.get(low, '1K')
+
+
+def resolve_image_api_base(api_url):
+    """
+    解析图片请求基址，并为 FluxPort 切换到官方图片直连域名。
+
+    FluxPort 的语言地址 ``api.uselg.top`` 经过 Cloudflare，不适合图片长请求；
+    官方文档要求图片改走 ``https://api.ai-media.vip``。其他供应商域名原样保留。
+    随后由 :func:`strip_api_version_suffix` 统一剥离 /v1 或 /v1beta。
+    """
+    raw = (api_url or '').strip()
+    if not raw:
+        return raw
+    parsed = urlparse(raw)
+    if parsed.hostname and parsed.hostname.lower() == 'api.uselg.top':
+        return 'https://api.ai-media.vip'
+    return strip_api_version_suffix(raw)
+
+
+def strip_api_version_suffix(api_url):
+    """
+    去掉 api_url 末尾的 /v1beta 或 /v1 路径段（最长优先，避免 /v1beta 被 /v1 误伤），
+    用于拼接 /v1beta/models/{model}:generateContent 或 /v1/images/generations 时
+    不产生 /v1/v1beta/ 或 /v1/v1/ 双重前缀。
+
+    兼容三种供应商配置：
+      - 裸域名：      https://api.ai-media.vip          -> https://api.ai-media.vip
+      - 带 /v1：      https://api.ai-media.vip/v1       -> https://api.ai-media.vip
+      - 带 /v1beta：  https://api.ai-media.vip/v1beta   -> https://api.ai-media.vip
+    """
+    base = (api_url or '').strip().rstrip('/')
+    if not base:
+        return base
+    lowered = base.lower()
+    if lowered.endswith('/v1beta'):
+        return base[: -len('/v1beta')]
+    if lowered.endswith('/v1'):
+        return base[: -len('/v1')]
+    return base
 
 
 def _is_image_candidate(url):

@@ -2,6 +2,9 @@
 
 ## 项目长期信息
 
+- **2026-08-17 起主开发目录 = `D:\Infinite Canvas\Infinite Canvas 2.0`**（本机新建，复制自 1.0 含 git 历史；1.0 目录保留作归档不再开发）。2.0 与 1.0 同仓库 `github.com/lianggebanjuzi/infinite-canvas` 同 main 分支，历史延续；起步说明 `docs/2.0-起步说明.md`，产品方案 `docs/视觉实验台-产品方案v3.md`。
+- 2.0 当前基线（2026-08-16）：双卡模型（image-gen/text-gen）+ 信任层（原子保存/关闭保护/撤销重做）+ 资产评估层（复现按钮/成图库/对比面板）+ 资产库拆分（增量-3 已入库 42502a0）。剩余路线：批量变体对比、Agent、模板固化。
+- 2.0 构建坑：vite `emptyOutDir` 清 `gui/dist` 会被环境 trash 拦截——**先手动删 `gui/dist` 再单独跑 build**。
 - Infinite Canvas 2.2 是一个基于 pywebview + 原生 HTML/CSS/JavaScript 的无限画布创作工具，核心对象是卡片、连线、分组与 AI 工作流。
 - 现有界面基础风格是玻璃极简风、深色优先、支持浅色主题。
 - 2026-04-06 曾定 UI 方向为“Canvas Command Workspace”（已被 2026-08-11 重启方案取代，勿再沿用）。

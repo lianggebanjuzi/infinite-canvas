@@ -31,6 +31,7 @@ from backend.api.gemini_compat import (
     nearest_aspect_ratio,
     normalize_gemini_aspect_ratio,
     normalize_gemini_image_size,
+    resolve_image_api_base,
 )
 from backend.api.model_rules import (
     detect_model_type as detect_model_type_str,
@@ -299,9 +300,15 @@ class UnifiedAPIRouter:
         proxies   = None if use_proxy else {"http": None, "https": None}
 
         url, payload = self._build_image_request(api_url, model_entry, prompt, options)
+        # FluxPort 等中转站推荐（非强制）提交时带唯一幂等键，避免重复提交产生重复任务
+        idempotency_key = (
+            (options or {}).get('idempotencyKey')
+            or f"icv-img-{uuid.uuid4().hex}"
+        )
         headers = {
-            'Content-Type':  'application/json',
-            'Authorization': f'Bearer {api_key}'
+            'Content-Type':    'application/json',
+            'Authorization':   f'Bearer {api_key}',
+            'Idempotency-Key': idempotency_key,
         }
 
         print(f"[UnifiedAPI] 图片请求 | provider={provider['name']} | model={model_entry.id} | format={model_entry.api_format.value} | url={url}")
@@ -323,13 +330,27 @@ class UnifiedAPIRouter:
                     task_data = response.json()
                 except ValueError:
                     task_data = {}
-                origin = self._get_api_origin(api_url)
+                # status_url / poll_url 常为相对路径，必须拼到实际图片请求域名；
+                # FluxPort 配置若仍是 api.uselg.top，此处 url 已映射到 api.ai-media.vip。
+                origin = self._get_api_origin(url)
                 result = self._poll_async_image_task(task_data, origin, headers, proxies)
                 if result.get('success'):
                     result = self._save_images_to_local(result)
                 return result
             else:
-                self._handle_http_error(response)
+                try:
+                    self._handle_http_error(response)
+                except ModelNotSupportedError as e:
+                    # OpenAI 图片格式在本中转站不可用（实测 /v1/images/generations 返回 404）：
+                    # 给出清晰提示，引导改用 Gemini 原生图片模型，而不是笼统的「模型不支持」
+                    if model_entry.api_format == ApiFormat.OPENAI_IMAGE:
+                        raise AppError(
+                            422,
+                            "该供应商分组不支持 OpenAI 图片格式（Images API 不可用/返回 404），"
+                            "请改用 Gemini 原生图片模型（如 gemini-3-pro-image-preview / "
+                            "gemini-3.1-flash-image-preview）"
+                        )
+                    raise
         except requests.exceptions.ConnectionError:
             raise UpstreamError(503, "无法连接到服务器，请检查网络或代理设置")
         except requests.exceptions.Timeout:
@@ -512,12 +533,19 @@ class UnifiedAPIRouter:
         return f"{base}/v1/chat/completions"
 
     def _resolve_image_url(self, api_url, model_id, api_format):
-        """解析图片请求 URL"""
+        """
+        解析图片请求 URL。
+        FluxPort 的语言域名 api.uselg.top 先映射到图片直连域名 api.ai-media.vip，
+        再剥离 api_url 已带的 /v1、/v1beta 路径段（避免双重前缀），最后按格式拼接：
+          - GEMINI_NATIVE  -> {origin}/v1beta/models/{model_id}:generateContent
+          - OPENAI_IMAGE   -> {origin}/v1/images/generations
+        """
+        base = resolve_image_api_base(api_url)
         if api_format == ApiFormat.GEMINI_NATIVE:
             model_id = self._apply_resolution_suffix(model_id)
-            return f"{api_url}/v1beta/models/{model_id}:generateContent"
+            return f"{base}/v1beta/models/{model_id}:generateContent"
         elif api_format == ApiFormat.OPENAI_IMAGE:
-            return f"{api_url}/v1/images/generations"
+            return f"{base}/v1/images/generations"
 
         raise ModelNotSupportedError(model_id)
 
@@ -698,18 +726,51 @@ class UnifiedAPIRouter:
         """
         从异步任务完成响应中提取图片 URL 列表。
         返回 (images, kind)：
-          - kind='url'：data[].url 完整 URL，可直接下载
-          - kind='fileuri'：candidates[].content.parts[].fileData.fileUri 相对路径，
-            已拼 origin，需带 Authorization 下载
+          - kind='url'    ：完整可直链 URL（assets[].signed_url / data[].url 绝对地址），
+                            无需鉴权即可下载
+          - kind='fileuri'：相对路径资源（assets[].url|download_url 相对、fileData.fileUri），
+                            已拼 origin，需带 Authorization 下载
+          - kind='base64' ：data:image/...;base64, 直接可用（Gemini 原生 inlineData）
           - 未出图返回 ([], None)
         """
         if not isinstance(result, dict):
             return [], None
 
-        # 优先 data 数组（完整 URL，直接可用）
+        # 1) assets[]：FluxPort 异步任务资产清单
+        #    优先 signed_url（6 小时临时 HTTPS 直链，免 Authorization）；
+        #    缺失时用 url / download_url（相对路径拼 origin，需带 API Key 下载）
+        assets = result.get('assets')
+        if isinstance(assets, list):
+            signed_images = []
+            authed_images = []
+            for asset in assets:
+                if not isinstance(asset, dict):
+                    continue
+                signed = asset.get('signed_url')
+                if isinstance(signed, str) and signed.strip():
+                    signed = signed.strip()
+                    signed_images.append(
+                        signed if signed.startswith(('http://', 'https://'))
+                        else self._join_origin_path(origin, signed)
+                    )
+                    continue
+                raw = asset.get('url') or asset.get('download_url')
+                if isinstance(raw, str) and raw.strip():
+                    raw = raw.strip()
+                    authed_images.append(
+                        raw if raw.startswith(('http://', 'https://'))
+                        else self._join_origin_path(origin, raw)
+                    )
+            if signed_images:
+                return signed_images, 'url'
+            if authed_images:
+                return authed_images, 'fileuri'
+
+        # 2) data[]（OpenAI DALL-E 风格 / 部分中转站完整 URL）
         data = result.get('data')
         if isinstance(data, list):
             url_images = []
+            authed_images = []
             for item in data:
                 if not isinstance(item, dict):
                     continue
@@ -720,13 +781,18 @@ class UnifiedAPIRouter:
                 if raw.startswith(('http://', 'https://')):
                     url_images.append(raw)
                 else:
-                    url_images.append(self._join_origin_path(origin, raw))
+                    authed_images.append(self._join_origin_path(origin, raw))
             if url_images:
                 return url_images, 'url'
+            if authed_images:
+                return authed_images, 'fileuri'
 
-        # candidates[].content.parts[].fileData.fileUri（相对路径，需拼 origin）
+        # 3) candidates[].content.parts[]：
+        #    inlineData（Gemini 原生 base64，兼容 camelCase / snake_case）
+        #    fileData.fileUri（相对路径，需拼 origin 带鉴权下载）
         candidates = result.get('candidates')
         if isinstance(candidates, list):
+            base64_images = []
             file_images = []
             for candidate in candidates:
                 if not isinstance(candidate, dict):
@@ -738,17 +804,29 @@ class UnifiedAPIRouter:
                 for part in parts:
                     if not isinstance(part, dict):
                         continue
+                    inline = part.get('inlineData') or part.get('inline_data')
+                    if isinstance(inline, dict):
+                        b64_data = inline.get('data') or inline.get('base64')
+                        if b64_data:
+                            mime = (
+                                inline.get('mimeType')
+                                or inline.get('mime_type')
+                                or 'image/png'
+                            )
+                            base64_images.append(f"data:{mime};base64,{b64_data}")
+                            continue
                     file_data = part.get('fileData') or part.get('file_data')
-                    if not isinstance(file_data, dict):
-                        continue
-                    file_uri = file_data.get('fileUri')
-                    if not file_uri:
-                        continue
-                    file_uri = str(file_uri).strip()
-                    if file_uri.startswith(('http://', 'https://')):
-                        file_images.append(file_uri)
-                    else:
-                        file_images.append(self._join_origin_path(origin, file_uri))
+                    if isinstance(file_data, dict):
+                        file_uri = file_data.get('fileUri')
+                        if not file_uri:
+                            continue
+                        file_uri = str(file_uri).strip()
+                        if file_uri.startswith(('http://', 'https://')):
+                            file_images.append(file_uri)
+                        else:
+                            file_images.append(self._join_origin_path(origin, file_uri))
+            if base64_images:
+                return base64_images, 'base64'
             if file_images:
                 return file_images, 'fileuri'
 
@@ -775,52 +853,76 @@ class UnifiedAPIRouter:
     def _poll_async_image_task(self, task_data, origin, headers, proxies):
         """
         轮询 FluxPort 风格异步图片任务（HTTP 202 -> 任务对象 -> 轮询直到出图）。
+        优先使用 status_url（?view=summary 轻量接口，不拉大 base64），
+        缺失时回退 poll_url / result_url。
         返回 {"success": True, "image_url": ..., "images": [...]}；
         失败/超时抛 AppError 子类（UpstreamError / UpstreamTimeoutError）。
         """
         if not isinstance(task_data, dict):
             task_data = {}
 
-        # 确定轮询 URL：poll_url -> result_url -> /v1/images/tasks/{task_id}
-        poll_url = task_data.get('poll_url') or task_data.get('result_url') or ''
+        # 确定轮询 URL：status_url（轻量 summary，推荐）-> poll_url -> result_url -> 拼 task_id
+        poll_url = (
+            task_data.get('status_url')
+            or task_data.get('poll_url')
+            or task_data.get('result_url')
+            or ''
+        )
         task_id = task_data.get('task_id') or task_data.get('id') or ''
         if not poll_url and task_id:
-            poll_url = f"/v1/images/tasks/{task_id}"
+            poll_url = f"/v1/images/tasks/{task_id}?view=summary"
         if not poll_url:
-            raise UpstreamError(502, "异步任务响应缺少 poll_url / result_url / task_id，无法轮询")
+            raise UpstreamError(502, "异步任务响应缺少 status_url / poll_url / result_url / task_id，无法轮询")
         if not poll_url.startswith(('http://', 'https://')):
             poll_url = self._join_origin_path(origin, poll_url)
 
-        # 轮询间隔：poll_after_ms（默认 2000ms），下限 0.5s 防死循环
+        # 轮询间隔：poll_after_ms（默认 2000ms），下限 2s（文档要求，防打爆轻量接口）
         poll_after_ms = task_data.get('poll_after_ms')
         try:
             poll_interval = float(poll_after_ms) / 1000.0 if poll_after_ms else 2.0
         except (TypeError, ValueError):
             poll_interval = 2.0
-        poll_interval = max(0.5, poll_interval)
+        poll_interval = max(2.0, poll_interval)
 
-        # 总超时上限：默认 120s；若有 expires_at 且更早，则取较小者
-        timeout_limit = 120.0
+        # 总超时上限：默认 300s（图片任务可能排队较久，放宽原 120s）；
+        # 若有 expires_at 且剩余时间更短，则以 expires_at + 60s 缓冲为上限。
+        timeout_limit = 300.0
         expires_ts = self._parse_expires_at(task_data.get('expires_at'))
         if expires_ts is not None:
             remaining = expires_ts - time.time()
             if remaining > 0:
-                timeout_limit = min(timeout_limit, remaining)
+                timeout_limit = min(timeout_limit, remaining + 60.0)
         deadline = time.time() + timeout_limit
 
         print(f"[UnifiedAPI] 异步任务已接受(202) | task_id={task_id or '-'} | poll_url={poll_url} | "
               f"间隔={poll_interval:.1f}s | 超时={timeout_limit:.0f}s")
 
+        consecutive_failures = 0  # 429 / 网络错误连续计数，用于逐步退避
+        soft_state_count = 0      # uncertain / client_disconnected 连续计数，避免无限挂起
+
         while time.time() < deadline:
             try:
                 resp = requests.get(poll_url, headers=headers, timeout=60, proxies=proxies)
-            except requests.exceptions.ConnectionError:
-                raise UpstreamError(503, "无法连接到服务器，请检查网络或代理设置")
-            except requests.exceptions.Timeout:
-                raise UpstreamTimeoutError()
+            except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+                # 网络错误：退避重试（5-10s），不立即判失败
+                consecutive_failures += 1
+                wait = min(poll_interval * (2 ** min(consecutive_failures, 3)), 10.0)
+                print(f"[UnifiedAPI] 异步任务轮询网络异常({type(e).__name__})，{wait:.1f}s 后重试")
+                time.sleep(wait)
+                continue
+
+            if resp.status_code == 429:
+                # 限流：退避重试
+                consecutive_failures += 1
+                wait = min(poll_interval * (2 ** min(consecutive_failures, 3)), 10.0)
+                print(f"[UnifiedAPI] 异步任务轮询 429 限流，{wait:.1f}s 后退避重试")
+                time.sleep(wait)
+                continue
 
             if resp.status_code != 200:
                 self._handle_http_error(resp)
+
+            consecutive_failures = 0
 
             try:
                 data = resp.json()
@@ -829,22 +931,38 @@ class UnifiedAPIRouter:
                 time.sleep(poll_interval)
                 continue
 
-            # 失败状态 / 错误字段
             status = data.get('status') if isinstance(data, dict) else None
-            if isinstance(status, str) and status.lower() in (
-                'failed', 'error', 'canceled', 'cancelled', 'timeout'
-            ):
-                raise UpstreamError(502, f"异步任务失败: {self._extract_task_error(data)}")
+            status_l = str(status).strip().lower() if status is not None else ''
 
+            # 终态失败：failed / error / canceled / cancelled / paused / timeout
+            if status_l in ('failed', 'error', 'canceled', 'cancelled', 'paused', 'timeout'):
+                raise UpstreamError(502, f"异步任务{status_l}：{self._extract_task_error(data)}")
+
+            # 软失败态：uncertain / client_disconnected —— 先查原任务，勿盲目重发；
+            # 连续出现多次仍未恢复则按错误提示退出（避免无限挂起）
+            if status_l in ('uncertain', 'client_disconnected'):
+                soft_state_count += 1
+                print(f"[UnifiedAPI] 异步任务状态 {status_l}（第 {soft_state_count} 次），"
+                      f"继续查询原任务... {self._extract_task_error(data)}")
+                if soft_state_count >= 6:
+                    raise UpstreamError(
+                        502,
+                        f"异步任务持续处于 {status_l} 状态，结果不确定：{self._extract_task_error(data)}"
+                    )
+                time.sleep(poll_interval)
+                continue
+            soft_state_count = 0
+
+            # 显式 error 字段
             if isinstance(data, dict) and (data.get('error') or data.get('error_code')):
                 raise UpstreamError(502, f"异步任务错误: {self._extract_task_error(data)}")
 
-            # 提取图片
+            # 提取图片（assets[] / data[] / candidates[]）
             images, kind = self._extract_async_image_urls(data, origin)
             if images:
-                print(f"[UnifiedAPI] 异步任务完成 | task_id={task_id or '-'} | 图片 {len(images)} 张")
+                print(f"[UnifiedAPI] 异步任务完成 | task_id={task_id or '-'} | 图片 {len(images)} 张 | kind={kind}")
                 if kind == 'fileuri':
-                    # fileUri 为受保护资源，需带 Authorization 下载转 base64
+                    # fileUri / 相对 url：受保护资源，需带 Authorization 下载转 base64
                     converted = [
                         u for u in (
                             self._download_authed_image_to_base64(u, headers, proxies)
@@ -852,17 +970,30 @@ class UnifiedAPIRouter:
                         )
                         if u
                     ]
-                    if converted:
-                        images = converted
+                    if not converted:
+                        raise UpstreamError(
+                            502,
+                            "异步任务图片下载失败（需鉴权的资源无法获取），请检查 API 密钥或稍后重试"
+                        )
+                    images = converted
+                # kind == 'url'：signed_url / 绝对直链，无需鉴权（_save_images_to_local 负责下载）
+                # kind == 'base64'：data URL 直接可用
                 return {
                     "success":   True,
                     "image_url": images[0],
                     "images":    images
                 }
 
+            # 完成态但没有图片 -> 数据异常（图片任务完成态是 success，不是 completed）
+            if status_l == 'success':
+                raise UpstreamError(
+                    502,
+                    f"异步任务标记为 success，但响应中未找到图片数据: {self._extract_task_error(data)}"
+                )
+
             time.sleep(poll_interval)
 
-        raise UpstreamTimeoutError("图片生成超时，请稍后重试")
+        raise UpstreamTimeoutError("图片生成超时，请稍后重试（任务可能仍在排队）")
 
     # ─────────────────────────────────────────
     # 内部方法：响应解析
@@ -1304,6 +1435,14 @@ class UnifiedAPIRouter:
 
         print(f"[UnifiedAPI] HTTP {response.status_code}: {error_msg[:200]}")
 
+        # FluxPort 等中转站对部分 Key 分组不支持 OpenAI 图片格式（实测 /v1/images/generations 返回 404）
+        if 'images api is not supported' in error_msg.lower():
+            raise AppError(
+                response.status_code,
+                "该供应商分组不支持 OpenAI 图片格式（Images API 不可用），"
+                "请改用 Gemini 原生图片模型（如 gemini-3-pro-image-preview / "
+                "gemini-3.1-flash-image-preview）"
+            )
         if 'not supported' in error_msg.lower() or 'not found' in error_msg.lower():
             raise ModelNotSupportedError()
         elif response.status_code == 401:

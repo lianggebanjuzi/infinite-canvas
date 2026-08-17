@@ -8,6 +8,8 @@ import os
 import requests
 from datetime import datetime
 
+from backend.api.gemini_compat import resolve_image_api_base
+
 
 class ImageAPI:
 
@@ -319,7 +321,8 @@ class ImageAPI:
             )
 
             if is_gemini:
-                endpoint = f"{api_url}/v1beta/models/{model_id}:generateContent"
+                # FluxPort 语言域名映射到图片直连域名，并避免 /v1/v1beta/ 双重前缀
+                endpoint = f"{resolve_image_api_base(api_url)}/v1beta/models/{model_id}:generateContent"
                 headers  = {
                     'x-goog-api-key': api_key,
                     'Content-Type':   'application/json'
