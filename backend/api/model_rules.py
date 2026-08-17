@@ -39,6 +39,7 @@ DRAWING_RULES: List[Tuple[str, str]] = [
     ('seedream',     'gemini_native'),
     ('dall-e',       'openai_image'),
     ('dall-e-',      'openai_image'),
+    # 子串匹配：gpt-image / gpt-image-1 / gpt-image-2 等均命中本规则 -> openai_image
     ('gpt-image',    'openai_image'),
     ('dalle',        'openai_image'),
 ]

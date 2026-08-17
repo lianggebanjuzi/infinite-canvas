@@ -18,7 +18,8 @@ import sys
 import unittest.mock as mock
 from datetime import datetime, timedelta, timezone
 
-PROJECT_ROOT = r"D:\Infinite Canvas\Infinite Canvas 2.0"
+# 项目根目录：从本脚本位置推导（兼容任意盘符，本机为 G 盘）
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
@@ -56,13 +57,13 @@ SIGNED_URL = "https://media.ai-media.vip/v1/images/tasks/imgtask_xxx/assets/sign
 
 
 class MockResp:
-    def __init__(self, status_code=200, json_data=None, text='', content=b'', headers=None):
+    def __init__(self, status_code=200, json_data=None, text='', content=b'', headers=None, url=''):
         self.status_code = status_code
         self._json_data = json_data
         self.text = text
         self.content = content
         self.headers = headers if headers is not None else {'Content-Type': 'image/png'}
-        self.url = ''
+        self.url = url
 
     def json(self):
         if self._json_data is None:
@@ -152,7 +153,8 @@ def t04_post_uses_mapped_url_and_poll_origin_matches():
 
     def fake_post(url, *a, **k):
         seen_post_url.append(url)
-        return MockResp(202, TASK_202)
+        # 真实 requests 会回填 response.url（最终请求地址），轮询 origin 依赖它
+        return MockResp(202, TASK_202, url=url)
 
     def fake_get(url, *a, **k):
         seen_poll_url.append(url)
@@ -189,7 +191,9 @@ def t05_assets_signed_url_success():
         return poll_responses.pop(0)
 
     res = _run_with([
-        mock.patch.object(unified_api.requests, 'post', side_effect=lambda *a, **k: MockResp(202, TASK_202)),
+        mock.patch.object(unified_api.requests, 'post', side_effect=lambda *a, **k: MockResp(
+            202, TASK_202, url=IMAGE_ORIGIN + '/v1beta/models/gemini-3-pro-image-preview:generateContent'
+        )),
         mock.patch.object(unified_api.requests, 'get', side_effect=fake_get),
         # signed_url 下载失败时，当前链路允许直接回传绝对 URL
         mock.patch.object(router, '_download_url_to_base64', lambda url: None),
@@ -197,7 +201,9 @@ def t05_assets_signed_url_success():
 
     assert res['success'] is True
     assert res['image_url'] == SIGNED_URL
-    assert seen_poll[1] == SIGNED_URL
+    # signed_url 是免鉴权直链，直接回传，无需再下载
+    assert seen_poll[1] == IMAGE_ORIGIN + '/v1/images/tasks/imgtask_xxx?view=summary', seen_poll[1]
+    assert not any('signed' in u for u in seen_poll)
 
 
 # T06 assets url/download_url 走鉴权下载

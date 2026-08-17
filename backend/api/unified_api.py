@@ -133,6 +133,33 @@ _RES_SUFFIX = {'1k': '', '2k': '-2k', '4k': '-4k'}
 # 分辨率到 imageSize 的映射
 _RESOLUTION_MAP = {'1k': '1K', '2k': '2K', '4k': '4K'}
 
+# ─────────────────────────────────────────
+# OpenAI 图片（gpt-image / dall-e 系）尺寸映射
+# ─────────────────────────────────────────
+# OpenAI images/generations 合法尺寸集（宽 x 高）：
+#   - dall-e-3 官方仅支持 1024x1024 / 1024x1792 / 1792x1024
+#   - gpt-image 系额外支持 1024x1536 / 1536x1024（以及 auto）
+# FluxPort 中转站透传 size，本项目按「aspectRatio 优先 + resolution 定长边」收敛到该集合。
+_OPENAI_IMAGE_VALID_SIZES = frozenset({
+    '1024x1024', '1024x1536', '1536x1024', '1024x1792', '1792x1024',
+})
+
+# aspectRatio -> (1k 档, 2k/4k 档) 的 OpenAI size 映射：
+#   - 竖图（3:4 / 9:16）：1k 用 1024x1536，2k+ 用 1024x1792
+#   - 横图（4:3 / 16:9）：1k 用 1536x1024，2k+ 用 1792x1024
+#   - 方图（1:1）与 Auto：恒为 1024x1024（OpenAI 无更大的正方形档位）
+#   - 未知 aspectRatio：回退正方形 1024x1024
+_OPENAI_ASPECT_TO_SIZE = {
+    '1:1':  ('1024x1024', '1024x1024'),
+    '3:4':  ('1024x1536', '1024x1792'),
+    '4:3':  ('1536x1024', '1792x1024'),
+    '9:16': ('1024x1536', '1024x1792'),
+    '16:9': ('1536x1024', '1792x1024'),
+}
+
+# resolution -> 档位下标（0=1k 档，1=2k/4k 档，长边 1792）
+_OPENAI_RESOLUTION_TIER = {'1k': 0, '2k': 1, '4k': 1}
+
 
 # ─────────────────────────────────────────
 # 核心类：UnifiedAPIRouter
@@ -652,25 +679,73 @@ class UnifiedAPIRouter:
         url = self._resolve_image_url(api_url, model_id, ApiFormat.GEMINI_NATIVE)
         return url, payload
 
-    def _build_openai_image_payload(self, api_url, model_id, prompt, options):
-        """构建 OpenAI DALL-E 格式 payload"""
-        size = options.get('size', '1024x1024')
-        n    = options.get('count', 1)
+    def _map_openai_image_size(self, resolution='1k', aspect_ratio='Auto'):
+        """
+        把 UI 的 resolution + aspectRatio 映射为 OpenAI size 字符串（宽x高）。
+        映射规则：
+          - aspectRatio 优先决定方向（竖/横/方），resolution 决定长边档位
+          - 1k -> 1024/1536 档；2k/4k -> 1792 长边档
+          - Auto / 未知 aspectRatio -> 正方形 1024x1024
+          - 未知 resolution -> 按 1k 处理
+        返回 OpenAI 合法 size（见 _OPENAI_ASPECT_TO_SIZE / _OPENAI_IMAGE_VALID_SIZES）。
+        """
+        res = str(resolution or '1k').strip().lower()
+        tier = _OPENAI_RESOLUTION_TIER.get(res, 0)
+        ar = str(aspect_ratio or 'Auto').strip().lower()
+        sizes = _OPENAI_ASPECT_TO_SIZE.get(ar)
+        if sizes is None:
+            return '1024x1024'
+        return sizes[tier]
 
-        valid_sizes = {
-            '1024x1024': '1024x1024',
-            '1024x1792': '1024x1792',
-            '1792x1024': '1792x1024',
-        }
-        if size not in valid_sizes:
-            size = '1024x1024'
+    def _parse_data_url_image(self, data_url):
+        """
+        解析 data:image/*;base64,... 参考图，返回 (mime, base64_data)；
+        任何解析/校验失败返回 None（调用方忽略并打日志，不阻断文生图）。
+        """
+        try:
+            if not isinstance(data_url, str) or not data_url.startswith('data:image'):
+                return None
+            header, sep, encoded = data_url.partition(',')
+            if not sep or not encoded:
+                return None
+            mime = header[5:].split(';')[0].strip() or 'image/png'
+            # validate=True 严格校验 base64 字符集，非法数据直接判失败
+            b64lib.b64decode(encoded, validate=True)
+            return mime, encoded
+        except Exception:
+            return None
+
+    def _build_openai_image_payload(self, api_url, model_id, prompt, options):
+        """构建 OpenAI 图片（gpt-image / dall-e 系）payload"""
+        # 显式传入的 size 优先（向后兼容）；非法/缺失时按 resolution+aspectRatio 映射
+        size = options.get('size')
+        if not isinstance(size, str) or size.strip().lower() not in _OPENAI_IMAGE_VALID_SIZES:
+            size = self._map_openai_image_size(
+                options.get('resolution', '1k'),
+                options.get('aspectRatio', 'Auto'),
+            )
+        n = options.get('count', 1)
 
         payload = {
             "model":  model_id,
             "prompt": prompt,
             "n":      n,
-            "size":   size
+            "size":   size,
         }
+
+        # 参考图（图生图/换风格）：OpenAI gpt-image 系 images/generations 支持 image 输入。
+        # ⚠️ FluxPort 中转站参考图协议待真机确认，若 4xx 需调整字段（如 OpenAI edits 风格 multipart）。
+        # 参考图解析失败则忽略并打日志，不阻断文生图。
+        ref_images = []
+        for img_data in options.get('referenceImages', []):
+            parsed = self._parse_data_url_image(img_data)
+            if parsed is None:
+                print("[UnifiedAPI] OpenAI 图片参考图解析失败，已忽略该图（不阻断文生图）")
+                continue
+            mime, data = parsed
+            ref_images.append({"mimeType": mime, "data": data})
+        if ref_images:
+            payload["image"] = ref_images
 
         url = self._resolve_image_url(api_url, model_id, ApiFormat.OPENAI_IMAGE)
         return url, payload
