@@ -1,0 +1,71 @@
+classDiagram
+    class BackendProvider {
+        +string id
+        +string name
+        +string type
+        +string short_name
+        +boolean enabled
+        +string api_url
+        +boolean use_proxy
+        +BackendProviderKey[] keys
+        +string api_key  「legacy 读兼容」
+        +BackendModel[] models  「legacy 读兼容」
+    }
+    class BackendProviderKey {
+        +string id
+        +string name
+        +string api_key
+        +boolean enabled
+        +BackendModel[] models
+    }
+    class BackendModel {
+        +string id
+        +string name
+        +string type
+        +boolean enabled
+    }
+    class ProviderAPI {
+        +load_providers() dict
+        +save_providers(providers_data) dict
+        +add_provider(name, provider_type, short_name) dict
+        +update_provider(provider_id, updates) dict
+        +delete_provider(provider_id) dict
+        +add_key(provider_id, key_name) dict
+        +delete_key(provider_id, key_id) dict
+        +update_key(provider_id, key_id, updates) dict
+        +fetch_models(api_url, api_key) dict
+        +test_api_connection(api_url, api_key) dict
+        +add_chat_model(provider_id, key_id, model_id, model_name) dict
+        +remove_model(provider_id, key_id, model_id) dict
+    }
+    class UnifiedAPIRouter {
+        +_load_providers(force) list
+        +_resolve_drawing_model(model_str) tuple
+        +_resolve_chat_model(model_str) tuple
+        +chat(messages, options) dict
+        +chat_v2(user_input, options) dict
+        +generate_image_async(prompt, options) dict
+    }
+    class FrontendAPI {
+        +fetchImageModels() Array~{id,name}~
+        +fetchChatModels() Array~{id,name}~
+        +resolveDefaultModel() string
+        +resolveDefaultChatModel() string
+        +Backend.addKey(providerId, keyName) Promise
+        +Backend.deleteKey(providerId, keyId) Promise
+        +Backend.updateKey(providerId, keyId, updates) Promise
+        +Backend.removeModel(providerId, keyId, modelId) Promise
+    }
+    class SettingsPanel {
+        +providers: BackendProvider[]
+        +_renderEditor(p) HTMLElement
+        +_renderKeyCard(p, k) HTMLElement
+        +_renderDefaultModelSelect() HTMLElement
+    }
+    BackendProvider "1" *-- "1..n" BackendProviderKey : keys
+    BackendProviderKey "1" *-- "1..n" BackendModel : models
+    ProviderAPI --> BackendProvider : 归一化/CRUD
+    UnifiedAPIRouter --> ProviderAPI : _load_providers 读取
+    UnifiedAPIRouter ..> BackendProviderKey : 解析出 key.api_key 出图
+    FrontendAPI --> BackendProvider : 三层遍历拼三段 id
+    SettingsPanel --> FrontendAPI : 调用

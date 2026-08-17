@@ -1,0 +1,27 @@
+sequenceDiagram
+    autonumber
+    actor U as 用户
+    participant SP as SettingsPanel
+    participant API as Backend (src/v1/api.ts)
+    participant PV as pywebview.api (main.py)
+    participant PA as ProviderAPI
+    participant FS as providers_data.json
+
+    U->>SP: 编辑供应商 → 点击「添加 Key」
+    SP->>API: Backend.addKey(providerId)
+    API->>PV: add_key(provider_id)
+    PV->>PA: add_key(provider_id)
+    PA->>FS: load_providers()（读时归一化）
+    PA-->>SP: {status, key_id, key, keys}
+    SP->>SP: _refresh() 重渲染 key 卡片（keyN 默认名）
+    U->>SP: 填写新 key 的 api_key → 点击「拉取模型」
+    SP->>API: Backend.fetchModels(api_url, key.api_key)
+    API->>PV: fetch_models(api_url, api_key)
+    PV->>PA: fetch_models(api_url, api_key)
+    PA-->>SP: {status, models:[{id,name,type,enabled}]}
+    SP->>SP: 按 type 合并（chat/drawing 分桶，保留旧 enabled，保留手动添加）
+    SP->>API: Backend.updateKey(providerId, keyId, {models: merged})
+    API->>PV: update_key(provider_id, key_id, {models})
+    PV->>PA: update_key(...)
+    PA-->>SP: {status: success}
+    SP->>SP: 刷新本地 keys 副本 + 顶部默认模型下拉 + toast
