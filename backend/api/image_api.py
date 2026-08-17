@@ -364,7 +364,8 @@ class ImageAPI:
 
             else:
                 import io as _io
-                endpoint     = f"{api_url}/images/edits"
+                # FluxPort 直连域名映射（与 Gemini 分支共用 resolve_image_api_base）
+                endpoint     = f"{resolve_image_api_base(api_url)}/v1/images/edits"
                 canvas_bytes = base64.b64decode(canvas_data_url.split(',', 1)[1])
                 mask_bytes   = base64.b64decode(mask_data_url.split(',', 1)[1])
 

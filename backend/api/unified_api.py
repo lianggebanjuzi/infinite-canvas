@@ -331,8 +331,8 @@ class UnifiedAPIRouter:
                 except ValueError:
                     task_data = {}
                 # status_url / poll_url 常为相对路径，必须拼到实际图片请求域名；
-                # FluxPort 配置若仍是 api.uselg.top，此处 url 已映射到 api.ai-media.vip。
-                origin = self._get_api_origin(url)
+                # 使用 response.url（跟随重定向后的最终地址），避免因 302 跳转打到旧域名。
+                origin = self._get_api_origin(response.url)
                 result = self._poll_async_image_task(task_data, origin, headers, proxies)
                 if result.get('success'):
                     result = self._save_images_to_local(result)
