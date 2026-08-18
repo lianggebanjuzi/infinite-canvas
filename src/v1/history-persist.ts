@@ -33,7 +33,7 @@ class HistoryPersist {
     return {
       prompt: typeof promptOverride === 'string' ? promptOverride : (typeof p.prompt === 'string' ? p.prompt : ''),
       model: typeof p.model === 'string' ? p.model : '',
-      aspectRatio: typeof p.aspectRatio === 'string' ? p.aspectRatio : '3:4',
+      aspectRatio: typeof p.aspectRatio === 'string' ? p.aspectRatio : '4:3',
       resolution: typeof p.resolution === 'string' ? p.resolution : '2k',
       count: typeof p.count === 'number' ? p.count : 1,
       refImageHashes: (refs || []).filter(r => !!r).map(r => this.hashRef(r)),

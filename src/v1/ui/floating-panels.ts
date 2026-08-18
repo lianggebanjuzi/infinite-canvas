@@ -15,8 +15,22 @@ import { flowState } from '../state/flow-state';
 import { selection } from '../state/selection';
 
 class FloatingPanels {
-  /** 当前是否处于显示态（Tab 呼出后为 true，默认收起） */
+  /** 当前是否处于显示态（选中节点自动露出，也可用 Tab 呼出） */
   private _visible = false;
+  /** 用于区分“切换选中节点”和“同一节点内部状态更新”，避免输入时反复弹出面板 */
+  private _selectionKey = '';
+
+  constructor() {
+    flowState.subscribe(() => this._revealOnSelectionChange());
+  }
+
+  /** 单选节点是主工作入口：切换到新节点时自动露出面板；Esc 后同节点更新不打断用户。 */
+  private _revealOnSelectionChange(): void {
+    const key = selection.ids.join('|');
+    const changed = key !== this._selectionKey;
+    this._selectionKey = key;
+    if (changed && selection.single()) this._visible = true;
+  }
 
   /** 悬浮面板当前是否显示 */
   isVisible(): boolean {

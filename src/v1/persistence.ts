@@ -84,6 +84,8 @@ function migrateNode(raw: unknown): FlowNode | null {
       parentId,
       trace: null,
       ...(r.isAsset === true ? { isAsset: true } : {}), // isAsset 透传（防重开丢标记；缺省 undefined 不输出 key）
+      ...(typeof r.w === 'number' && r.w > 0 ? { w: r.w } : {}), // 宽高透传（text-gen 缩放；旧项目无字段自动回退默认）
+      ...(typeof r.h === 'number' && r.h > 0 ? { h: r.h } : {}),
     };
   }
 
@@ -110,6 +112,8 @@ function migrateNode(raw: unknown): FlowNode | null {
       lastRunAt: typeof r.lastRunAt === 'number' ? r.lastRunAt : null,
       parentId: null,
         trace: null,
+      ...(typeof r.w === 'number' && r.w > 0 ? { w: r.w } : {}), // 宽高透传（text-gen 缩放；旧项目无字段自动回退默认）
+      ...(typeof r.h === 'number' && r.h > 0 ? { h: r.h } : {}),
     };
   }
 
@@ -132,6 +136,8 @@ function migrateNode(raw: unknown): FlowNode | null {
     parentId,
       trace: null,
     ...(r.isAsset === true ? { isAsset: true } : {}), // isAsset 透传（防重开丢标记；缺省 undefined 不输出 key）
+    ...(typeof r.w === 'number' && r.w > 0 ? { w: r.w } : {}), // 宽高透传（text-gen 缩放；旧项目无字段自动回退默认）
+    ...(typeof r.h === 'number' && r.h > 0 ? { h: r.h } : {}),
   };
 
   node.refImages = Array.isArray(r.refImages)

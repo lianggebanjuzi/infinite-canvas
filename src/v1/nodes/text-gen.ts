@@ -1,5 +1,5 @@
 // src/v1/nodes/text-gen.ts
-// 「文本」节点定义：卡片显示文本结果（outputText），点卡片文本可直接改；
+// 「文本」节点定义：卡片显示文本结果（outputText），单击只选中，双击卡片文本才进入就地编辑；
 // 下方命令框输入处理指令（命令），文本模型按命令处理当前文本 → 结果写回卡片。
 // 运行链路：run-engine 按类型分派 → runTextGen（同步调 Backend.chatV2，无批次/无轮询/无产出节点）
 // 反推归位：文本节点有图片上游（素材/自建 imageUrl）时，runTextGen 自动把 data:image 图附带进 chatV2
@@ -18,7 +18,7 @@ const def: NodeDefinition = {
   type: 'text-gen',
   label: '文本',
   defaultTitle: '文本',
-  defaultRatio: 3 / 4,
+  defaultRatio: 4 / 3,
   defaultParams: {
     instruction: '', // 命令：临时输入，新建为空、发送后清空
     model: '',

@@ -18,7 +18,17 @@ import { reproduceService } from '../reproduce';
 
 const DRAG_THRESHOLD = 3;
 
-type DragMode = 'node' | 'pan' | 'select' | 'connect';
+/** 文本卡缩放钳制范围（世界坐标 px；最小 160×120，最大 640×800） */
+const RESIZE_MIN_W = 160;
+const RESIZE_MIN_H = 120;
+const RESIZE_MAX_W = 640;
+const RESIZE_MAX_H = 800;
+
+function clamp(v: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, v));
+}
+
+type DragMode = 'node' | 'pan' | 'select' | 'connect' | 'resize';
 
 interface DragState {
   mode: DragMode;
@@ -31,6 +41,9 @@ interface DragState {
   panVy: number;
   selX: number;
   selY: number;
+  /** resize 起始卡片宽高（世界坐标；拖拽累计用，避免浮点漂移） */
+  resizeW: number;
+  resizeH: number;
 }
 
 class Interactions {
@@ -42,6 +55,8 @@ class Interactions {
   private _dragSnapshots = new Map<string, { x: number; y: number }>();
   /** 拖动守卫：最近一次节点按下-松开是否发生了位移（超过 DRAG_THRESHOLD）——卡片文本点击进入编辑前排除拖拽后的 click */
   private _lastNodeDragMoved = false;
+  /** 拖动期间合并渲染请求，避免每个 mousemove 都同步重排卡片与连线。 */
+  private _renderFrame: number | null = null;
 
   init(): void {
     this.wrap = document.getElementById('canvas-wrap');
@@ -80,6 +95,8 @@ class Interactions {
           panVy: flowState.canvas.panY,
           selX: 0,
           selY: 0,
+          resizeW: 0,
+          resizeH: 0,
         };
         canvasView.startPan(e.clientX, e.clientY);
         return;
@@ -130,6 +147,11 @@ class Interactions {
 
   private _onCardMouseDown(e: MouseEvent, cardEl: HTMLElement): void {
     e.stopPropagation();
+    // resize 把手在卡片内：必须先拦截走缩放分支并 return，不能让卡片拖拽把把手也带走
+    if ((e.target as Element).closest('.pcard-resize')) {
+      this._startResizeDrag(e, cardEl);
+      return;
+    }
     if ((e.target as Element).closest('.pcard-act') || (e.target as Element).closest('.port')) return;
     this._lastNodeDragMoved = false; // 本次按下重置拖动守卫（随后 click 依据本次是否位移判定）
 
@@ -163,9 +185,39 @@ class Interactions {
       panVy: 0,
       selX: 0,
       selY: 0,
+      resizeW: 0,
+      resizeH: 0,
     };
     // 拖动起始快照（单节点用，避免累计漂移）
     this._dragSnapshots.set(nodeId, { x: node.x, y: node.y });
+  }
+
+  /**
+   * 文本卡右下角缩放拖拽（text-gen 专属）：记起始宽高，变更前入撤销栈。
+   * 拖拽中直接写 node.w/node.h（世界坐标），复用 _scheduleDragRender 合并渲染。
+   */
+  private _startResizeDrag(e: MouseEvent, cardEl: HTMLElement): void {
+    const nodeId = cardEl.dataset.nodeId || '';
+    const node = flowState.getNode(nodeId);
+    if (!node || node.type !== 'text-gen') return;
+    this._lastNodeDragMoved = false;
+    if (!selection.isSelected(nodeId)) selection.select(nodeId, false); // 与节点拖拽一致：操作卡片即选中
+    // 用户手势：变更前入撤销栈（参照连线/新建惯例）
+    flowHistory.record();
+    this.drag = {
+      mode: 'resize',
+      startX: e.clientX,
+      startY: e.clientY,
+      moved: false,
+      nodeId,
+      group: null,
+      panVx: 0,
+      panVy: 0,
+      selX: 0,
+      selY: 0,
+      resizeW: node.w ?? CARD_W,
+      resizeH: node.h ?? cardView.cardHeight(node),
+    };
   }
 
   private _onMouseMove(e: MouseEvent): void {
@@ -187,6 +239,24 @@ class Interactions {
       const world = canvasView.toWorldCoords(e.clientX, e.clientY);
       linkView.updateTempLine(world.x, world.y);
       this._updateDroppable(e);
+      return;
+    }
+
+    if (d.mode === 'resize') {
+      // 超过阈值才开始缩放（与 node 拖拽一致，避免误触）
+      if (!d.moved && Math.abs(e.clientX - d.startX) + Math.abs(e.clientY - d.startY) > DRAG_THRESHOLD) {
+        d.moved = true;
+      }
+      if (!d.moved) return;
+      const dx = (e.clientX - d.startX) / flowState.canvas.scale;
+      const dy = (e.clientY - d.startY) / flowState.canvas.scale;
+      const node = d.nodeId ? flowState.getNode(d.nodeId) : null;
+      if (node) {
+        // 直接写 node.w/node.h（可选字段），钳制最小 160×120 / 最大 640×800
+        node.w = clamp(d.resizeW + dx, RESIZE_MIN_W, RESIZE_MAX_W);
+        node.h = clamp(d.resizeH + dy, RESIZE_MIN_H, RESIZE_MAX_H);
+      }
+      this._scheduleDragRender();
       return;
     }
 
@@ -214,16 +284,30 @@ class Interactions {
       }
     }
 
-    cardView.renderAll();
-    linkView.renderAll();
+    this._scheduleDragRender();
+  }
+
+  private _scheduleDragRender(): void {
+    if (this._renderFrame !== null) return;
+    this._renderFrame = requestAnimationFrame(() => {
+      this._renderFrame = null;
+      cardView.renderAll();
+      linkView.renderAll();
+    });
   }
 
   private _onMouseUp(e: MouseEvent): void {
     const d = this.drag;
     if (!d) return;
 
-    if (d.mode === 'node') {
+    if (d.mode === 'node' || d.mode === 'resize') {
       this._lastNodeDragMoved = d.moved; // 记录本次按下-松开是否发生位移（拖动守卫：供 click 处理器排除拖拽后的误入编辑）
+      if (this._renderFrame !== null) {
+        cancelAnimationFrame(this._renderFrame);
+        this._renderFrame = null;
+        cardView.renderAll();
+        linkView.renderAll();
+      }
       if (d.moved) {
         flowState.updatedAt = Date.now();
         flowState.dirty = true;
@@ -281,6 +365,8 @@ class Interactions {
       panVy: 0,
       selX: 0,
       selY: 0,
+      resizeW: 0,
+      resizeH: 0,
     };
     portEl.classList.add('dragging');
     linkView.startTempLine(nodeId);
@@ -389,7 +475,7 @@ class Interactions {
   private _createNodeFromMenu(type: string, fromId: string, screenX: number, screenY: number): void {
     const def = nodeRegistry.get(type as NodeType);
     const world = canvasView.toWorldCoords(screenX, screenY);
-    const h = CARD_W / (def.defaultRatio > 0 ? def.defaultRatio : 3 / 4);
+    const h = CARD_W / (def.defaultRatio > 0 ? def.defaultRatio : 4 / 3);
     flowHistory.record();
     const node = flowState.addNode(type as NodeType, world.x - CARD_W / 2, world.y - h / 2);
     selection.select(node.id);
@@ -433,6 +519,8 @@ class Interactions {
       panVy: 0,
       selX: x,
       selY: y,
+      resizeW: 0,
+      resizeH: 0,
     };
     if (this.selBox) {
       this.selBox.style.display = 'block';
@@ -523,7 +611,7 @@ class Interactions {
     const img = new Image();
     img.onload = () => {
       const ratio = img.naturalWidth / img.naturalHeight;
-      const r = ratio > 0 ? ratio : 3 / 4;
+      const r = ratio > 0 ? ratio : 4 / 3;
 
       if (targetNode) {
         // 素材节点不接收上游图
@@ -584,8 +672,8 @@ class Interactions {
 
   /** 素材节点落位：目标卡左侧（上游位置，x 相隔一卡宽 + 间距；y 与目标卡垂直居中），避免覆盖目标卡 */
   private _assetPositionNear(target: FlowNode, r: number): { x: number; y: number } {
-    const targetH = Math.round(CARD_W / (target.ratio > 0 ? target.ratio : 3 / 4));
-    const assetH = Math.round(CARD_W / (r > 0 ? r : 3 / 4));
+    const targetH = Math.round(CARD_W / (target.ratio > 0 ? target.ratio : 4 / 3));
+    const assetH = Math.round(CARD_W / (r > 0 ? r : 4 / 3));
     return {
       x: target.x - CARD_W - 48,
       y: target.y + Math.round((targetH - assetH) / 2),
@@ -608,7 +696,7 @@ class Interactions {
             const target = flowState.getNode(nodeId);
             if (target) {
               const ratio = img.naturalWidth / img.naturalHeight;
-              const r = ratio > 0 ? ratio : 3 / 4;
+              const r = ratio > 0 ? ratio : 4 / 3;
               // 素材节点不接收上游图
               if (flowState.isAssetNode(target)) {
                 showToast('素材节点不能添加参考图', false);
@@ -869,7 +957,7 @@ class Interactions {
         const type = menu.dataset.newType || 'image-gen';
         const world = canvasView.toWorldCoords(window.innerWidth / 2, window.innerHeight / 2);
         const def = nodeRegistry.get(type as NodeType);
-        const h = CARD_W / (def.defaultRatio > 0 ? def.defaultRatio : 3 / 4);
+        const h = CARD_W / (def.defaultRatio > 0 ? def.defaultRatio : 4 / 3);
         flowHistory.record();
         const node = flowState.addNode(type as NodeType, world.x - CARD_W / 2, world.y - h / 2);
         selection.select(node.id);

@@ -12,11 +12,11 @@ const def: NodeDefinition = {
   type: 'image-gen',
   label: '图片生成',
   defaultTitle: '图片生成',
-  defaultRatio: 3 / 4,
+  defaultRatio: 4 / 3,
   defaultParams: {
     prompt: '',
     model: '',
-    aspectRatio: '3:4',
+    aspectRatio: '4:3',
     resolution: '2k',
     count: 1,
   },

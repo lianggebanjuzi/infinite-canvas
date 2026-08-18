@@ -57,10 +57,10 @@ class LinkView {
     const b = flowState.getNode(edge.to);
     if (!a || !b || !this.svg) return;
 
-    const x1 = a.x + CARD_W;
-    const y1 = a.y + cardView.cardHeight(a) / 2;
+    const x1 = a.x + (a.w ?? CARD_W);
+    const y1 = a.y + (a.h ?? cardView.cardHeight(a)) / 2;
     const x2 = b.x;
-    const y2 = b.y + cardView.cardHeight(b) / 2;
+    const y2 = b.y + (b.h ?? cardView.cardHeight(b)) / 2;
     const dx = Math.max(50, Math.abs(x2 - x1) * 0.5);
     const d = `M ${x1} ${y1} C ${x1 + dx} ${y1}, ${x2 - dx} ${y2}, ${x2} ${y2}`;
     const midX = (x1 + x2) / 2;
@@ -169,8 +169,8 @@ class LinkView {
     if (!this.svg) return;
     const from = flowState.getNode(fromNodeId);
     if (!from) return;
-    const x1 = from.x + CARD_W;
-    const y1 = from.y + cardView.cardHeight(from) / 2;
+    const x1 = from.x + (from.w ?? CARD_W);
+    const y1 = from.y + (from.h ?? cardView.cardHeight(from)) / 2;
     const temp = document.createElementNS(NS, 'path');
     temp.setAttribute('class', 'link-temp');
     temp.dataset.fromId = fromNodeId;
@@ -184,8 +184,8 @@ class LinkView {
     if (!this.tempPath) return;
     const fromId = this.tempPath.dataset.fromId;
     const from = fromId ? flowState.getNode(fromId) : undefined;
-    const x1 = from ? from.x + CARD_W : x;
-    const y1 = from ? from.y + cardView.cardHeight(from) / 2 : y;
+    const x1 = from ? from.x + (from.w ?? CARD_W) : x;
+    const y1 = from ? from.y + (from.h ?? cardView.cardHeight(from)) / 2 : y;
     const dx = Math.max(30, Math.abs(x - x1) * 0.5);
     this.tempPath.setAttribute('d', `M ${x1} ${y1} C ${x1 + dx} ${y1}, ${x - dx} ${y}, ${x} ${y}`);
   }

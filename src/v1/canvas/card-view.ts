@@ -29,7 +29,7 @@ class CardView {
   }
 
   cardHeight(node: FlowNode): number {
-    const ratio = node.ratio > 0 ? node.ratio : 3 / 4;
+    const ratio = node.ratio > 0 ? node.ratio : 4 / 3;
     return Math.round(CARD_W / ratio);
   }
 
@@ -75,24 +75,28 @@ class CardView {
       ${isTextGen ? '' : '<div class="port in"></div>'}
       <div class="port out"></div>
       <div class="pcard-error"></div>
+      ${isTextGen ? '<div class="pcard-resize" title="拖拽调整大小"></div>' : ''}
     `;
 
-    // 文本反推卡：点击文本区进入就地编辑（所见即所得；空态同样可点）。委托在卡片元素上，innerHTML 重建无需重绑。
-    // 拖动守卫：按住文本拖动卡片松手后浏览器仍会补发 click，位移过（wasNodeDragMoved）则不进入编辑。
-    el.addEventListener('click', (e: MouseEvent) => {
+    // 文本反推卡：单击只负责选中/拖动，双击文本区才进入就地编辑（所见即所得；空态同样适用）。
+    // 委托在卡片元素上，innerHTML 重建无需重绑；拖动后的误触由位移守卫排除。
+    el.addEventListener('dblclick', (e: MouseEvent) => {
       const target = e.target as Element;
-      // 采纳/锁定角标点击（X1 画布角标入口：变更前 record 入撤销栈）
-      const badge = target.closest('.pcard-badge') as HTMLElement | null;
-      if (badge) {
-        this._handleBadgeClick(node.id, badge);
-        return;
-      }
       if (!target.closest('.pcard-text')) return;
       if (interactions.wasNodeDragMoved()) return;
       const n = flowState.getNode(node.id);
       if (!n || n.type !== 'text-gen') return;
       if (n.status === 'run') return; // 运行中不进入编辑
+      e.preventDefault();
+      e.stopImmediatePropagation();
       this._enterTextEdit(node.id);
+    });
+
+    // 采纳/锁定角标点击（X1 画布角标入口：变更前 record 入撤销栈）
+    el.addEventListener('click', (e: MouseEvent) => {
+      const target = e.target as Element;
+      const badge = target.closest('.pcard-badge') as HTMLElement | null;
+      if (badge) this._handleBadgeClick(node.id, badge);
     });
     return el;
   }
@@ -123,7 +127,8 @@ class CardView {
   private updateCard(el: HTMLElement, node: FlowNode): void {
     el.style.left = node.x + 'px';
     el.style.top = node.y + 'px';
-    el.style.width = CARD_W + 'px';
+    // 文本卡支持右下角拖拽缩放（w/h 可选字段；image-gen 保持默认宽 CARD_W）
+    el.style.width = (node.w ?? CARD_W) + 'px';
 
     // 主视觉来源：输出图 imageUrl，无输出图时回退第一张参考图（用户拖入的图）作全图占位。
     // 文本反推卡：主视觉为文本（outputText），无图。
@@ -136,7 +141,8 @@ class CardView {
 
     const img = el.querySelector('.pcard-img') as HTMLElement;
     if (img) {
-      img.style.height = this.cardHeight(node) + 'px'; // 高度随 ratio 每次照常更新（开销极小）
+      // 高度：text-gen 支持 h 覆盖（缩放）；image-gen 维持按图比例（CARD_W / ratio）
+      img.style.height = (isTextGen ? (node.h ?? this.cardHeight(node)) : this.cardHeight(node)) + 'px';
     }
 
     // 内容指纹：仅当主图/缩略行/标题/状态/文本/角标态变化时才重建 img.innerHTML 与标签文本。
@@ -153,7 +159,7 @@ class CardView {
     // P1（W2-5）：文本节点空态引导——有图片上游（可反推）时给轻量提示
     const emptyHint = isTextGen && flowState.getReferenceImages(node.id).length > 0
       ? '已连接上游图，可反推'
-      : '点击输入文本';
+      : '双击输入文本';
     const fp = { mainSrc, refStrip, title, status: node.status, text, assetState, isAsset: isAsset ? '1' : '0', emptyHint };
     const prev = this._contentFingerprint.get(node.id);
     const changed = !prev
@@ -222,7 +228,7 @@ class CardView {
   }
 
   /**
-   * 进入文本就地编辑（text-gen 卡点击文本区触发）：把 .pcard-text 替换为 textarea，聚焦全选便于整体替换。
+   * 进入文本就地编辑（text-gen 卡双击文本区触发）：把 .pcard-text 替换为 textarea，聚焦全选便于整体替换。
    * 编辑态防冲突：textarea 的 mousedown stopPropagation（不触发卡片拖拽/选中/连线）；节点选中态保持不动。
    */
   private _enterTextEdit(nodeId: string): void {

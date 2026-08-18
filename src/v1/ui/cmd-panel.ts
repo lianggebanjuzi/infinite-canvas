@@ -200,7 +200,7 @@ class CmdPanel {
     const p = node.params as unknown as StyleTransferParams;
     switch (paramType) {
       case 'model': return p.model || '';
-      case 'aspectRatio': return p.aspectRatio || '3:4';
+      case 'aspectRatio': return p.aspectRatio || '4:3';
       case 'resolution': return p.resolution || '2k';
       case 'count': return String(p.count ?? 1);
       default: return '';
@@ -458,7 +458,7 @@ class CmdPanel {
       modelName = model ? model.name : (p.model || '选择模型');
     }
     this.chipModelLabel.textContent = modelName;
-    this.chipRatioLabel.textContent = p.aspectRatio || '3:4';
+    this.chipRatioLabel.textContent = p.aspectRatio || '4:3';
     this.chipResLabel.textContent = (p.resolution || '2k').toUpperCase();
     this.chipCountLabel.textContent = `${p.count ?? 1}张`;
   }
@@ -470,7 +470,7 @@ class CmdPanel {
     if (!wrap) return;
     const wr = wrap.getBoundingClientRect();
     const { x: cx0, y: topY } = canvasView.worldToWrap(node.x + CARD_W / 2, node.y);
-    const botY = canvasView.worldToWrap(0, node.y + cardView.cardHeight(node)).y;
+    const botY = canvasView.worldToWrap(0, node.y + (node.h ?? cardView.cardHeight(node))).y;
 
     const cpH = this.el.offsetHeight || 240;
     const roomBelow = wr.height - botY;

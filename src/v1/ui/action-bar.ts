@@ -1,6 +1,6 @@
 // src/v1/ui/action-bar.ts
 // 卡片上方操作条：仅单选出现，贴卡上沿，智能避让翻转（原型行为）
-// 首版动作按钮：风格调节聚焦指令面板；其余为后续版本能力，点击提示
+// 首版动作按钮：扩图/复现已接入；其余为后续版本能力，点击提示
 
 import { flowState } from '../state/flow-state';
 import { selection } from '../state/selection';
@@ -33,12 +33,6 @@ class ActionBar {
     const node = selection.single();
     if (!node) return;
 
-    if (action === 'style-adjust') {
-      // 聚焦指令面板输入框
-      const input = document.getElementById('cmd-input') as HTMLTextAreaElement | null;
-      if (input) { input.focus(); input.scrollIntoView({ block: 'nearest' }); }
-      return;
-    }
     if (action === 'download') {
       if (node.imageUrl) {
         const a = document.createElement('a');
@@ -84,7 +78,7 @@ class ActionBar {
     if (!wrap) return;
     const wr = wrap.getBoundingClientRect();
     const { x: cx0, y: topY } = canvasView.worldToWrap(node.x + CARD_W / 2, node.y);
-    const botY = canvasView.worldToWrap(0, node.y + cardView.cardHeight(node)).y;
+    const botY = canvasView.worldToWrap(0, node.y + (node.h ?? cardView.cardHeight(node))).y;
 
     // 复现按钮显隐：仅带 trace 的节点显示（A1：无 trace 节点不出现；text 反推产物 trace=null 天然隐藏）
     const reproduceBtn = this.el.querySelector('[data-action="reproduce"]') as HTMLElement | null;

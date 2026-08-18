@@ -148,7 +148,7 @@ class ReproduceService {
     const params: StyleTransferParams = {
       prompt: trace.prompt || '',
       model: trace.model || '',
-      aspectRatio: trace.aspectRatio || '3:4',
+      aspectRatio: trace.aspectRatio || '4:3',
       resolution: trace.resolution || '2k',
       count: typeof trace.count === 'number' ? trace.count : 1,
       modelType: 'draw', // 复现强制绘图态（产出节点语义，与 createResultCard 一致；text 反推产物 trace 恒 null 无入口）
@@ -182,7 +182,7 @@ class ReproduceService {
     flowState.nodes.forEach(n => {
       if (n.id === source.id) return;
       if (Math.abs(n.x - x) >= CARD_W / 2) return; // 只统计同列（x 相近）卡片
-      const nH = Math.round(CARD_W / (n.ratio > 0 ? n.ratio : 3 / 4));
+      const nH = Math.round(CARD_W / (n.ratio > 0 ? n.ratio : 4 / 3));
       y = Math.max(y, n.y + nH + RESULT_GAP_Y);
     });
     return { x, y };

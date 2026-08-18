@@ -46,13 +46,15 @@ interface ImageOrigin {
   url?: string;   // file:// 引用（备用；禁止直接用于渲染）
 }
 
-/** 画布节点：宽固定 260，高 = 260 / ratio */
+/** 画布节点：宽缺省 260（w 可覆盖），高 = w / ratio（h 可覆盖，text-gen 缩放专用） */
 interface FlowNode {
   id: string;
   type: NodeType;
   x: number;                 // 画布世界坐标
   y: number;
   ratio: number;             // 高/宽 比例；卡片高 = CARD_W / ratio
+  w?: number;                // 可选：卡片宽（text-gen 缩放；缺省 undefined = CARD_W；旧项目加载自动回退，不写死）
+  h?: number;                // 可选：卡片高（text-gen 缩放；缺省 undefined = 按 ratio 计算）
   status: NodeStatus;
   title: string;             // 左上悬浮标签
   params: Record<string, unknown>;  // 节点参数（见 StyleTransferParams / TextGenParams）
@@ -107,7 +109,7 @@ interface NodeDefinition {
   type: NodeType;
   label: string;              // 悬浮标签
   defaultTitle: string;
-  defaultRatio: number;       // 3/4
+  defaultRatio: number;       // 4/3（新节点默认横版；旧节点 ratio 已持久化不动）
   defaultParams: Record<string, unknown>;
   creatable?: boolean;        // false=不进新建菜单（引擎产出节点由引擎自动创建，缺省 true）
   canRun(node: FlowNode, ctx: FlowContext): boolean | string; // true / 禁止原因
