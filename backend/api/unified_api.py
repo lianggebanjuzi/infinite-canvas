@@ -280,7 +280,13 @@ class UnifiedAPIRouter:
                 result = self.generate_image(prompt, options)
                 with _tasks_lock:
                     _tasks[task_id] = {"status": "done", "result": result, "cleanup_scheduled": False}
-                print(f"[UnifiedAPI] 任务 {task_id[:8]} 完成")
+                _ri = result.get('image_url') if isinstance(result, dict) else None
+                _op = result.get('original_path') if isinstance(result, dict) else None
+                print(
+                    f"[UnifiedAPI] 任务 {task_id[:8]} 完成 | "
+                    f"image_url={'有' if _ri else '空'}({len(str(_ri)) // 1024}KB) | "
+                    f"original_path={'有' if _op else '无'}"
+                )
             except AppError as e:
                 with _tasks_lock:
                     _tasks[task_id] = {"status": "done", "result": e.to_dict(), "cleanup_scheduled": False}
@@ -1430,9 +1436,10 @@ class UnifiedAPIRouter:
             # 展示图策略（治本：done 响应不携带大 payload / 不可访问 URL——大 base64 跨 pywebview
             # 桥接传输慢且可能被截断，导致「后端已完成、前端无图」）。
             #   - 缩略图生成成功 → display=缩略图 data URL（小，桥接传输轻量）；
-            #   - 缩略图失败 → display=None（不回退大 base64 / http URL），original_path 保留，
-            #     前端按路径经 load_local_image 取图兜底；
-            #   - 无 original_path 时 display=None → 前端明确判失败并提示（宁可明确失败，不静默白屏）。
+            #   - 缩略图失败但有 original_path → display=None（不回退大 base64），前端按路径经
+            #     load_local_image 取图兜底（前端契约：success 且 image_url/original_path 任一即可）；
+            #   - http 直链下载失败 → 保留原 URL 作展示（公开直链可渲染；沿用旧语义，不静默丢图）；
+            #   - 缩略图失败且无 original_path → 回退原 base64（唯一可展示途径；罕见）。
             display = None
             thumb = None
             orig_path = None
@@ -1440,9 +1447,10 @@ class UnifiedAPIRouter:
 
             original_data_url = img if isinstance(img, str) else None
             if isinstance(img, str) and img.startswith('http'):
-                # http → 下载转 base64（下载成功才可能生成缩略图；失败保持 None，前端走 original_path 兜底）
+                # http → 下载转 base64（下载成功才可能生成缩略图）；失败保留原 URL 作展示兜底
                 original_data_url = self._download_url_to_base64(img)
                 if not original_data_url:
+                    display = img
                     original_data_url = None
 
             if isinstance(original_data_url, str) and original_data_url.startswith('data:image'):
@@ -1460,7 +1468,10 @@ class UnifiedAPIRouter:
                 thumb = make_thumbnail_data_url(image_bytes) if image_bytes else None
                 if thumb:
                     display = thumb
-                # 缩略图失败：display 保持 None（不回退大 base64），original_path 保留供前端按路径取图
+                elif not orig_path:
+                    # 兜底：缩略图失败且原图未落盘 → 回退原 base64（唯一可展示途径；罕见）
+                    display = original_data_url
+                # 缩略图失败但有 original_path：display 保持 None（不回退大 base64），前端按路径取图
 
             thumbnails.append(thumb)
             original_paths.append(orig_path)
