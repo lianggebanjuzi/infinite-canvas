@@ -5,7 +5,8 @@ import { Backend } from '../api';
 
 export interface PollOptions {
   intervalMs?: number;   // 默认 2000
-  timeoutMs?: number;    // 默认 300000（后端上游超时 300s）
+  timeoutMs?: number;    // 默认 300000 —— 无进展超时：连续这么久没有任何成功响应（含 pending/done）才判 504；
+                         // 任何一次成功响应都会重置计时器（后端上游慢/大图传输慢 = 活着，不算超时；只有彻底无响应才兜底）
   onTick?: (status: string) => void;
 }
 
@@ -24,23 +25,59 @@ function delay(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-/** 轮询直到任务完成/失败/超时 */
+/**
+ * 单次任务查询超时（pywebview 桥接 Promise 永不 settle 的兜底；超时视为瞬态故障重试）。
+ * 90s：只防「彻底无响应」的真悬挂，不误伤大 base64 响应慢传输（4k 图 data URL 可达数 MB~十几 MB，
+ * 桥接序列化/传输可能远超 20s）。
+ */
+const REQUEST_TIMEOUT_MS = 90000;
+
+/**
+ * 无进展超时：连续这么久没有任何成功响应（含 status='pending' 与 done）才判 504。
+ * 慢 ≠ 超时：只要还能拿到响应（哪怕一直是 pending）就持续重置计时器；仅当每次查询都被单次超时
+ * 掐掉/抛错（桥接真断/后端真挂）才走到这里兜底，保证批次必然在有限时间内结束、busy 释放。
+ */
+const STALL_TIMEOUT_MS = 300000;
+
+/**
+ * 给 Promise 加单次超时：超时 reject 而非无限等待（桥接掉包场景兜底）。
+ * 显式 then/clearTimeout 模式：源 Promise 稍后 settle 也不会产生 unhandled rejection。
+ */
+function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`${label}（${Math.round(ms / 1000)}s 未响应）`)), ms);
+    p.then(
+      v => { clearTimeout(timer); resolve(v); },
+      e => { clearTimeout(timer); reject(e); },
+    );
+  });
+}
+
+/** 轮询直到任务完成/失败/无进展超时 */
 export async function pollTask(taskId: string, opts: PollOptions = {}): Promise<PollResult> {
   const intervalMs = opts.intervalMs ?? 2000;
-  const timeoutMs = opts.timeoutMs ?? 300000;
-  const started = Date.now();
+  const timeoutMs = opts.timeoutMs ?? STALL_TIMEOUT_MS;
+  // 无进展计时：最近一次成功响应时刻（pending/done 均重置；catch 分支不重置 = 无响应）
+  let lastResponseAt = Date.now();
 
   for (;;) {
-    if (Date.now() - started > timeoutMs) {
-      return { success: false, code: 504, error: '生成超时，请检查网络后重试' };
+    if (Date.now() - lastResponseAt > timeoutMs) {
+      return { success: false, code: 504, error: '长时间无响应，请检查网络后重试' };
     }
 
     let res: BackendTaskResult;
     try {
-      res = await Backend.getTaskResult(taskId);
-    } catch (e) {
-      return { success: false, code: 500, error: (e as Error).message || '查询任务失败' };
+      res = await withTimeout(Backend.getTaskResult(taskId), REQUEST_TIMEOUT_MS, '查询任务超时');
+    } catch {
+      // 单次查询失败/悬挂：视为瞬态故障 → 重试（不直接判失败，避免桥接偶发抖动杀掉正常任务）；
+      // 注意：此处不更新 lastResponseAt —— 单次超时/异常即「无响应」，由无进展超时兜底
+      opts.onTick?.('pending');
+      await delay(intervalMs);
+      continue;
     }
+
+    // 收到任何成功响应（pending/done/not_found 均算后端在应答）→ 刷新无进展计时
+    lastResponseAt = Date.now();
 
     if (!res || res.status === 'not_found') {
       return { success: false, code: 404, error: '任务结果已过期，请重新生成' };
@@ -54,10 +91,12 @@ export async function pollTask(taskId: string, opts: PollOptions = {}): Promise<
 
     if (res.status === 'done') {
       const r = res.result;
-      if (r && r.success && r.image_url) {
+      // 治本（image_url 可能为空）：后端 done 响应不携带大图 base64——缩略图成功则 image_url 有值；
+      // 缩略图失败时 image_url 为空但 original_path 保留，由引擎按路径经 loadLocalImage 取图兜底。
+      if (r && r.success && (r.image_url || r.original_path)) {
         return {
           success: true,
-          imageUrl: r.image_url,
+          imageUrl: r.image_url || undefined,
           thumbnail: typeof r.thumbnail === 'string' ? r.thumbnail : undefined,
           originalPath: typeof r.original_path === 'string' ? r.original_path : undefined,
           originalUrl: typeof r.original_url === 'string' ? r.original_url : undefined,
@@ -66,7 +105,7 @@ export async function pollTask(taskId: string, opts: PollOptions = {}): Promise<
       }
       // 失败：错误码 + 消息（不自动切供应商，由用户手动重跑）
       const code = r?.error_code ?? 500;
-      const message = r?.message || r?.error || '生成失败';
+      const message = r?.message || r?.error || (r?.success ? '生成成功但未返回图片数据' : '生成失败');
       return { success: false, code, error: message };
     }
 

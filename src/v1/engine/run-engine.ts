@@ -24,7 +24,7 @@ import { dirty } from '../state/dirty';
 import { flowHistory } from '../state/history';
 import { nodeRegistry } from '../nodes/node-registry';
 import { Backend, fetchImageModels } from '../api';
-import { pollTask } from './poller';
+import { pollTask, PollResult } from './poller';
 import { historyDrawer } from '../ui/history-drawer';
 import { historyPersist } from '../history-persist';
 import { linkView } from '../canvas/link-view';
@@ -91,6 +91,23 @@ function loadImageRatio(url: string): Promise<number | null> {
   });
 }
 
+/** 任务创建单次调用超时（pywebview 桥接 Promise 永不 settle 的兜底；超时抛错走 catch → 计 fail，不会挂死批次） */
+const TASK_CREATE_TIMEOUT_MS = 60000;
+
+/**
+ * 给 Promise 加单次超时：超时 reject 而非无限等待（桥接掉包场景兜底）。
+ * 显式 then/clearTimeout 模式：源 Promise 稍后 settle 也不会产生 unhandled rejection。
+ */
+function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`${label}（${Math.round(ms / 1000)}s 未响应）`)), ms);
+    p.then(
+      v => { clearTimeout(timer); resolve(v); },
+      e => { clearTimeout(timer); reject(e); },
+    );
+  });
+}
+
 class RunEngine {
   /** 全局串行：同一时间只跑一个任务（避免 pywebview 轮询互相干扰；批次内并发、批次间串行） */
   private busy = false;
@@ -106,6 +123,25 @@ class RunEngine {
   getBatchProgress(nodeId: string): { total: number; done: number; failed: number } | undefined {
     const p = this.batchProgress.get(nodeId);
     return p ? { total: p.total, done: p.done, failed: p.failed } : undefined;
+  }
+
+  /**
+   * 展示图解析（治本：done 响应不再携带大图 base64——缩略图失败时 image_url 为空）。
+   * 优先级：缩略图 imageUrl → 按 originalPath 经 loadLocalImage 读原图（data URL）→ originalUrl；
+   * 都不可用 → null（调用方判失败并给出明确提示，不静默白屏）。
+   */
+  private async _resolveImageUrl(result: PollResult): Promise<string | null> {
+    if (result.imageUrl) return result.imageUrl;
+    if (result.originalPath) {
+      try {
+        const res = await Backend.loadLocalImage(result.originalPath);
+        if (res.status === 'success' && res.data_url) return res.data_url;
+      } catch {
+        // 读取失败落到 originalUrl 兜底
+      }
+    }
+    if (result.originalUrl) return result.originalUrl;
+    return null;
   }
 
   /** 是否正在生成（撤销/重做 busy 期间禁用、关闭弹窗 busy 时附加中断警示） */
@@ -168,20 +204,27 @@ class RunEngine {
       linkView.setNodeFlowing(nodeId, true);
 
       // 单张扩图请求：count=1 + 合成底图参考图 + 目标比例 + 4k
-      const created = await Backend.generateImage(opts.prompt, {
-        model: opts.model,
-        aspectRatio: opts.aspectRatio || '1:1',
-        resolution: opts.resolution || '4k',
-        count: COUNT_MIN,
-        referenceImages: refs,
-      });
+      const created = await withTimeout(
+        Backend.generateImage(opts.prompt, {
+          model: opts.model,
+          aspectRatio: opts.aspectRatio || '1:1',
+          resolution: opts.resolution || '4k',
+          count: COUNT_MIN,
+          referenceImages: refs,
+        }),
+        TASK_CREATE_TIMEOUT_MS,
+        '扩图任务创建超时',
+      );
       if (!created || !created.task_id) {
         throw new Error('任务创建失败，未返回 task_id');
       }
       const result = await pollTask(created.task_id);
-      if (!result.success || !result.imageUrl) {
+      if (!result.success) {
         throw new Error(result.error || '扩图失败');
       }
+      // 展示图解析：缩略图优先；为空且有 originalPath → loadLocalImage 按路径取图（治本：大图不进轮询响应）
+      const displayUrl = await this._resolveImageUrl(result);
+      if (!displayUrl) throw new Error(result.error || '扩图成功但未返回图片数据');
       // P3：未配置图片保存路径 → 生成图未落盘（tempfile 兜底），人话提示不阻断
       if (result.savedToDisk === false) {
         showToast('图片保存路径未设置，生成图不会落盘到本地', false);
@@ -198,13 +241,13 @@ class RunEngine {
       flowState.nodes.forEach(n => {
         if (n.id === node.id) return;
         if (Math.abs(n.x - x) >= CARD_W / 2) return; // 只统计同列（x 相近）卡片
-        const nH = Math.round(CARD_W / (n.ratio > 0 ? n.ratio : 3 / 4));
+        const nH = Math.round(CARD_W / (n.ratio > 0 ? n.ratio : 4 / 3));
         y = Math.max(y, n.y + nH + RESULT_GAP_Y);
       });
       const layout: ResultLayout = { x, cursorY: y };
       // R3：扩图产出（count=1 的批次）也生成 batchId，历史按批次视图下作为单张批次卡展示
       const batchId = `${nodeId}_${Date.now()}`;
-      const card = await this.createResultCard(nodeId, result.imageUrl, layout, {
+      const card = await this.createResultCard(nodeId, displayUrl, layout, {
         model: opts.model,
         aspectRatio: opts.aspectRatio || '1:1',
         resolution: opts.resolution || '4k',
@@ -370,9 +413,9 @@ class RunEngine {
         showToast('图片保存路径未设置，生成图不会落盘到本地', false);
       }
     } else {
-      // 全失败：保留旧图，节点 fail
+      // 全失败：保留旧图，节点 fail（toast 带具体原因，避免「没图却不知为何」）
       flowState.updateNode(nodeId, { status: 'fail', error: progress.lastError || '生成失败' });
-      showToast('生成失败', false);
+      showToast(progress.lastError ? `生成失败：${progress.lastError}` : '生成失败', false);
     }
   }
 
@@ -393,12 +436,19 @@ class RunEngine {
     batchId: string, // R3：本批批次号，透传到该张成功图的 addImage / appendTrace
   ): Promise<void> {
     try {
-      const created = await Backend.generateImage(prompt, { ...options, count: COUNT_MIN });
+      const created = await withTimeout(
+        Backend.generateImage(prompt, { ...options, count: COUNT_MIN }),
+        TASK_CREATE_TIMEOUT_MS,
+        '任务创建超时',
+      );
       if (!created || !created.task_id) {
         throw new Error('任务创建失败，未返回 task_id');
       }
       const result = await pollTask(created.task_id);
-      if (result.success && result.imageUrl) {
+      if (result.success) {
+        // 展示图解析：缩略图优先；为空且有 originalPath → loadLocalImage 按路径取图（治本：大图不进轮询响应）
+        const displayUrl = await this._resolveImageUrl(result);
+        if (!displayUrl) throw new Error(result.error || '生成成功但未返回图片数据');
         // P3：该张图未落盘到用户配置目录（tempfile 兜底）→ 标记，批次结束统一 toast
         if (result.savedToDisk === false) this._sawNotSavedToDisk = true;
         // 原图引用（图片性能优化：卡片主视觉=缩略图，大图按需加载用）
@@ -411,7 +461,7 @@ class RunEngine {
           const gen = flowState.getNode(genId);
           const locked = !!gen && !!gen.imageUrl && assetStore.isLockedByImageUrl(gen.imageUrl);
           if (locked) {
-            const card = await this.createResultCard(genId, result.imageUrl, layout, {}, {
+            const card = await this.createResultCard(genId, displayUrl, layout, {}, {
               outputType,
               refs,
               batchId,
@@ -420,12 +470,12 @@ class RunEngine {
             progress.done += 1;
           } else {
             // 第 1 张（按 index=0，非完成顺序）写回源节点自身 imageUrl（文生图/图生图统一，Q1）
-            await this._writeBackToSelf(genId, result.imageUrl, origin, batchId, outputType, prompt);
+            await this._writeBackToSelf(genId, displayUrl, origin, batchId, outputType, prompt);
             progress.done += 1;
           }
         } else {
           // 第 2..N 张：出一张建一张（不等兄弟），立即创建新 image-gen 产出节点并自动连线
-          const card = await this.createResultCard(genId, result.imageUrl, layout, {}, {
+          const card = await this.createResultCard(genId, displayUrl, layout, {}, {
             outputType,
             refs,
             batchId,
@@ -469,7 +519,7 @@ class RunEngine {
         nodeId: node.id,
         prompt: typeof composedPrompt === 'string' ? composedPrompt : (typeof p.prompt === 'string' ? p.prompt : ''),
         model: typeof p.model === 'string' ? p.model : '',
-        aspectRatio: typeof p.aspectRatio === 'string' ? p.aspectRatio : '3:4',
+        aspectRatio: typeof p.aspectRatio === 'string' ? p.aspectRatio : '4:3',
         resolution: typeof p.resolution === 'string' ? p.resolution : '2k',
         count: typeof p.count === 'number' ? p.count : 1,
         outputType,
@@ -517,7 +567,7 @@ class RunEngine {
     const gen = flowState.getNode(genId);
     if (!gen) throw new Error('生成节点已删除，产出节点创建失败');
     const ratio = await loadImageRatio(imageUrl);
-    const r = ratio && ratio > 0 ? ratio : 3 / 4;
+    const r = ratio && ratio > 0 ? ratio : 4 / 3;
     const cardH = Math.round(CARD_W / r);
     const y = layout.cursorY;
     layout.cursorY = y + cardH + RESULT_GAP_Y;
@@ -535,7 +585,7 @@ class RunEngine {
       params: {
         prompt: gp.prompt || '',
         model: gp.model || '',
-        aspectRatio: gp.aspectRatio || '3:4',
+        aspectRatio: gp.aspectRatio || '4:3',
         resolution: gp.resolution || '2k',
         count: gp.count || 1,
         modelType: 'draw', // 强制绘图态：产出节点不继承反推态
@@ -552,7 +602,7 @@ class RunEngine {
       nodeId: node.id,
       prompt: typeof composedPrompt === 'string' ? composedPrompt : (typeof gp.prompt === 'string' ? gp.prompt : ''),
       model: typeof gp.model === 'string' ? gp.model : '',
-      aspectRatio: typeof gp.aspectRatio === 'string' ? gp.aspectRatio : '3:4',
+      aspectRatio: typeof gp.aspectRatio === 'string' ? gp.aspectRatio : '4:3',
       resolution: typeof gp.resolution === 'string' ? gp.resolution : '2k',
       count: typeof gp.count === 'number' ? gp.count : 1,
       refImageUrls: trace.refs,

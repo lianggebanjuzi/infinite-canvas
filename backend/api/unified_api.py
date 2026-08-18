@@ -406,7 +406,9 @@ class UnifiedAPIRouter:
                 task["cleanup_scheduled"] = True
 
                 def delayed_delete():
-                    time.sleep(30)
+                    # 600s 后才清理：前端单次查询超时 90s 且可能重试，30s 清理会与轮询产生竞态
+                    # （done 响应传输卡住 → 前端重试时任务已被删 → 404「结果已过期」→ 假失败）。
+                    time.sleep(600)
                     with _tasks_lock:
                         _tasks.pop(task_id, None)
                     print(f"[UnifiedAPI] 任务 {task_id[:8]} 已清理")
@@ -1425,19 +1427,22 @@ class UnifiedAPIRouter:
         original_urls = []
 
         def process(img):
-            # 默认：展示图 = 原输入（缩略图失败/下载失败时回退）
-            display = img
+            # 展示图策略（治本：done 响应不携带大 payload / 不可访问 URL——大 base64 跨 pywebview
+            # 桥接传输慢且可能被截断，导致「后端已完成、前端无图」）。
+            #   - 缩略图生成成功 → display=缩略图 data URL（小，桥接传输轻量）；
+            #   - 缩略图失败 → display=None（不回退大 base64 / http URL），original_path 保留，
+            #     前端按路径经 load_local_image 取图兜底；
+            #   - 无 original_path 时 display=None → 前端明确判失败并提示（宁可明确失败，不静默白屏）。
+            display = None
             thumb = None
             orig_path = None
             orig_url = None
 
             original_data_url = img if isinstance(img, str) else None
             if isinstance(img, str) and img.startswith('http'):
-                # http → 下载转 base64（下载成功才可能生成缩略图；失败保持原 URL）
+                # http → 下载转 base64（下载成功才可能生成缩略图；失败保持 None，前端走 original_path 兜底）
                 original_data_url = self._download_url_to_base64(img)
-                if original_data_url:
-                    display = original_data_url
-                else:
+                if not original_data_url:
                     original_data_url = None
 
             if isinstance(original_data_url, str) and original_data_url.startswith('data:image'):
@@ -1446,7 +1451,7 @@ class UnifiedAPIRouter:
                 if file_path:
                     orig_path = file_path  # 绝对路径，正斜杠（_save_base64_to_dir 已 replace('\\','/')）
                     orig_url = f"file:///{file_path}"
-                # 生成缩略图 data URL（JPEG q85 / 最长边 1024px；失败回退原 base64）
+                # 生成缩略图 data URL（JPEG q85 / 最长边 1024px）
                 try:
                     _, data = original_data_url.split(',', 1)
                     image_bytes = b64lib.b64decode(data)
@@ -1455,10 +1460,7 @@ class UnifiedAPIRouter:
                 thumb = make_thumbnail_data_url(image_bytes) if image_bytes else None
                 if thumb:
                     display = thumb
-                else:
-                    # 双轨回退：缩略图失败 → 该图 image 保留原 base64、无 original_* 对应项（不阻断）
-                    orig_path = None
-                    orig_url = None
+                # 缩略图失败：display 保持 None（不回退大 base64），original_path 保留供前端按路径取图
 
             thumbnails.append(thumb)
             original_paths.append(orig_path)
