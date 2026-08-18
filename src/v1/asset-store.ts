@@ -60,11 +60,16 @@ class AssetStore {
   // ───────────────────────── 写入口（唯一写路径） ─────────────────────────
 
   /** 采纳（认可 + 自动置锁定，B2）。imageUrl 采纳时写入（资产库显示用）；originalPath 写入原图引用；
-   *  meta 内存缓存（复现 S9 用） */
+   *  meta 采纳元数据：R2 起除写内存 metaByKey 外，还会把配方字段合并写入记录本体（_applyRecipe），
+   *  随现有 300ms 防抖落盘 assets.json，成为跨项目/跨会话的持久化真相（见 AdoptMeta 注释）。 */
   adopt(key: string, nodeId: string, imageUrl?: string, originalPath?: string, meta?: AdoptMeta): void {
     const rec = this._getOrCreate(key, nodeId, imageUrl, originalPath);
     if (imageUrl) this.urlByKey.set(key, imageUrl);
-    if (meta) this.metaByKey.set(key, meta);
+    // 写 meta（含配方入记录）放在 adopted return 之前：重复采纳也刷新配方（沿用 metaByKey 既有语义）
+    if (meta) {
+      this.metaByKey.set(key, meta);
+      this._applyRecipe(rec, meta);
+    }
     if (rec.adopted) return;
     rec.adopted = true;
     rec.locked = true; // 采纳 = 认可 + 保护
@@ -146,6 +151,69 @@ class AssetStore {
     if (rec) this.addTags(rec.key, tags);
   }
 
+  // ───────────────────────── 配方构造（R2：采纳/读侧共享） ─────────────────────────
+
+  /** 从生成节点构造采纳元数据（R2 写侧）：node.trace 优先（source of truth），缺失时 node.params 兜底；
+   *  无可用配方返回 undefined（调用方传 undefined = 不写配方，保持旧行为）。 */
+  metaFromNode(node: FlowNode | null | undefined): AdoptMeta | undefined {
+    if (!node) return undefined;
+    const t = node.trace;
+    if (t) {
+      return {
+        prompt: typeof t.prompt === 'string' ? t.prompt : undefined,
+        model: typeof t.model === 'string' ? t.model : undefined,
+        aspectRatio: typeof t.aspectRatio === 'string' ? t.aspectRatio : undefined,
+        resolution: typeof t.resolution === 'string' ? t.resolution : undefined,
+        count: typeof t.count === 'number' ? t.count : undefined,
+        refImageUrls: Array.isArray(t.refImageUrls) ? t.refImageUrls.filter((u): u is string => typeof u === 'string') : undefined,
+        refImageHashes: Array.isArray(t.refImageHashes) ? t.refImageHashes.filter((h): h is string => typeof h === 'string') : undefined,
+        outputType: typeof t.outputType === 'string' ? t.outputType : undefined,
+        createdAt: typeof t.createdAt === 'number' ? t.createdAt : undefined,
+      };
+    }
+    // 无 trace 兜底：params（无 prompt 即无可用配方）
+    const p = (node.params || {}) as unknown as StyleTransferParams;
+    const prompt = typeof p.prompt === 'string' ? p.prompt : '';
+    if (!prompt) return undefined;
+    const refs = Array.isArray(node.refImages) ? node.refImages.filter((u): u is string => typeof u === 'string') : [];
+    return {
+      prompt,
+      model: typeof p.model === 'string' ? p.model : undefined,
+      aspectRatio: typeof p.aspectRatio === 'string' ? p.aspectRatio : undefined,
+      resolution: typeof p.resolution === 'string' ? p.resolution : undefined,
+      count: typeof p.count === 'number' ? p.count : undefined,
+      refImageUrls: refs.length > 0 ? refs : undefined,
+      refImageHashes: refs.length > 0 ? refs.map(u => historyPersist.hashRef(u)) : undefined,
+      outputType: undefined,
+      createdAt: undefined,
+    };
+  }
+
+  /** 从资产记录配方字段合成 AdoptMeta（R2 读侧：记录 = 持久化真相；无配方字段返回 undefined 走反查兜底） */
+  recipeFromRecord(rec: ImageAssetRecord): AdoptMeta | undefined {
+    const meta: AdoptMeta = {
+      prompt: typeof rec.prompt === 'string' ? rec.prompt : undefined,
+      model: typeof rec.model === 'string' ? rec.model : undefined,
+      aspectRatio: typeof rec.aspectRatio === 'string' ? rec.aspectRatio : undefined,
+      resolution: typeof rec.resolution === 'string' ? rec.resolution : undefined,
+      count: typeof rec.count === 'number' ? rec.count : undefined,
+      refImageUrls: Array.isArray(rec.refImageUrls) ? rec.refImageUrls.filter((u): u is string => typeof u === 'string') : undefined,
+      refImageHashes: Array.isArray(rec.refImageHashes) ? rec.refImageHashes.filter((h): h is string => typeof h === 'string') : undefined,
+      outputType: typeof rec.outputType === 'string' ? rec.outputType : undefined,
+      createdAt: typeof rec.createdAt === 'number' ? rec.createdAt : undefined,
+    };
+    const hasAny = meta.prompt !== undefined
+      || meta.model !== undefined
+      || meta.aspectRatio !== undefined
+      || meta.resolution !== undefined
+      || meta.count !== undefined
+      || (Array.isArray(meta.refImageUrls) && meta.refImageUrls.length > 0)
+      || (Array.isArray(meta.refImageHashes) && meta.refImageHashes.length > 0)
+      || meta.outputType !== undefined
+      || meta.createdAt !== undefined;
+    return hasAny ? meta : undefined;
+  }
+
   // ───────────────────────── 查询（UI 判定一律走这里） ─────────────────────────
 
   isAdoptedByImageUrl(url: string): boolean {
@@ -176,7 +244,8 @@ class AssetStore {
   }
 
   /** 已采纳资产列表（S3：adopted=true，按 updatedAt 倒序）；url 优先级 = record.imageUrl → urlByKey 缓存；
-   *  thumbnailUrl = record.thumbnail || url（缩略图优先）；originalPath = 原图引用 */
+   *  thumbnailUrl = record.thumbnail || url（缩略图优先）；originalPath = 原图引用；
+   *  meta = 会话缓存优先，未命中时由记录配方合成（R2：跨会话 meta 不空，记录 = 持久化真相） */
   getAdoptedAssets(): AssetAsset[] {
     const list: AssetAsset[] = [];
     this.records.forEach(rec => {
@@ -187,7 +256,7 @@ class AssetStore {
         url,
         thumbnailUrl: rec.thumbnail || rec.imageUrl || this.urlByKey.get(rec.key) || '',
         originalPath: typeof rec.originalPath === 'string' ? rec.originalPath : undefined,
-        meta: this.metaByKey.get(rec.key),
+        meta: this.metaByKey.get(rec.key) ?? this.recipeFromRecord(rec),
       });
     });
     list.sort((a, b) => b.record.updatedAt - a.record.updatedAt);
@@ -275,7 +344,8 @@ class AssetStore {
     return rec;
   }
 
-  /** 从磁盘记录归一（兼容脏数据/旧格式：缺 imageUrl → ''、缺 projectName → []，共享知识 6；缩略图/原图引用缺省） */
+  /** 从磁盘记录归一（兼容脏数据/旧格式：缺 imageUrl → ''、缺 projectName → []，共享知识 6；缩略图/原图引用缺省；
+   *  R2 配方字段容错：缺失/坏类型 → undefined，不报错（旧 assets.json 无配方字段可正常加载） */
   private _normalize(r: ImageAssetRecord): ImageAssetRecord {
     return {
       key: typeof r.key === 'string' ? r.key : String(r.key || ''),
@@ -289,7 +359,35 @@ class AssetStore {
       tags: Array.isArray(r.tags) ? r.tags.filter(t => typeof t === 'string') : [],
       category: typeof r.category === 'string' && r.category ? r.category : '成图',
       updatedAt: typeof r.updatedAt === 'number' ? r.updatedAt : Date.now(),
+      // R2 配方字段：字符串 → 非 string 置 undefined；数组 → Array.isArray 过滤 string；count/createdAt → number 校验
+      prompt: typeof r.prompt === 'string' ? r.prompt : undefined,
+      model: typeof r.model === 'string' ? r.model : undefined,
+      aspectRatio: typeof r.aspectRatio === 'string' ? r.aspectRatio : undefined,
+      resolution: typeof r.resolution === 'string' ? r.resolution : undefined,
+      count: typeof r.count === 'number' ? r.count : undefined,
+      refImageUrls: Array.isArray(r.refImageUrls) ? r.refImageUrls.filter((u): u is string => typeof u === 'string') : undefined,
+      refImageHashes: Array.isArray(r.refImageHashes) ? r.refImageHashes.filter((h): h is string => typeof h === 'string') : undefined,
+      outputType: typeof r.outputType === 'string' ? r.outputType : undefined,
+      createdAt: typeof r.createdAt === 'number' ? r.createdAt : undefined,
     };
+  }
+
+  /** R2：把采纳元数据合并写入记录本体（仅覆盖非 undefined 字段；数组拷贝，不整体替换）。
+   *  重复采纳/部分 meta 不会清空既有配方；记录随现有防抖落盘 assets.json。 */
+  private _applyRecipe(rec: ImageAssetRecord, meta: AdoptMeta): void {
+    if (typeof meta.prompt === 'string') rec.prompt = meta.prompt;
+    if (typeof meta.model === 'string') rec.model = meta.model;
+    if (typeof meta.aspectRatio === 'string') rec.aspectRatio = meta.aspectRatio;
+    if (typeof meta.resolution === 'string') rec.resolution = meta.resolution;
+    if (typeof meta.count === 'number') rec.count = meta.count;
+    if (Array.isArray(meta.refImageUrls)) {
+      rec.refImageUrls = meta.refImageUrls.filter((u): u is string => typeof u === 'string');
+    }
+    if (Array.isArray(meta.refImageHashes)) {
+      rec.refImageHashes = meta.refImageHashes.filter((h): h is string => typeof h === 'string');
+    }
+    if (typeof meta.outputType === 'string') rec.outputType = meta.outputType;
+    if (typeof meta.createdAt === 'number') rec.createdAt = meta.createdAt;
   }
 
   /** A5：采纳时把当前项目名追加进 projectName（去重追加，不删除） */

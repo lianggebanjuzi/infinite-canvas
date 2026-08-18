@@ -60,6 +60,11 @@
         <button class="history-tab active" data-tab="image"><span class="history-tab-name">成图</span><span class="history-tab-count"></span></button>
         <button class="history-tab" data-tab="text"><span class="history-tab-name">文本</span><span class="history-tab-count"></span></button>
       </div>
+      <!-- R3：历史批次/时间视图切换（默认按批次；text 不入批次 → 切到文本 tab 时由 JS 隐藏） -->
+      <div class="history-view" id="history-view">
+        <button class="history-view-btn active" data-view="batch">按批次</button>
+        <button class="history-view-btn" data-view="time">按时间</button>
+      </div>
       <div class="history-grid" id="history-grid"></div>
       <div class="history-empty" id="history-empty" style="display:none;"></div>
     </aside>

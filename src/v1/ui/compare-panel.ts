@@ -134,9 +134,10 @@ class ComparePanel {
       assetStore.unadoptByUrl(url);
       showToast('已取消采纳');
     } else {
-      // 采纳：展示图 URL + 原图引用一并写入资产记录（查看大图按需加载用）
+      // 采纳：展示图 URL + 原图引用一并写入资产记录（查看大图按需加载用）；
+      // R2：传 metaFromNode(node)（trace 优先 / params 兜底）→ 配方随记录落盘 assets.json（修复跨项目复现空白）
       const node = flowState.getNode(nodeId);
-      assetStore.adoptByUrl(url, nodeId, undefined, node?.imageOrigin?.path);
+      assetStore.adoptByUrl(url, nodeId, assetStore.metaFromNode(node), node?.imageOrigin?.path);
       showToast('已采纳（自动锁定）');
     }
   }

@@ -177,6 +177,7 @@ type HistoryEntry =
       createdAt: number;
       parentId?: string | null;
       outputType: 'txt2img' | 'img2img' | 'outpaint';
+      batchId?: string;        // R3：一次生成的批次号（count=N 共用一个；text 分支不加）；旧行缺失 → 读侧按单图回退展示
     }
   | {
       kind: 'text';
@@ -201,9 +202,24 @@ interface ImageAssetRecord {
   tags: string[];         // 手动标签（B6 P1；搜索纳入）
   category: string;       // 分类预留（B8 P2；默认 '成图'，本期不渲染分类 UI）
   updatedAt: number;
+  // ── R2 资产配方持久化（全部可选；缺失 = undefined，不写 null；随采纳落盘 assets.json） ──
+  prompt?: string;              // 生成提示词
+  model?: string;               // "provider:key:model"
+  aspectRatio?: string;         // '3:4' | '1:1' | '16:9' | 'Auto'
+  resolution?: string;          // '1k' | '2k' | '4k'
+  count?: number;               // 本批张数 1-4
+  refImageUrls?: string[];      // 本次实际参考图 URL（复现直接可用）
+  refImageHashes?: string[];    // 参考图指纹（hashRef）
+  outputType?: string;          // 'txt2img' | 'img2img' | 'outpaint'
+  createdAt?: number;           // 生成完成时间戳（trace.createdAt）
 }
 
-/** 采纳时刻的内存元数据（不持久化，资产库复现 S9 用；缺失时经 historyDrawer.getEntryByImageUrl 反查） */
+/**
+ * 采纳元数据（资产库复现/配方展示用）。
+ * R2 起：adopt() 收到 meta 时会把配方字段合并写入 ImageAssetRecord 本体并随 assets.json 落盘
+ * （持久化真相 = 记录本体）；metaByKey 仅作会话级快速缓存，重启后由记录配方合成恢复。
+ * 缺失时经 historyDrawer.getEntryByImageUrl 反查兜底。
+ */
 interface AdoptMeta {
   prompt?: string;
   model?: string;

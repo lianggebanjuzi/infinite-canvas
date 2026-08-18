@@ -205,11 +205,13 @@ class RunEngine {
         y = Math.max(y, n.y + nH + RESULT_GAP_Y);
       });
       const layout: ResultLayout = { x, cursorY: y };
+      // R3：扩图产出（count=1 的批次）也生成 batchId，历史按批次视图下作为单张批次卡展示
+      const batchId = `${nodeId}_${Date.now()}`;
       const card = await this.createResultCard(nodeId, result.imageUrl, layout, {
         model: opts.model,
         aspectRatio: opts.aspectRatio || '1:1',
         resolution: opts.resolution || '4k',
-      }, { outputType: 'outpaint', refs: refs }, origin);
+      }, { outputType: 'outpaint', refs: refs, batchId }, origin);
 
       // 新产出节点从 stale 传播豁免；源节点旧下游标 stale（与引擎其它成功链路口径一致）
       this._createdCardIds.clear();
@@ -355,6 +357,8 @@ class RunEngine {
     const params = node.params as unknown as StyleTransferParams;
     const prompt = (params.prompt || '').trim();
     const total = Math.min(COUNT_MAX, Math.max(COUNT_MIN, Math.round(Number(params.count) || COUNT_MIN)));
+    // R3：批次号 = 生成节点 id + 批次启动时刻（同批全部成功图共用；同节点重跑 → 时间戳不同 → 可区分）
+    const batchId = `${nodeId}_${Date.now()}`;
     const def = nodeRegistry.get(node.type);
     const options = def.buildOptions(node, ctx);
     options.count = COUNT_MIN;
@@ -382,7 +386,7 @@ class RunEngine {
     //    布局游标在批次开始时快照生成节点位置，之后只随已放置卡片累计，完成顺序不定也不重叠。
     const layout: ResultLayout = { x: node.x + CARD_W + RESULT_GAP_X, cursorY: node.y };
     const jobs = Array.from({ length: total }, (_, i) =>
-      this.runOneWorker(nodeId, prompt, options, layout, progress, isTxt2Img, i, refs));
+      this.runOneWorker(nodeId, prompt, options, layout, progress, isTxt2Img, i, refs, batchId));
     await Promise.allSettled(jobs);
 
     linkView.setNodeFlowing(nodeId, false);
@@ -443,6 +447,7 @@ class RunEngine {
     isTxt2Img: boolean,
     index: number,
     refs: string[],
+    batchId: string, // R3：本批批次号，透传到该张成功图的 addImage / appendTrace
   ): Promise<void> {
     try {
       const created = await Backend.generateImage(prompt, { ...options, count: COUNT_MIN });
@@ -465,12 +470,13 @@ class RunEngine {
             const card = await this.createResultCard(genId, result.imageUrl, layout, {}, {
               outputType: 'txt2img',
               refs,
+              batchId,
             }, origin);
             this._createdCardIds.add(card.id);
             progress.done += 1;
           } else {
             // 文生图第 1 张（按 index=0，非完成顺序）写回源节点自身 imageUrl
-            await this._writeBackToSelf(genId, result.imageUrl, origin);
+            await this._writeBackToSelf(genId, result.imageUrl, origin, batchId);
             progress.done += 1;
           }
         } else {
@@ -478,6 +484,7 @@ class RunEngine {
           const card = await this.createResultCard(genId, result.imageUrl, layout, {}, {
             outputType: isTxt2Img ? 'txt2img' : 'img2img',
             refs,
+            batchId,
           }, origin);
           this._createdCardIds.add(card.id);
           progress.done += 1;
@@ -497,13 +504,14 @@ class RunEngine {
    * 文生图第 1 张写回源节点自身：旧 imageUrl 先入历史图库保留，再覆盖为新图（不建新节点、不清空 imageUrl）。
    * 写回后源节点即「有输出图」，下游仍可自动取作参考图（getReferenceImages 语义不变）。
    * origin：原图引用（缩略图 + 原图路径，查看大图按需加载用）；旧后端无 original_path 时为 null。
+   * batchId：R3 本批批次号——仅新图 appendTrace 带（jsonl 行）；旧图 addImage 不带（旧图属上一次运行的批次）。
    */
-  private async _writeBackToSelf(genId: string, imageUrl: string, origin: ImageOrigin | null = null): Promise<void> {
+  private async _writeBackToSelf(genId: string, imageUrl: string, origin: ImageOrigin | null = null, batchId?: string): Promise<void> {
     const node = flowState.getNode(genId);
     if (!node) return;
     if (node.imageUrl && node.imageUrl !== imageUrl) {
       const p = node.params as unknown as StyleTransferParams;
-      historyDrawer.addImage(node.imageUrl, { // 旧图入历史图库保留（带搜索元数据 + 原图引用）
+      historyDrawer.addImage(node.imageUrl, { // 旧图入历史图库保留（带搜索元数据 + 原图引用；不带当前 batchId）
         nodeId: node.id,
         prompt: typeof p.prompt === 'string' ? p.prompt : '',
         model: typeof p.model === 'string' ? p.model : '',
@@ -518,7 +526,7 @@ class RunEngine {
     }
     const ratio = await loadImageRatio(imageUrl);
     flowState.setNodeImage(genId, imageUrl, ratio && ratio > 0 ? ratio : undefined);
-    // 文生图第 1 张写回自身：source of truth = node.trace，并追加一条 kind:'image' 流水
+    // 文生图第 1 张写回自身：source of truth = node.trace，并追加一条 kind:'image' 流水（带 batchId）
     node.imageOrigin = origin; // 原图引用（缩略图 + 原图路径）
     const trace = historyPersist.buildImageTrace(node, [], 'txt2img', imageUrl);
     node.trace = trace;
@@ -530,6 +538,7 @@ class RunEngine {
       thumbnail: imageUrl,
       originalPath: origin?.path,
       originalUrl: origin?.url,
+      ...(batchId ? { batchId } : {}),
     });
   }
 
@@ -547,7 +556,7 @@ class RunEngine {
     imageUrl: string,
     layout: ResultLayout,
     paramOverrides: Record<string, unknown> = {},
-    trace: { outputType: GenerationTrace['outputType']; refs: string[] } = { outputType: 'img2img', refs: [] },
+    trace: { outputType: GenerationTrace['outputType']; refs: string[]; batchId?: string } = { outputType: 'img2img', refs: [] },
     origin: ImageOrigin | null = null,
   ): Promise<FlowNode> {
     const gen = flowState.getNode(genId);
@@ -597,6 +606,7 @@ class RunEngine {
       thumbnail: imageUrl, // 展示图=缩略图
       originalPath: origin?.path,
       originalUrl: origin?.url,
+      batchId: trace.batchId, // R3：同批全部成功图共用同一批次号
     });
     void historyPersist.appendTrace({
       kind: 'image',
@@ -606,6 +616,7 @@ class RunEngine {
       thumbnail: imageUrl,
       originalPath: origin?.path,
       originalUrl: origin?.url,
+      ...(trace.batchId ? { batchId: trace.batchId } : {}),
     });
     return node;
   }
