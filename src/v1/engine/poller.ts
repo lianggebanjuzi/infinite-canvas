@@ -91,21 +91,23 @@ export async function pollTask(taskId: string, opts: PollOptions = {}): Promise<
 
     if (res.status === 'done') {
       const r = res.result;
-      // 治本（image_url 可能为空）：后端 done 响应不携带大图 base64——缩略图成功则 image_url 有值；
-      // 缩略图失败时 image_url 为空但 original_path 保留，由引擎按路径经 loadLocalImage 取图兜底。
-      if (r && r.success && (r.image_url || r.original_path)) {
+      // 成功契约（v2）：image_url（缩略图 data URL）可能为空——后端缩略图失败时不回退大 base64，
+      // 但会保留 original_path（原图已落盘，含 tempfile 兜底）。只要 image_url / original_path /
+      // original_url 任一存在即可判成功，由引擎 _resolveImageUrl 按
+      // image_url → loadLocalImage(original_path) → original_url 顺序解析展示图。
+      if (r && r.success && (r.image_url || r.original_path || r.original_url)) {
         return {
           success: true,
-          imageUrl: r.image_url || undefined,
+          imageUrl: typeof r.image_url === 'string' ? r.image_url : undefined,
           thumbnail: typeof r.thumbnail === 'string' ? r.thumbnail : undefined,
           originalPath: typeof r.original_path === 'string' ? r.original_path : undefined,
           originalUrl: typeof r.original_url === 'string' ? r.original_url : undefined,
           savedToDisk: typeof r.saved_to_disk === 'boolean' ? r.saved_to_disk : undefined,
         };
       }
-      // 失败：错误码 + 消息（不自动切供应商，由用户手动重跑）
+      // 失败：错误码 + 消息（不自动切供应商，由用户手动重跑）；success 但无任何可展示/可回退的图 → 明确提示，不静默白屏
       const code = r?.error_code ?? 500;
-      const message = r?.message || r?.error || (r?.success ? '生成成功但未返回图片数据' : '生成失败');
+      const message = r?.message || r?.error || (r?.success ? '生成成功但未返回图片数据，请重试或检查图片保存路径' : '生成失败');
       return { success: false, code, error: message };
     }
 

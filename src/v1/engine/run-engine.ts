@@ -134,10 +134,16 @@ class RunEngine {
     if (result.imageUrl) return result.imageUrl;
     if (result.originalPath) {
       try {
-        const res = await Backend.loadLocalImage(result.originalPath);
+        // 原图 base64 跨桥接按需传输：加 60s 单次超时，避免桥接悬挂导致节点永远卡「生成中」。
+        // loadLocalImage 与轮询无关（一次性取图）；超时/失败落到 originalUrl 兜底或明确失败。
+        const res = await withTimeout(
+          Backend.loadLocalImage(result.originalPath),
+          60000,
+          '原图加载超时',
+        );
         if (res.status === 'success' && res.data_url) return res.data_url;
       } catch {
-        // 读取失败落到 originalUrl 兜底
+        // 读取失败/超时落到 originalUrl 兜底
       }
     }
     if (result.originalUrl) return result.originalUrl;
