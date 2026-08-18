@@ -398,15 +398,19 @@ body { font-family: var(--font); background: var(--bg-app); color: var(--text-1)
 .cmd-send:hover { background: var(--warm); transform: scale(1.05); }
 .cmd-send:disabled { background: var(--border-strong); cursor:default; transform:none; }
 
-/* text-gen 面板：隐藏绘图参数 chips（比例/分辨率/张数）与参考图区（文本节点不接收图片），保留模型 chip */
+/* text-gen 面板：隐藏绘图参数 chips（比例/分辨率/张数）与参考图区（文本节点不接收图片挂载，仅上游走线），保留模型 chip */
 .cmd-panel.textgen #chip-ratio,
 .cmd-panel.textgen #chip-res,
 .cmd-panel.textgen #chip-count { display:none; }
 .cmd-panel.textgen .cmd-refs { display:none; }
-/* image-gen 文本反推模式：同样隐藏绘图参数 chips（无意义），但保留参考图区（反推依赖源图，可见可换） */
-.cmd-panel.reverse #chip-ratio,
-.cmd-panel.reverse #chip-res,
-.cmd-panel.reverse #chip-count { display:none; }
+
+/* P1（W3-4）：指令面板最终 prompt 预览（只读，帮助理解「线即真相」） */
+.cmd-prompt-preview {
+  padding:6px 14px; font-size:11px; line-height:1.5;
+  color: var(--text-3); border-top:1px dashed var(--border-soft);
+  background: var(--bg-panel);
+  white-space:pre-wrap; word-break:break-word; max-height:64px; overflow-y:auto;
+}
 
 /* text-gen 历史反推结果列表 */
 .cmd-text-history {
@@ -891,6 +895,16 @@ body { font-family: var(--font); background: var(--bg-app); color: var(--text-1)
 .pcard-badge:hover { transform: scale(1.12); }
 .pcard-badge.on { background: var(--st-done); }
 .pcard-badge.lock.on { background: var(--warm); }
+
+/* 素材节点（isAsset，Q3）：整卡显图 + 角标「素材」+ 细边框区分；不可运行/无指令面板由 JS 门控 */
+.pcard-asset { border-color: rgba(120,140,110,.5); }
+.pcard-asset-badge {
+  position:absolute; top:44px; left:10px; z-index:4;
+  background: rgba(88,112,82,.82); backdrop-filter: blur(6px);
+  color:#fff; font-size:10px; font-weight:600; letter-spacing:.08em;
+  padding:3px 8px; border-radius: var(--r-sm);
+  pointer-events:none; box-shadow: 0 1px 4px rgba(60,50,40,.2);
+}
 
 /* ═══════════ 对比面板（C1-C6） ═══════════ */
 .compare-overlay { z-index:85; }

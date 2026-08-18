@@ -9,7 +9,7 @@ import { flowHistory } from '../state/history';
 import { canvasView, CARD_W } from '../canvas/canvas-view';
 import { cardView } from '../canvas/card-view';
 import { interactions } from '../canvas/interactions';
-import { runEngine, applyTextToDownstream } from '../engine/run-engine';
+import { runEngine } from '../engine/run-engine';
 import { Backend, fetchImageModels, fetchChatModels } from '../api';
 import { DEFAULT_CHAT_MODEL_KEY } from '../nodes/text-gen';
 import { showToast } from './toast';
@@ -21,10 +21,9 @@ const COUNT_OPTIONS = [1, 2, 3, 4];
 
 const DEL_SVG = '<svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>';
 
-/** 指令输入框占位提示：text-gen 用命令示例，图片节点文本反推模式用反推命令示例，其余用通用编辑指令 */
+/** 指令输入框占位提示：text-gen 用命令示例，图片节点用绘图指令（反推模式 UI 已删除，W2-2） */
 const PROMPT_INPUT_PLACEHOLDER = '输入指令编辑这张图，如：把背景换成浅灰水泥墙，加一盆绿萝';
-const TEXT_GEN_INPUT_PLACEHOLDER = '输入命令，如：改得更专业、翻译成英文';
-const IMAGE_TEXT_REVERSE_PLACEHOLDER = '输入命令，如：反推这个图片';
+const TEXT_GEN_INPUT_PLACEHOLDER = '输入命令，如：改得更专业、翻译成英文、反推这张图';
 
 class CmdPanel {
   private el: HTMLElement | null = null;
@@ -41,6 +40,7 @@ class CmdPanel {
   private chipResLabel!: HTMLElement;
   private chipCountLabel!: HTMLElement;
   private historyEl!: HTMLElement;
+  private promptPreview: HTMLElement | null = null;
   private modelOptions: Array<{ id: string; name: string }> = [];
   private chatModelOptions: Array<{ id: string; name: string }> = [];
   /** 动态参考图缩略元素（随 refImages/上游增删重建） */
@@ -63,6 +63,18 @@ class CmdPanel {
     this.chipResLabel = document.getElementById('chip-res-label') as HTMLElement;
     this.chipCountLabel = document.getElementById('chip-count-label') as HTMLElement;
     this.historyEl = document.getElementById('cmd-text-history') as HTMLElement;
+
+    // P1（W3-4）：最终 prompt 预览行——动态创建（image-gen 选中时展示 composeImagePrompt 只读结果）
+    this.promptPreview = document.getElementById('cmd-prompt-preview') as HTMLElement | null;
+    if (!this.promptPreview && this.el) {
+      this.promptPreview = document.createElement('div');
+      this.promptPreview.className = 'cmd-prompt-preview';
+      this.promptPreview.id = 'cmd-prompt-preview';
+      this.promptPreview.hidden = true;
+      const controls = this.el.querySelector('.cmd-controls');
+      if (controls) controls.before(this.promptPreview);
+      else this.el.appendChild(this.promptPreview);
+    }
 
     // 预取模型列表（绘图 + 对话，供 chip 菜单与默认模型回填）
     void fetchImageModels().then(models => { this.modelOptions = models; });
@@ -134,7 +146,7 @@ class CmdPanel {
     }
   }
 
-  /** 模型 chip：打开菜单前重新拉取模型（text-gen → chat 模型；image-gen → 绘图/文本模型类型切换），确保设置里新增/拉取的模型即时可见 */
+  /** 模型 chip：打开菜单前重新拉取模型（text-gen → chat 模型；image-gen → 绘图模型），确保设置里新增/拉取的模型即时可见 */
   private async _openModelMenu(btn: HTMLElement): Promise<void> {
     const node = selection.single();
     if (!node) return;
@@ -142,88 +154,10 @@ class CmdPanel {
       this.chatModelOptions = await fetchChatModels();
       this._showChipMenu(btn, this.chatModelOptions.map(m => ({ id: m.id, name: m.name })), 'model');
     } else {
-      // image-gen：绘图模型（默认，生成图）/ 文本模型（反推）类型切换
-      await this._openImageModelMenu(btn, node);
+      // image-gen：仅绘图模型列表（文本模型 tab / 反推模式 UI 已删除，W2-2；modelType 运行时忽略 Q7）
+      this.modelOptions = await fetchImageModels();
+      this._showChipMenu(btn, this.modelOptions.map(m => ({ id: m.id, name: m.name })), 'model');
     }
-  }
-
-  /** image-gen 模型 chip：顶部「绘图模型 / 文本模型」两个 tab，切换类型并记住（写 params.modelType）；选中写对应 model 字段 */
-  private async _openImageModelMenu(btn: HTMLElement, node: FlowNode): Promise<void> {
-    const [imageModels, chatModels] = await Promise.all([fetchImageModels(), fetchChatModels()]);
-    this.modelOptions = imageModels;
-    this.chatModelOptions = chatModels;
-
-    document.querySelector('.param-menu')?.remove();
-    const rect = btn.getBoundingClientRect();
-    const menu = document.createElement('div');
-    menu.className = 'param-menu';
-    menu.style.left = rect.left + 'px';
-    menu.style.top = (rect.bottom + 5) + 'px';
-    const menuWidth = 200;
-    if (rect.left + menuWidth > window.innerWidth - 12) {
-      menu.style.left = (window.innerWidth - menuWidth - 12) + 'px';
-    }
-
-    const p = node.params as unknown as StyleTransferParams;
-    let currentType: 'draw' | 'text' = p.modelType === 'text' ? 'text' : 'draw';
-
-    const tabs = document.createElement('div');
-    tabs.className = 'param-menu-tabs';
-    const tabDraw = document.createElement('div');
-    tabDraw.className = 'param-menu-tab' + (currentType === 'draw' ? ' active' : '');
-    tabDraw.textContent = '绘图模型';
-    const tabText = document.createElement('div');
-    tabText.className = 'param-menu-tab' + (currentType === 'text' ? ' active' : '');
-    tabText.textContent = '文本模型';
-    tabs.appendChild(tabDraw);
-    tabs.appendChild(tabText);
-    menu.appendChild(tabs);
-
-    const listBox = document.createElement('div');
-    listBox.className = 'param-menu-list';
-    menu.appendChild(listBox);
-
-    const renderList = (type: 'draw' | 'text'): void => {
-      listBox.innerHTML = '';
-      const items = type === 'text' ? this.chatModelOptions : this.modelOptions;
-      const current = type === 'text' ? (p.textModel || '') : (p.model || '');
-      items.forEach(item => {
-        const div = document.createElement('div');
-        div.className = 'param-menu-item' + (item.id === current ? ' selected' : '');
-        div.textContent = item.name;
-        div.addEventListener('click', (ev) => {
-          ev.stopPropagation();
-          flowHistory.record();
-          if (type === 'text') {
-            flowState.updateNodeParams(node.id, { modelType: 'text', textModel: item.id });
-          } else {
-            flowState.updateNodeParams(node.id, { modelType: 'draw', model: item.id });
-            if (item.id) localStorage.setItem('icv_default_model', item.id);
-          }
-          menu.remove();
-        });
-        listBox.appendChild(div);
-      });
-    };
-
-    const setTab = (type: 'draw' | 'text'): void => {
-      currentType = type;
-      flowHistory.record();
-      flowState.updateNodeParams(node.id, { modelType: type });
-      tabDraw.className = 'param-menu-tab' + (type === 'draw' ? ' active' : '');
-      tabText.className = 'param-menu-tab' + (type === 'text' ? ' active' : '');
-      renderList(type);
-    };
-    tabDraw.addEventListener('click', (ev) => { ev.stopPropagation(); setTab('draw'); });
-    tabText.addEventListener('click', (ev) => { ev.stopPropagation(); setTab('text'); });
-
-    renderList(currentType);
-
-    document.body.appendChild(menu);
-    setTimeout(() => {
-      const close = () => { menu.remove(); document.removeEventListener('click', close); };
-      document.addEventListener('click', close);
-    }, 0);
   }
 
   private _showChipMenu(btn: HTMLElement, items: Array<{ id: string; name: string }>, paramType: string): void {
@@ -301,9 +235,15 @@ class CmdPanel {
       return;
     }
 
+    // 素材节点：仅展示图、不可输入指令——隐藏面板（含默认模型回填跳过，W5-2）
+    if (flowState.isAssetNode(node)) {
+      this.el.classList.remove('show', 'pos-above', 'textgen', 'reverse');
+      return;
+    }
+
     // 默认模型回填：数据行为，与面板显隐解耦——选中节点即回填（不受下方 Tab 门控影响），
     // 保证「新建节点/连线插入节点 → 运行选中」在面板收起态也能拿到默认模型（QA 回归 P1）。
-    // text-gen 回填对话模型；其余（含 image-gen 文本反推）回填绘图模型，与原有调用条件一致。
+    // text-gen 回填对话模型；其余（image-gen）回填绘图模型。
     if (!(node.params.model as string | undefined)) {
       if (node.type === 'text-gen') this._ensureChatModel(node.id);
       else this._ensureModel(node.id);
@@ -321,21 +261,18 @@ class CmdPanel {
     this.ctxThumb.style.backgroundImage = node.imageUrl ? `url('${node.imageUrl.replace(/'/g, "\\'")}')` : 'none';
 
     // text-gen 面板：隐藏绘图参数 chips（比例/分辨率/张数）与参考图区，模型 chip 切到文本模型；
-    // image-gen 文本反推模式：同样隐藏绘图参数 chips（无意义），但保留参考图区（反推依赖源图，可见可换）
+    // image-gen 面板：绘图参数 chips 全显示（反推模式 UI 已删除，W2-2）
     const isTextGen = node.type === 'text-gen';
-    const isImageReverse = node.type === 'image-gen' && (node.params as unknown as StyleTransferParams).modelType === 'text';
     this.el.classList.toggle('textgen', isTextGen);
-    this.el.classList.toggle('reverse', isImageReverse);
+    this.el.classList.remove('reverse');
 
-    // chip/发送钮 title 文案随节点类型/模式切换（文本处理/图片反推/图片生成语义不同）
-    this.chipModelBtn.title = isTextGen || isImageReverse ? '选择文本模型' : '选择绘图模型';
-    this.send.title = isTextGen ? '处理文本' : (isImageReverse ? '反推文本' : '生成');
+    // chip/发送钮 title 文案随节点类型切换（文本处理 / 图片生成）
+    this.chipModelBtn.title = isTextGen ? '选择文本模型' : '选择绘图模型';
+    this.send.title = isTextGen ? '处理文本' : '生成';
 
-    // 输入框占位提示跟随节点类型/模型类型（切换选中节点时同步变化）
+    // 输入框占位提示跟随节点类型（切换选中节点时同步变化）
     if (isTextGen) {
       this.input.placeholder = TEXT_GEN_INPUT_PLACEHOLDER;
-    } else if (isImageReverse) {
-      this.input.placeholder = IMAGE_TEXT_REVERSE_PLACEHOLDER;
     } else {
       this.input.placeholder = PROMPT_INPUT_PLACEHOLDER;
     }
@@ -344,9 +281,9 @@ class CmdPanel {
       node.status === 'stale' ? '· 上游已改，待重跑' :
       node.status === 'done' ? '· 已完成' :
       node.status === 'run' ? this._runHint(node.id) :
-      node.status === 'fail' ? (isTextGen ? '· 处理失败' : isImageReverse ? '· 反推失败' : '· 生成失败') : '';
+      node.status === 'fail' ? (isTextGen ? '· 处理失败' : '· 生成失败') : '';
 
-    // 输入框（用户未聚焦时回填）：text-gen 命令是临时的，保持干净不回填；image-gen 回填 prompt（文本反推模式复用 prompt 作命令）
+    // 输入框（用户未聚焦时回填）：text-gen 命令是临时的，保持干净不回填；image-gen 回填 prompt
     if (document.activeElement !== this.input) {
       if (isTextGen) {
         this.input.value = '';
@@ -360,14 +297,14 @@ class CmdPanel {
     this._renderRefs();
     this._renderChips(node);
     this._renderTextHistory(node);
+    this._renderPromptPreview(node);
     this._position(node);
   }
 
-  /** run 状态提示：text-gen「处理中」；图片节点文本反推「反推中」；批次「生成中 done/total」（无批次时退化为「生成中」） */
+  /** run 状态提示：text-gen「处理中」；批次「生成中 done/total」（无批次时退化为「生成中」） */
   private _runHint(nodeId: string): string {
     const node = flowState.getNode(nodeId);
     if (node && node.type === 'text-gen') return '· 处理中';
-    if (node && node.type === 'image-gen' && (node.params as unknown as StyleTransferParams).modelType === 'text') return '· 反推中';
     const p = runEngine.getBatchProgress(nodeId);
     if (p && p.total > 0) return `· 生成中 ${p.done}/${p.total}`;
     return '· 生成中';
@@ -442,12 +379,24 @@ class CmdPanel {
     });
   }
 
-  /** 历史回填动作（与运行成功时的覆盖动作完全一致）：写 outputText + 覆盖直接 image-gen 下游 prompt + 标 stale */
+  /** 历史回填动作（与运行成功/就地编辑三处口径一致，W4-3）：写 outputText + 标下游 stale；旁路已删除，不覆盖下游 prompt */
   private _refillHistoryItem(nodeId: string, item: TextGenHistoryItem): void {
     flowHistory.record();
     flowState.updateNode(nodeId, { outputText: item.text });
-    applyTextToDownstream(nodeId, item.text);
+    dirty.markUpstreamChanged(nodeId);
     showToast('已回填历史反推文本');
+  }
+
+  /** P1（W3-4）：最终 prompt 预览——仅 image-gen（非素材）显示 composeImagePrompt 只读结果，帮助理解「线即真相」 */
+  private _renderPromptPreview(node: FlowNode): void {
+    if (!this.promptPreview) return;
+    if (node.type === 'image-gen' && !flowState.isAssetNode(node)) {
+      const prompt = runEngine.composeImagePrompt(node.id);
+      this.promptPreview.textContent = prompt ? `最终 prompt：${prompt}` : '';
+      this.promptPreview.hidden = !prompt;
+      return;
+    }
+    this.promptPreview.hidden = true;
   }
 
   /** 参考图区：展示 getReferenceImages(id)（本节点 refImages + 上游可作参考图的图），本节点 refImages 支持删除 */
@@ -499,14 +448,11 @@ class CmdPanel {
 
   private _renderChips(node: FlowNode): void {
     const p = node.params as unknown as StyleTransferParams;
-    // 模型 chip 名称按节点类型/模型类型查对应模型列表（text-gen → chat；image-gen 文本反推 → chat 的 textModel；其余 → 绘图）
+    // 模型 chip 名称按节点类型查对应模型列表（text-gen → chat；image-gen → 绘图；反推模式已删除）
     let modelName: string;
     if (node.type === 'text-gen') {
       const model = this.chatModelOptions.find(m => m.id === p.model);
       modelName = model ? model.name : (p.model || '选择模型');
-    } else if (p.modelType === 'text') {
-      const model = this.chatModelOptions.find(m => m.id === p.textModel);
-      modelName = model ? model.name : (p.textModel || '选择文本模型');
     } else {
       const model = this.modelOptions.find(m => m.id === p.model);
       modelName = model ? model.name : (p.model || '选择模型');

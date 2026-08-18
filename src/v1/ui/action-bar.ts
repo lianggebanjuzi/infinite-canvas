@@ -74,8 +74,8 @@ class ActionBar {
       return;
     }
     const node = selection.single();
-    // 文本节点：隐藏操作条
-    if (!node || node.type === 'text-gen') {
+    // 文本节点 / 素材节点：隐藏操作条（素材仅展示图，无扩图/复现/下载等生成入口，判分支 #16+）
+    if (!node || node.type === 'text-gen' || flowState.isAssetNode(node)) {
       this.el.classList.remove('show', 'pos-below');
       return;
     }

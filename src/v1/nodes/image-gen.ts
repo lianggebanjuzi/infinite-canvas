@@ -1,9 +1,12 @@
 // src/v1/nodes/image-gen.ts
 // 统一「生成节点」定义：多张参考图（refImages ∪ 上游可作参考图的图）+ 提示词 → 生成一张新图
 // 参考图 0~N 可选（0 张时为纯文生图），参考图合并统一走 FlowContext.getReferenceImages
-// 双卡模型：引擎图生图产出的新节点也注册本类型（parentId 标记归属），与手建节点同样可编辑/可反推/可连线
+// 双卡模型：引擎图生图产出的新节点也注册本类型（parentId 标记归属），与手建节点同样可编辑/可连线
+// 素材态（isAsset）：复用本类型 + 顶层 isAsset:true 标记（Q3）——整卡显图、不可运行、无指令面板、可作 from 连线
+// 旧 modelType='text' 反推分支已删除（Q7）：运行时忽略、一律按 draw 处理；反推归位到文本节点（runTextGen 带上游图）
 
 import { nodeRegistry } from './node-registry';
+import { flowState } from '../state/flow-state';
 
 const def: NodeDefinition = {
   type: 'image-gen',
@@ -19,16 +22,15 @@ const def: NodeDefinition = {
   },
 
   canRun(node: FlowNode, ctx: FlowContext): boolean | string {
+    // 素材节点：仅展示、不可运行（数据层闸门；右键菜单/指令面板入口另行隐藏）
+    if (flowState.isAssetNode(node)) return '素材节点不可运行';
     const p = node.params as unknown as StyleTransferParams;
-    // 文本模型反推模式：需已选文本模型 + 命令 + 有图
-    if (p.modelType === 'text') {
-      if (!p.textModel) return '请先选择文本模型';
-      if (!p.prompt || !p.prompt.trim()) return '请输入命令';
-      const img = node.imageUrl || ctx.getReferenceImages(node.id)[0];
-      if (!img) return '请先有图片';
-      return true;
-    }
-    if (!p.prompt || !p.prompt.trim()) return '请输入提示词';
+    // draw 放宽（W3-3）：自身 prompt 空但有文本上游 → 允许运行（文本走线：上游文本作关键词）；
+    // 两者皆空 → 拒绝「请输入提示词」。
+    const hasOwnPrompt = !!(p.prompt && p.prompt.trim());
+    const hasUpstreamText = ctx.getUpstreams(node.id)
+      .some(u => u.type === 'text-gen' && typeof u.outputText === 'string' && u.outputText.trim().length > 0);
+    if (!hasOwnPrompt && !hasUpstreamText) return '请输入提示词';
     if (!p.model) return '请先选择绘图模型';
     return true; // 参考图 0~N 可选
   },

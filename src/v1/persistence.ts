@@ -82,7 +82,8 @@ function migrateNode(raw: unknown): FlowNode | null {
       error: typeof r.error === 'string' ? r.error : null,
       lastRunAt: typeof r.lastRunAt === 'number' ? r.lastRunAt : null,
       parentId,
-        trace: null,
+      trace: null,
+      ...(r.isAsset === true ? { isAsset: true } : {}), // isAsset 透传（防重开丢标记；缺省 undefined 不输出 key）
     };
   }
 
@@ -130,6 +131,7 @@ function migrateNode(raw: unknown): FlowNode | null {
     lastRunAt: typeof r.lastRunAt === 'number' ? r.lastRunAt : null,
     parentId,
       trace: null,
+    ...(r.isAsset === true ? { isAsset: true } : {}), // isAsset 透传（防重开丢标记；缺省 undefined 不输出 key）
   };
 
   node.refImages = Array.isArray(r.refImages)

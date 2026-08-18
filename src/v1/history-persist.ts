@@ -24,12 +24,14 @@ class HistoryPersist {
    * refImageUrls 可选记录实际参考图 URL（跨会话复现反查用；旧 trace 缺失时按 hash 反查图池兜底）；
    * parentId = node.parentId ?? node.id（手建节点自身生成时即自己 id）。
    * imageUrl 为本次产出图 URL（写 history.jsonl 行用；GenerationTrace 本身不存 imageUrl 字段）。
+   * promptOverride：文本走线增量——本次实际使用的合成 prompt（composeImagePrompt 唯一入口产出；
+   * 上游文本 + 自身 prompt）。传入时优先于 node.params.prompt 记录到 trace（W3-2：trace 含上游文本，线即真相可回溯）。
    */
-  buildImageTrace(node: FlowNode, refs: string[], outputType: GenerationTrace['outputType'], imageUrl?: string): GenerationTrace {
+  buildImageTrace(node: FlowNode, refs: string[], outputType: GenerationTrace['outputType'], imageUrl?: string, promptOverride?: string): GenerationTrace {
     const p = (node.params || {}) as unknown as StyleTransferParams;
     void imageUrl; // 供调用方构造 HistoryEntry 时携带（见 run-engine appendTrace）
     return {
-      prompt: typeof p.prompt === 'string' ? p.prompt : '',
+      prompt: typeof promptOverride === 'string' ? promptOverride : (typeof p.prompt === 'string' ? p.prompt : ''),
       model: typeof p.model === 'string' ? p.model : '',
       aspectRatio: typeof p.aspectRatio === 'string' ? p.aspectRatio : '3:4',
       resolution: typeof p.resolution === 'string' ? p.resolution : '2k',

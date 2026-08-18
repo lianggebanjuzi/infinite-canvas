@@ -4,10 +4,10 @@
 import { flowState } from '../state/flow-state';
 import { selection } from '../state/selection';
 import { flowHistory } from '../state/history';
+import { dirty } from '../state/dirty';
 import { CARD_W } from './canvas-view';
 import { interactions } from './interactions';
 import { applyCardStatus } from '../ui/status-visuals';
-import { applyTextToDownstream } from '../engine/run-engine';
 import { showToast } from '../ui/toast';
 import { assetStore } from '../asset-store';
 import { Backend } from '../api';
@@ -19,8 +19,8 @@ const ICON_LOCK = '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" s
 class CardView {
   private container: HTMLElement | null = null;
   private els = new Map<string, HTMLElement>();
-  /** 内容指纹缓存：主图/缩略行/标题/状态/文本/角标态变化时才重建 img.innerHTML（避免高频调用反复重建大图 DOM） */
-  private _contentFingerprint = new Map<string, { mainSrc: string; refStrip: string; title: string; status: string; text: string; assetState: string }>();
+  /** 内容指纹缓存：主图/缩略行/标题/状态/文本/角标态/素材态/空态文案变化时才重建 img.innerHTML（避免高频调用反复重建大图 DOM） */
+  private _contentFingerprint = new Map<string, { mainSrc: string; refStrip: string; title: string; status: string; text: string; assetState: string; isAsset: string; emptyHint: string }>();
   /** 当前处于就地编辑态的 text-gen 节点 id（编辑中跳过 img.innerHTML 重建，避免打字被重建打断） */
   private _editingNodeId: string | null = null;
 
@@ -129,6 +129,7 @@ class CardView {
     // 文本反推卡：主视觉为文本（outputText），无图。
     const ownRefs = Array.isArray(node.refImages) ? node.refImages : [];
     const isTextGen = node.type === 'text-gen';
+    const isAsset = flowState.isAssetNode(node); // 素材态：整卡显图 + 角标「素材」（判分支 #9）
     const mainSrc = isTextGen
       ? ''
       : (node.imageUrl || (ownRefs.length > 0 ? ownRefs[0] : ''));
@@ -149,7 +150,11 @@ class CardView {
     const adopted = !!mainSrc && assetStore.isAdoptedByImageUrl(mainSrc);
     const locked = !!mainSrc && assetStore.isLockedByImageUrl(mainSrc);
     const assetState = (adopted ? 'a' : '') + (locked ? 'l' : '');
-    const fp = { mainSrc, refStrip, title, status: node.status, text, assetState };
+    // P1（W2-5）：文本节点空态引导——有图片上游（可反推）时给轻量提示
+    const emptyHint = isTextGen && flowState.getReferenceImages(node.id).length > 0
+      ? '已连接上游图，可反推'
+      : '点击输入文本';
+    const fp = { mainSrc, refStrip, title, status: node.status, text, assetState, isAsset: isAsset ? '1' : '0', emptyHint };
     const prev = this._contentFingerprint.get(node.id);
     const changed = !prev
       || prev.mainSrc !== fp.mainSrc
@@ -157,7 +162,9 @@ class CardView {
       || prev.title !== fp.title
       || prev.status !== fp.status
       || prev.text !== fp.text
-      || prev.assetState !== fp.assetState;
+      || prev.assetState !== fp.assetState
+      || prev.isAsset !== fp.isAsset
+      || prev.emptyHint !== fp.emptyHint;
     if (changed) {
       this._contentFingerprint.set(node.id, fp);
       // 就地编辑中跳过重建（避免状态等变化把 textarea 打没）；退出编辑态后由保存/取消路径强制重建
@@ -169,12 +176,14 @@ class CardView {
             <button class="pcard-badge lock${locked ? ' on' : ''}" title="${locked ? '取消锁定' : '锁定'}">${ICON_LOCK}</button>
           </div>`;
         if (isTextGen) {
-          // 文本为主视觉：白底文本区（内部滚动），有结果显示 outputText，空态显示占位文案
+          // 文本为主视觉：白底文本区（内部滚动），有结果显示 outputText，空态显示占位文案（有图片上游 → 反推引导）
           img.innerHTML = text
             ? `<div class="pcard-text">${escapeHtml(text)}</div><div class="scan"></div>${refStrip}`
-            : `<div class="pcard-text empty"><span class="pcard-text-empty">点击输入文本</span></div><div class="scan"></div>${refStrip}`;
+            : `<div class="pcard-text empty"><span class="pcard-text-empty">${emptyHint}</span></div><div class="scan"></div>${refStrip}`;
         } else if (mainSrc) {
-          img.innerHTML = `<div class="ph" style="background-image:url('${escapeUrl(mainSrc)}')"></div><div class="scan"></div>${refStrip}${badgesHtml}`;
+          // 素材节点：整卡显图 + 角标「素材」+ pcard-asset class（判分支 #9）
+          const assetBadgeHtml = isAsset ? '<span class="pcard-asset-badge">素材</span>' : '';
+          img.innerHTML = `<div class="ph" style="background-image:url('${escapeUrl(mainSrc)}')"></div><div class="scan"></div>${refStrip}${badgesHtml}${assetBadgeHtml}`;
         } else {
           img.innerHTML = `<div class="ph"><div class="ph-empty">${emptyContent()}</div></div><div class="scan"></div>${refStrip}`;
         }
@@ -200,6 +209,7 @@ class CardView {
 
     el.classList.toggle('empty', !mainSrc && !isTextGen);
     el.classList.toggle('selected', selection.isSelected(node.id));
+    el.classList.toggle('pcard-asset', isAsset); // 素材态：边框/角标视觉（判分支 #9）
 
     // 查看大图（按需加载原图：有 imageOrigin.path 时桥接取原图，失败回退缩略图）
     const act = el.querySelector('.pcard-act') as HTMLButtonElement | null;
@@ -267,10 +277,10 @@ class CardView {
     if (!newText.trim() && prevText.trim()) { this._restoreTextCard(nodeId); return; }
     if (newText === prevText) { this._restoreTextCard(nodeId); return; } // 内容没变，仅退出编辑
 
-    // 永远只写结果 outputText + 覆盖直接 image-gen 下游 prompt + 标 stale（与处理成功联动一致）
+    // 永远只写结果 outputText + 标下游 stale（旁路已删除：不再覆盖下游 prompt，W3-1/W4-1）
     flowHistory.record();
     flowState.updateNode(nodeId, { outputText: newText });
-    applyTextToDownstream(nodeId, newText);
+    dirty.markUpstreamChanged(nodeId);
     showToast('已保存文本');
   }
 

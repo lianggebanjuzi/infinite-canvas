@@ -12,6 +12,7 @@ const CARD_W = 260;
 
 export class FlowState {
   nodes: FlowNode[] = [];
+  /** 连线数组顺序 = 连线建立顺序（Q2 排序键）：addEdge push 追加、removeEdge filter 保持相对顺序；restore/排序处不得打乱 */
   edges: FlowEdge[] = [];
   selectedIds = new Set<string>();
   canvas: FlowCanvasState = { scale: 1, panX: 60, panY: 40 };
@@ -144,6 +145,7 @@ export class FlowState {
    * 参考图合并唯一入口：本节点 refImages（用户主动挂载，在前）+ 上游可作参考图的图（imageUrl 优先、
    * 无输出图时回退其 refImages，可为多张；在后），去重保序。仍只取直接上游一层，不做 BFS 传播。
    * 卡片缩略行 / buildOptions / 指令面板三处一律调用本方法，禁止各写一份。
+   * 素材节点（isAsset）作为上游时其 imageUrl 自动贡献（素材是链首数据，无 refImages）。
    */
   getReferenceImages(id: string): string[] {
     const node = this.getNode(id);
@@ -161,6 +163,28 @@ export class FlowState {
       });
     });
     return result;
+  }
+
+  /** 素材节点判定（唯一入口；禁止散落 node.isAsset === true 的判断写法） */
+  isAsset(id: string): boolean {
+    return this.isAssetNode(this.getNode(id));
+  }
+
+  /** 素材节点判定（节点对象版；唯一入口） */
+  isAssetNode(node: FlowNode | null | undefined): boolean {
+    return !!node && node.isAsset === true;
+  }
+
+  /**
+   * 上游文本（文本走线 / 反推归位共用）：直接上游中 type==='text-gen' 且 outputText 非空的节点，
+   * 按 getEdgesTo(id) 顺序（=edges 数组索引=连线建立顺序，Q2 排序键）返回 trim 后的 outputText。
+   * 只取一层，不做 BFS 传播。
+   */
+  getUpstreamTextPrompts(id: string): string[] {
+    return this.getEdgesTo(id)
+      .map(e => this.getNode(e.from))
+      .filter((n): n is FlowNode => !!n && n.type === 'text-gen' && typeof n.outputText === 'string' && n.outputText.trim().length > 0)
+      .map(n => (n.outputText || '').trim());
   }
 
   /**
@@ -317,13 +341,24 @@ export class FlowState {
     return edge;
   }
 
-  /** 校验连线是否可建：返回 null=可建，否则为拒绝原因（手动连线 P0；唯一连线校验入口） */
+  /**
+   * 校验连线是否可建：返回 null=可建，否则为拒绝原因（手动连线 P0；唯一连线校验入口）。
+   * 文本走线组合（W1-1）：图片（素材/自建）→ 文本 允许（反推输入）；文本→文本、任何→素材 拒绝；
+   * 文本→图片、图片→图片 保留；防环/防重/防自连不变。
+   */
   canConnect(from: string, to: string): string | null {
-    if (!this.getNode(from) || !this.getNode(to)) return '节点不存在';
+    const fromNode = this.getNode(from);
+    const toNode = this.getNode(to);
+    if (!fromNode || !toNode) return '节点不存在';
     if (from === to) return '不能连接自己';
     if (this.edges.some(e => e.from === from && e.to === to)) return '已有相同连线';
-    // 文本节点不接收上游图片：text-gen 不能作为连线接收端（to），但仍可作 from 喂下游 image-gen
-    if (this.getNode(to)?.type === 'text-gen') return '文本节点不能作为输入';
+    // 素材节点是链首数据：不接收任何上游（素材→自建图参考图 / 素材→文本反推源 均只作 from）
+    if (this.isAssetNode(toNode)) return '素材节点不能作为输入';
+    // 文本节点可作连线接收端（图片→文本 反推输入）；但 文本→文本 链式处理不做（W1-1）
+    if (toNode.type === 'text-gen') {
+      if (fromNode.type === 'text-gen') return '暂不支持文本连文本';
+      // from 是 image-gen（素材/自建图）→ 允许（反推输入）
+    }
     if (this._wouldCycle(from, to)) return '不能形成循环';
     return null;
   }
@@ -363,7 +398,12 @@ export class FlowState {
     const to = this.getNode(edge.to);
     if (!from || !to) return null;
 
-    // 文本节点不能作为连线接收端（to）：其前方不插步骤（canConnect 亦拒绝 to=text-gen；防御旧文件残留边）
+    // 文本节点/素材节点不能作为连线接收端（to）：其前方不插步骤
+    // （canConnect 亦拒绝 to=text-gen / to=素材；此处防御旧文件残留边）
+    if (this.isAssetNode(to)) {
+      showToast('素材节点前不能插步骤', false);
+      return null;
+    }
     if (to.type === 'text-gen') {
       showToast('文本节点前不能插步骤', false);
       return null;

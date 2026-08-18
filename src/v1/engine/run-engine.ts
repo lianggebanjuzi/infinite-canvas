@@ -7,10 +7,17 @@
 //   - 入口快照 getReferenceImages(nodeId) 分叉：
 //       空（文生图）→ 第 1 张（按 index=0，非完成顺序）写回源节点自身 imageUrl（旧图先入历史）；
 //                     第 2..N 张各建一个新 image-gen 产出节点（连右侧、parentId=源节点）；成功不清空 imageUrl。
-//       非空（图生图）→ 每张建一个新 image-gen 产出节点（自动连线 suppressStale）；成功时源节点旧 imageUrl 入历史后清空。
+//       非空（图生图）→ 第 1 张同样写回源节点自身（旧图先入历史、新图覆盖 imageUrl；锁定保护沿用）；
+//                     第 2..N 张各建一个新 image-gen 产出节点（连右侧、parentId=源节点）；不再清空源节点 imageUrl。
 //   - 重跑先 removeChildren 清掉旧的「纯引擎产出」子节点（安全策略见 flow-state；手动改造的保留并标 stale）
 //   - 部分失败：有成功即 done + toast「成功 x/y」；全失败才 fail（旧图保留）
 //   - busy 锁粒度=整个批次（批次内并发、批次间串行）
+//
+// 文本走线 / 反推归位（增量）：
+//   - prompt 合成唯一入口 composeImagePrompt：上游文本（getUpstreamTextPrompts 连线序拼接）+ 自身 params.prompt（非空追加在后）
+//   - 文本变化三处联动（运行成功/就地编辑/历史回填）统一 = 写 outputText + dirty.markUpstreamChanged；旁路覆盖下游 prompt 的旧函数已删除
+//   - 文本节点 runTextGen 接入上游图（data:image 过滤 + 前置校验「图片格式不支持反推」），反推归位到文本节点自身
+//   - 素材节点（isAsset）不可运行：run() 静默跳过（不 toast、不设 busy），canRun 亦拒绝
 
 import { flowState } from '../state/flow-state';
 import { dirty } from '../state/dirty';
@@ -53,17 +60,6 @@ const RESULT_GAP_Y = 28;
 interface ResultLayout {
   x: number;
   cursorY: number;
-}
-
-/**
- * 文本结果统一联动：覆盖直接 image-gen 下游的 params.prompt + 标记下游 stale。
- * runTextGen 成功、卡片就地编辑保存、历史回填共用，
- * 与处理成功后的联动口径完全一致：只覆盖直接下游（getDownstreams 一层），不递归、不 toast（toast 由调用方负责）。
- */
-export function applyTextToDownstream(nodeId: string, text: string): void {
-  const downstreams = flowState.getDownstreams(nodeId).filter(d => d.type === 'image-gen');
-  downstreams.forEach(d => flowState.updateNodeParams(d.id, { prompt: text })); // 覆盖动作本身不标 stale
-  dirty.markUpstreamChanged(nodeId);
 }
 
 /**
@@ -122,6 +118,8 @@ class RunEngine {
     if (!node) return;
     if (node.status === 'run') return;
     if (this.busy) { showToast('已有任务在运行，请稍候', false); return; }
+    // 素材节点（isAsset）数据层闸门：静默跳过（不 toast、不设 busy；防 run-all 噪音；canRun 亦拒绝）
+    if (flowState.isAsset(nodeId)) return;
 
     const def = nodeRegistry.get(node.type);
     const check = def.canRun(node, ctx);
@@ -132,9 +130,8 @@ class RunEngine {
     try {
       if (node.type === 'text-gen') {
         await this.runTextGen(nodeId);
-      } else if (node.type === 'image-gen' && (node.params as unknown as StyleTransferParams).modelType === 'text') {
-        await this.runImageReverse(nodeId);
       } else {
+        // 旧 modelType='text' 反推分支已删除（Q7）：image-gen 一律按 draw 走 runBatch
         await this.runBatch(nodeId);
       }
     } finally {
@@ -195,7 +192,7 @@ class RunEngine {
         ? { path: result.originalPath, url: result.originalUrl }
         : null;
 
-      // 产出节点：x 固定在源节点右侧，y 向下避让同列已有卡片（与 runImageReverse 口径一致）
+      // 产出节点：x 固定在源节点右侧，y 向下避让同列已有卡片（与旧反推产出布局口径一致）
       const x = node.x + CARD_W + RESULT_GAP_X;
       let y = node.y;
       flowState.nodes.forEach(n => {
@@ -235,11 +232,11 @@ class RunEngine {
 
   /**
    * 文本处理执行（text-gen 专用）：命令驱动，同步调 chat_v2，无批次/无轮询/无产出节点。
+   * 反推归位：文本节点有图片上游（素材/自建 imageUrl）时，chatV2 附带该图（data:image 约束沿用，W2-1）；
+   *   上游图存在但无 data:image → 前置校验 fail「图片格式不支持反推」（W2-4，不静默丢图）；无图片上游 → 普通文本处理。
    * 输入：当前 outputText（可能空）+ 命令（instruction）+ 文本模型。
-   *   有 outputText → prompt = system + user「原文：{outputText} 指令：{命令}」
-   *   无 outputText → prompt = system + user「{命令}」
-   * 成功分支：写 outputText → pushTextHistory → 覆盖直接 image-gen 下游 prompt → dirty.markUpstreamChanged（stale 统一入口）→ toast。
-   * 失败/空文本：fail + error，不覆盖下游、不写历史。
+   * 成功分支：写 outputText → pushTextHistory → dirty.markUpstreamChanged（全下游标 stale，旁路已删除：不覆盖下游 prompt）→ toast。
+   * 失败/空文本：fail + error，不写历史。
    * 前置：canRun 已通过；busy 锁已持有。
    */
   private async runTextGen(nodeId: string): Promise<void> {
@@ -253,6 +250,18 @@ class RunEngine {
     const def = nodeRegistry.get(node.type);
     const options = def.buildOptions(node, ctx);
 
+    // 1.5 反推归位：接入上游图（getReferenceImages 取直接上游 imageUrl 一层；data:image 过滤 + 前置校验 W2-4）
+    const refs = flowState.getReferenceImages(nodeId);
+    if (refs.length > 0) {
+      const dataImages = refs.filter(u => u.startsWith('data:image'));
+      if (dataImages.length === 0) {
+        flowState.updateNode(nodeId, { status: 'fail', error: '图片格式不支持反推' });
+        showToast('图片格式不支持反推', false);
+        return;
+      }
+      options.images = dataImages;
+    }
+
     // 2. 置 run + 上游连线流光
     flowState.updateNode(nodeId, { status: 'run', error: null });
     linkView.setNodeFlowing(nodeId, true);
@@ -265,15 +274,15 @@ class RunEngine {
       const text = (res.text || '').trim();
       if (!text) throw new Error('处理结果为空');
 
-      // 4. 成功：写回输出文本 + 历史 + 覆盖直接 image-gen 下游 prompt + 标 stale
+      // 4. 成功：写回输出文本 + 历史 + 标下游 stale（旁路已删除：不再覆盖下游 prompt，W3-1）
       flowState.updateNode(nodeId, { status: 'done', outputText: text, error: null, lastRunAt: Date.now() });
       flowState.pushTextHistory(nodeId, text);
-      applyTextToDownstream(nodeId, text);
+      dirty.markUpstreamChanged(nodeId);
       // 文本 trace：node.trace 恒 null（类型定义如此），但仍追加一条 kind:'text' 流水
       void historyPersist.appendTrace(historyPersist.buildTextTrace(node));
       showToast('已完成');
     } catch (e) {
-      // 5. 失败：fail + 原因；不覆盖下游、不写历史
+      // 5. 失败：fail + 原因；不写历史
       const message = (e as Error).message || '处理失败';
       flowState.updateNode(nodeId, { status: 'fail', error: message });
       showToast(message, false);
@@ -286,63 +295,17 @@ class RunEngine {
   }
 
   /**
-   * 图片节点「文本模型反推」（image-gen + modelType='text' 专用）：
-   * 用该图（node.imageUrl 或第一张参考图）+ 命令 + 文本模型调 chat_v2，
-   * 结果文本输出到一个新建 text-gen 节点（放源图片节点右侧，向下避让同列卡片）。
-   * 前置：canRun 已通过（已选文本模型 + 命令 + 有图）；busy 锁已持有。
+   * prompt 合成唯一入口（共享约定第 2 条；禁止其它地方拼 prompt）：
+   * 上游文本（flowState.getUpstreamTextPrompts 按连线序拼接）+ 自身 params.prompt（非空追加在后），join('\n')。
+   * 用于 runBatch 实际请求、生成 trace 记录、cmd-panel 最终 prompt 预览（W3-2/W3-4）。
    */
-  private async runImageReverse(nodeId: string): Promise<void> {
+  composeImagePrompt(nodeId: string): string {
+    const parts = flowState.getUpstreamTextPrompts(nodeId);
     const node = flowState.getNode(nodeId);
-    if (!node) return;
-    const p = node.params as unknown as StyleTransferParams;
-    const command = (p.prompt || '').trim();
-    const textModel = (p.textModel || '').trim();
-    const imageUrl = node.imageUrl || flowState.getReferenceImages(nodeId)[0] || '';
-
-    // 反推依赖多模态图片：仅支持 data:image 内嵌图（旧项目 http URL 等后端 chatV2 会静默丢弃 → 前置校验）
-    if (!imageUrl.startsWith('data:image')) {
-      flowState.updateNode(nodeId, { status: 'fail', error: '图片格式不支持反推' });
-      showToast('图片格式不支持反推', false);
-      return;
-    }
-
-    flowState.updateNode(nodeId, { status: 'run', error: null });
-    linkView.setNodeFlowing(nodeId, true);
-
-    try {
-      const system = '你是电商视觉文案处理助手，只输出处理后的文本，不要解释、不要引号';
-      const res = await Backend.chatV2(command, { model: textModel, images: [imageUrl], metaPrompt: system });
-      const text = (res.text || '').trim();
-      if (!text) throw new Error('反推结果为空');
-
-      // 新建文本节点承接结果：x 固定在源图片节点右侧，y 向下避让同列已有卡片
-      // （产出节点/历史反推卡/任意同列节点，取最大底部 + 间距），避免与已有产出节点/重复反推完全重叠。
-      const x = node.x + CARD_W + RESULT_GAP_X;
-      let y = node.y;
-      flowState.nodes.forEach(n => {
-        if (n.id === node.id) return;
-        if (Math.abs(n.x - x) >= CARD_W / 2) return; // 只统计同列（x 相近）卡片
-        const nH = Math.round(CARD_W / (n.ratio > 0 ? n.ratio : 3 / 4));
-        y = Math.max(y, n.y + nH + RESULT_GAP_Y);
-      });
-      const newNode = flowState.addNode('text-gen', x, y, {
-        title: '文本反推', // 与 persistence 3.2 旧文件默认标题一致
-        outputText: text,
-        status: 'done',
-        params: { instruction: '', model: textModel },
-        lastRunAt: Date.now(),
-      });
-      flowState.pushTextHistory(newNode.id, text);
-      flowState.updateNode(nodeId, { status: 'done', error: null, lastRunAt: Date.now() });
-      void historyPersist.appendTrace(historyPersist.buildTextTrace(newNode));
-      showToast('已生成文本节点');
-    } catch (e) {
-      const message = (e as Error).message || '反推失败';
-      flowState.updateNode(nodeId, { status: 'fail', error: message });
-      showToast(message, false);
-    } finally {
-      linkView.setNodeFlowing(nodeId, false);
-    }
+    const p = node ? (node.params as unknown as StyleTransferParams) : null;
+    const own = p && typeof p.prompt === 'string' ? p.prompt.trim() : '';
+    if (own) parts.push(own);
+    return parts.join('\n');
   }
 
   /**
@@ -355,7 +318,8 @@ class RunEngine {
 
     // 1. 启动时快照参数与 options（buildOptions 只取一次、强制 count:1）
     const params = node.params as unknown as StyleTransferParams;
-    const prompt = (params.prompt || '').trim();
+    // prompt 合成唯一入口：上游文本（连线序拼接）+ 自身 prompt（非空追加在后）（W3-2/Q5）
+    const prompt = this.composeImagePrompt(nodeId);
     const total = Math.min(COUNT_MAX, Math.max(COUNT_MIN, Math.round(Number(params.count) || COUNT_MIN)));
     // R3：批次号 = 生成节点 id + 批次启动时刻（同批全部成功图共用；同节点重跑 → 时间戳不同 → 可区分）
     const batchId = `${nodeId}_${Date.now()}`;
@@ -363,7 +327,8 @@ class RunEngine {
     const options = def.buildOptions(node, ctx);
     options.count = COUNT_MIN;
 
-    // 1.5 入口快照参考图：空 → 文生图（第 1 张写回自身）；非空 → 图生图（每张建新产出节点）
+    // 1.5 入口快照参考图：空 → 文生图；非空 → 图生图。
+    //     isTxt2Img 仅用于 outputType 标记（'txt2img'/'img2img'）与 trace 参考图透传，不再决定回写/清空分支（Q1）。
     const refs = flowState.getReferenceImages(nodeId);
     const isTxt2Img = refs.length === 0;
 
@@ -392,35 +357,11 @@ class RunEngine {
     linkView.setNodeFlowing(nodeId, false);
     this.batchProgress.delete(nodeId);
 
-    // 6. 汇总：有成功 → done + 旧下游标 stale（新产出节点跳过）；
-    //    图生图分支源节点旧 imageUrl 入历史后清空（回参考图占位）；文生图分支不清 imageUrl（第 1 张已写回自身）。
-    //    保护点 3（P1）：源节点旧 imageUrl 被锁定 → 不清空（保留主视觉，符合 v3「好结果不被重跑顶掉」）。
+    // 6. 汇总：有成功 → done + 旧下游标 stale（新产出节点跳过）。
+    //    图生图/文生图统一回写自身（第 1 张在 worker 内写回；源节点 imageUrl 已为新图，不清空——W6-2）。
     const after = flowState.getNode(nodeId);
     if (!after) return; // 批次期间生成节点被删除
     if (progress.done > 0) {
-      if (!isTxt2Img && after.imageUrl) {
-        if (assetStore.isLockedByImageUrl(after.imageUrl)) {
-          // 参考图锁定：保留显示（不清空主视觉）+ toast
-          showToast('参考图已锁定，保留显示', false);
-        } else {
-          // 图生图：旧 imageUrl 先入历史图库保留，再清空（回参考图占位）
-          // 注意：setNodeImage(id, null) 忽略 null 不清空 imageUrl，必须用 updateNode({imageUrl:null})
-          const p = after.params as unknown as StyleTransferParams;
-          historyDrawer.addImage(after.imageUrl, {
-            nodeId: after.id,
-            prompt: typeof p.prompt === 'string' ? p.prompt : '',
-            model: typeof p.model === 'string' ? p.model : '',
-            aspectRatio: typeof p.aspectRatio === 'string' ? p.aspectRatio : '3:4',
-            resolution: typeof p.resolution === 'string' ? p.resolution : '2k',
-            count: typeof p.count === 'number' ? p.count : 1,
-            outputType: 'img2img',
-            thumbnail: after.imageUrl, // 展示图=缩略图
-            originalPath: after.imageOrigin?.path,
-            originalUrl: after.imageOrigin?.url,
-          });
-          flowState.updateNode(nodeId, { imageUrl: null });
-        }
-      }
       flowState.updateNode(nodeId, { status: 'done', error: null, lastRunAt: Date.now() });
       dirty.markUpstreamChangedExcept(nodeId, this._createdCardIds);
       showToast(`成功 ${progress.done}/${total}`);
@@ -436,7 +377,9 @@ class RunEngine {
   }
 
   /**
-   * 单个 worker：创建单张生成任务 → 轮询 → 成功按分支处理（文生图第 1 张写回自身 / 其余建新产出节点）；失败计数。
+   * 单个 worker：创建单张生成任务 → 轮询 → 成功按分支处理（第 1 张写回自身 / 第 2..N 张建新产出节点）；失败计数。
+   * Q1 统一回写口径：文生图/图生图一致——每批第 1 张（index=0）写回自身（旧图入历史、新图覆盖 imageUrl）；
+   *   当前图锁定 → 不写回、改建产出节点 + toast；第 2..N 张各建产出节点（一张卡只承载一张主图）。
    */
   private async runOneWorker(
     genId: string,
@@ -462,30 +405,31 @@ class RunEngine {
         const origin: ImageOrigin | null = result.originalPath
           ? { path: result.originalPath, url: result.originalUrl }
           : null;
-        if (isTxt2Img && index === 0) {
+        const outputType: GenerationTrace['outputType'] = isTxt2Img ? 'txt2img' : 'img2img';
+        if (index === 0) {
           // 保护点 2：源节点当前 imageUrl（旧图）被锁定 → 不写回自身，改走新建产出节点（旧图保留，Q3）
           const gen = flowState.getNode(genId);
           const locked = !!gen && !!gen.imageUrl && assetStore.isLockedByImageUrl(gen.imageUrl);
           if (locked) {
             const card = await this.createResultCard(genId, result.imageUrl, layout, {}, {
-              outputType: 'txt2img',
+              outputType,
               refs,
               batchId,
-            }, origin);
+            }, origin, prompt);
             this._createdCardIds.add(card.id);
             progress.done += 1;
           } else {
-            // 文生图第 1 张（按 index=0，非完成顺序）写回源节点自身 imageUrl
-            await this._writeBackToSelf(genId, result.imageUrl, origin, batchId);
+            // 第 1 张（按 index=0，非完成顺序）写回源节点自身 imageUrl（文生图/图生图统一，Q1）
+            await this._writeBackToSelf(genId, result.imageUrl, origin, batchId, outputType, prompt);
             progress.done += 1;
           }
         } else {
-          // 图生图全部 + 文生图第 2..N 张：出一张建一张（不等兄弟），立即创建新 image-gen 产出节点并自动连线
+          // 第 2..N 张：出一张建一张（不等兄弟），立即创建新 image-gen 产出节点并自动连线
           const card = await this.createResultCard(genId, result.imageUrl, layout, {}, {
-            outputType: isTxt2Img ? 'txt2img' : 'img2img',
+            outputType,
             refs,
             batchId,
-          }, origin);
+          }, origin, prompt);
           this._createdCardIds.add(card.id);
           progress.done += 1;
         }
@@ -501,24 +445,34 @@ class RunEngine {
   }
 
   /**
-   * 文生图第 1 张写回源节点自身：旧 imageUrl 先入历史图库保留，再覆盖为新图（不建新节点、不清空 imageUrl）。
+   * 第 1 张写回源节点自身：旧 imageUrl 先入历史图库保留，再覆盖为新图（不建新节点、不清空 imageUrl）。
+   * 文生图/图生图统一（Q1）：outputType 参数化（'txt2img' | 'img2img'），透传到旧图 addImage 与新图 appendTrace，
+   * 保证图生图回写的旧图入历史与 trace 标记正确（W6-1/W6-2）。
    * 写回后源节点即「有输出图」，下游仍可自动取作参考图（getReferenceImages 语义不变）。
    * origin：原图引用（缩略图 + 原图路径，查看大图按需加载用）；旧后端无 original_path 时为 null。
    * batchId：R3 本批批次号——仅新图 appendTrace 带（jsonl 行）；旧图 addImage 不带（旧图属上一次运行的批次）。
+   * composedPrompt：本次实际使用的合成 prompt（上游文本 + 自身 prompt；trace 记录「线即真相」，W3-2）。
    */
-  private async _writeBackToSelf(genId: string, imageUrl: string, origin: ImageOrigin | null = null, batchId?: string): Promise<void> {
+  private async _writeBackToSelf(
+    genId: string,
+    imageUrl: string,
+    origin: ImageOrigin | null = null,
+    batchId?: string,
+    outputType: GenerationTrace['outputType'] = 'txt2img',
+    composedPrompt?: string,
+  ): Promise<void> {
     const node = flowState.getNode(genId);
     if (!node) return;
     if (node.imageUrl && node.imageUrl !== imageUrl) {
       const p = node.params as unknown as StyleTransferParams;
       historyDrawer.addImage(node.imageUrl, { // 旧图入历史图库保留（带搜索元数据 + 原图引用；不带当前 batchId）
         nodeId: node.id,
-        prompt: typeof p.prompt === 'string' ? p.prompt : '',
+        prompt: typeof composedPrompt === 'string' ? composedPrompt : (typeof p.prompt === 'string' ? p.prompt : ''),
         model: typeof p.model === 'string' ? p.model : '',
         aspectRatio: typeof p.aspectRatio === 'string' ? p.aspectRatio : '3:4',
         resolution: typeof p.resolution === 'string' ? p.resolution : '2k',
         count: typeof p.count === 'number' ? p.count : 1,
-        outputType: 'txt2img',
+        outputType,
         thumbnail: node.imageUrl, // 展示图=缩略图
         originalPath: node.imageOrigin?.path,
         originalUrl: node.imageOrigin?.url,
@@ -526,9 +480,9 @@ class RunEngine {
     }
     const ratio = await loadImageRatio(imageUrl);
     flowState.setNodeImage(genId, imageUrl, ratio && ratio > 0 ? ratio : undefined);
-    // 文生图第 1 张写回自身：source of truth = node.trace，并追加一条 kind:'image' 流水（带 batchId）
+    // 写回自身：source of truth = node.trace，并追加一条 kind:'image' 流水（带 batchId）
     node.imageOrigin = origin; // 原图引用（缩略图 + 原图路径）
-    const trace = historyPersist.buildImageTrace(node, [], 'txt2img', imageUrl);
+    const trace = historyPersist.buildImageTrace(node, [], outputType, imageUrl, composedPrompt);
     node.trace = trace;
     void historyPersist.appendTrace({
       kind: 'image',
@@ -558,6 +512,7 @@ class RunEngine {
     paramOverrides: Record<string, unknown> = {},
     trace: { outputType: GenerationTrace['outputType']; refs: string[]; batchId?: string } = { outputType: 'img2img', refs: [] },
     origin: ImageOrigin | null = null,
+    composedPrompt?: string, // 本次实际使用的合成 prompt（上游文本 + 自身 prompt；trace/历史记录用，W3-2）
   ): Promise<FlowNode> {
     const gen = flowState.getNode(genId);
     if (!gen) throw new Error('生成节点已删除，产出节点创建失败');
@@ -591,11 +546,11 @@ class RunEngine {
     // 自动建卡连线：suppressStale 避免刚 done 的产出节点被立即打回 stale
     flowState.addEdge(genId, node.id, { suppressStale: true });
     // 生成档案：写 node.trace（source of truth）+ 追加一条 kind:'image' 流水（imageUrl 冗余：跨会话图库解析优先用行内 URL）
-    const nodeTrace = historyPersist.buildImageTrace(node, trace.refs, trace.outputType, imageUrl);
+    const nodeTrace = historyPersist.buildImageTrace(node, trace.refs, trace.outputType, imageUrl, composedPrompt);
     node.trace = nodeTrace;
     historyDrawer.addImage(imageUrl, {
       nodeId: node.id,
-      prompt: typeof gp.prompt === 'string' ? gp.prompt : '',
+      prompt: typeof composedPrompt === 'string' ? composedPrompt : (typeof gp.prompt === 'string' ? gp.prompt : ''),
       model: typeof gp.model === 'string' ? gp.model : '',
       aspectRatio: typeof gp.aspectRatio === 'string' ? gp.aspectRatio : '3:4',
       resolution: typeof gp.resolution === 'string' ? gp.resolution : '2k',

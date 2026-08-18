@@ -2,7 +2,9 @@
 // 「文本」节点定义：卡片显示文本结果（outputText），点卡片文本可直接改；
 // 下方命令框输入处理指令（命令），文本模型按命令处理当前文本 → 结果写回卡片。
 // 运行链路：run-engine 按类型分派 → runTextGen（同步调 Backend.chatV2，无批次/无轮询/无产出节点）
-// 联动：结果变化 → 直接 image-gen 下游的 params.prompt 被覆盖为新文本 → 下游标 stale（见架构 5.2）
+// 反推归位：文本节点有图片上游（素材/自建 imageUrl）时，runTextGen 自动把 data:image 图附带进 chatV2
+//   （反推命令由用户在文本节点指令框输入，不再是 image-gen 上的反推开关；textModel 字段保留但无 UI 入口）。
+// 联动：结果变化 → dirty.markUpstreamChanged 标全下游 stale（旁路已删除，不覆盖下游 prompt；见架构 3.2）
 
 import { nodeRegistry } from './node-registry';
 

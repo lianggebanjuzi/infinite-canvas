@@ -342,16 +342,27 @@ class Interactions {
 
   // ───────────────────────── 拖线松手 → 新建节点菜单（P0） ─────────────────────────
 
-  /** 可作下游的节点类型（统一生成节点：仅 image-gen 一项；text-gen 不作为连线接收端，由菜单过滤） */
+  /** 可作下游的节点类型（注册表 creatable 定义；候选过滤见 _showNewNodeMenu 按 from 类型，W1-2） */
   private _newNodeCandidates(): NodeDefinition[] {
     return nodeRegistry.list().filter(d => d.creatable !== false);
   }
 
-  /** 松手处弹「新建节点」菜单：选择类型 → 建节点并自动连上拖出的线 */
+  /** 松手处弹「新建节点」菜单：选择类型 → 建节点并自动连上拖出的线。
+   *  候选按 from 类型过滤（W1-2）：
+   *    from=图片节点（含素材）→ [文本, 图片生成]（图片可作文本反推输入 / 图片参考图）；
+   *    from=文本节点 → 仅 [图片生成]（文本→文本 链式不做；素材不进入新建菜单，天然无「新建素材」项）。
+   */
   private _showNewNodeMenu(screenX: number, screenY: number, fromId: string): void {
-    // 过滤不可作 fromId 下游的类型：text-gen 永远不能作为连线接收端（canConnect 拒绝 to=text-gen），
-    // 列入候选会静默创建未连接节点；空白处右键新建（_showCanvasMenu）不受影响，仍可建独立 text-gen。
-    const candidates = this._newNodeCandidates().filter(d => d.type !== 'text-gen');
+    const fromNode = flowState.getNode(fromId);
+    const all = this._newNodeCandidates();
+    const candidates = all.filter(d => {
+      if (d.type === 'text-gen') {
+        // 文本候选：仅当 from 是图片节点（素材/自建）——图片→文本 反推输入（W1-1）
+        return !!fromNode && fromNode.type === 'image-gen';
+      }
+      // image-gen 候选：from 是文本（关键词）或图片（参考图）均可
+      return !!fromNode && (fromNode.type === 'image-gen' || fromNode.type === 'text-gen');
+    });
     if (candidates.length === 0) return;
 
     const menu = this._menuEl();
@@ -500,7 +511,13 @@ class Interactions {
     });
   }
 
-  /** 拖图进画布：命中节点 → 追加参考图；空白处 → 新建「生成节点」（refImages=[src]） */
+  /**
+   * 拖图进画布（W5/A4 口径）：
+   *   落到文本节点卡 → 自动建素材节点并连线（素材→文本 反推输入，W1-3/Q4）；
+   *   落到素材节点 → 拒绝（素材是链首数据，不接收上游，toast 提示）；
+   *   落到自建 image-gen 卡 → 追加参考图（现状保留）；
+   *   空白处 → 建素材节点（image-gen + isAsset:true，整卡显图、角标「素材」、不可运行）。
+   */
   private _dropImage(src: string, world: { x: number; y: number }, screenX: number, screenY: number, _fileName?: string): void {
     const targetNode = this._nodeAt(screenX, screenY);
     const img = new Image();
@@ -509,11 +526,29 @@ class Interactions {
       const r = ratio > 0 ? ratio : 3 / 4;
 
       if (targetNode) {
-        // 文本节点不接收图片：拒绝挂载参考图
-        if (targetNode.type === 'text-gen') {
-          showToast('文本节点不接收图片', false);
+        // 素材节点不接收上游图
+        if (flowState.isAssetNode(targetNode)) {
+          showToast('素材节点不能添加参考图', false);
           return;
         }
+        // 文本节点：自动建素材节点并连线（素材→文本；素材放文本左侧避免覆盖松手点）
+        if (targetNode.type === 'text-gen') {
+          const pos = this._assetPositionNear(targetNode, r);
+          flowHistory.record();
+          const assetNode = flowState.addNode('image-gen', pos.x, pos.y, {
+            isAsset: true,
+            imageUrl: src,
+            ratio: r,
+            status: 'idle',
+            title: '素材',
+            refImages: [],
+          });
+          flowState.addEdge(assetNode.id, targetNode.id);
+          selection.select(assetNode.id);
+          showToast('已创建素材节点并连接');
+          return;
+        }
+        // 自建图片节点：追加参考图（现状保留）
         flowHistory.record();
         flowState.addRefImage(targetNode.id, src);
         dirty.markStale(targetNode.id);
@@ -521,16 +556,19 @@ class Interactions {
         return;
       }
 
-      // 空白处：新建统一生成节点，图片作为参考图（不再是输出图）
+      // 空白处：建素材节点（image-gen + isAsset:true，imageUrl=图本身；替代现状「refImages 生成节点」）
       const h = CARD_W / r;
       flowHistory.record();
       const node = flowState.addNode('image-gen', world.x - CARD_W / 2, world.y - h / 2, {
-        refImages: [src],
+        isAsset: true,
+        imageUrl: src,
         ratio: r,
+        status: 'idle',
+        title: '素材',
+        refImages: [],
       });
       selection.select(node.id);
-      this._fillDefaultModelFor(node.id);
-      showToast('已新建生成节点');
+      showToast('已创建素材节点');
     };
     img.onerror = () => showToast('图片加载失败', false);
     img.src = src;
@@ -542,6 +580,16 @@ class Interactions {
     const cardEl = el?.closest('.pcard') as HTMLElement | null;
     if (!cardEl) return null;
     return flowState.getNode(cardEl.dataset.nodeId || '') ?? null;
+  }
+
+  /** 素材节点落位：目标卡左侧（上游位置，x 相隔一卡宽 + 间距；y 与目标卡垂直居中），避免覆盖目标卡 */
+  private _assetPositionNear(target: FlowNode, r: number): { x: number; y: number } {
+    const targetH = Math.round(CARD_W / (target.ratio > 0 ? target.ratio : 3 / 4));
+    const assetH = Math.round(CARD_W / (r > 0 ? r : 3 / 4));
+    return {
+      x: target.x - CARD_W - 48,
+      y: target.y + Math.round((targetH - assetH) / 2),
+    };
   }
 
   // ───────────────────────── 文件选择选图 ─────────────────────────
@@ -558,16 +606,39 @@ class Interactions {
           if (this.pendingFileNodeId) {
             const nodeId = this.pendingFileNodeId;
             const target = flowState.getNode(nodeId);
-            // 文本节点不接收图片：拒绝选图挂载
-            if (target && target.type === 'text-gen') {
-              showToast('文本节点不接收图片', false);
-              this.pendingFileNodeId = null;
-              return;
+            if (target) {
+              const ratio = img.naturalWidth / img.naturalHeight;
+              const r = ratio > 0 ? ratio : 3 / 4;
+              // 素材节点不接收上游图
+              if (flowState.isAssetNode(target)) {
+                showToast('素材节点不能添加参考图', false);
+                this.pendingFileNodeId = null;
+                return;
+              }
+              // 文本节点：同拖图口径——自动建素材节点并连线（素材→文本 反推输入；素材放文本左侧）
+              if (target.type === 'text-gen') {
+                const pos = this._assetPositionNear(target, r);
+                flowHistory.record();
+                const assetNode = flowState.addNode('image-gen', pos.x, pos.y, {
+                  isAsset: true,
+                  imageUrl: src,
+                  ratio: r,
+                  status: 'idle',
+                  title: '素材',
+                  refImages: [],
+                });
+                flowState.addEdge(assetNode.id, target.id);
+                selection.select(assetNode.id);
+                showToast('已创建素材节点并连接');
+                this.pendingFileNodeId = null;
+                return;
+              }
+              // 自建图片节点：追加参考图（现状保留）
+              flowHistory.record();
+              flowState.addRefImage(nodeId, src);
+              dirty.markStale(nodeId);
+              showToast('已添加参考图');
             }
-            flowHistory.record();
-            flowState.addRefImage(nodeId, src);
-            dirty.markStale(nodeId);
-            showToast('已添加参考图');
           }
           this.pendingFileNodeId = null;
         };
@@ -650,18 +721,20 @@ class Interactions {
   }
 
   private _showCardMenu(x: number, y: number, node: FlowNode): void {
+    const isAsset = flowState.isAssetNode(node); // 素材节点不显示「运行当前卡」「重新运行」（判分支 #6）
     const menu = this._menuEl();
     menu.innerHTML = `
+      ${isAsset ? '' : `
       <div class="ctx-item" data-act="run">
         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 3l14 9-14 9V3Z"/></svg>
         运行当前卡
-      </div>
-      ${node.status === 'fail' ? `
+      </div>`}
+      ${!isAsset && node.status === 'fail' ? `
       <div class="ctx-item" data-act="error">
         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 8v4M12 16h.01"/></svg>
         查看失败原因
       </div>` : ''}
-      ${node.status === 'stale' ? `
+      ${!isAsset && node.status === 'stale' ? `
       <div class="ctx-item" data-act="run">
         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 3 14h7l-1 8 10-12h-7l1-8Z"/></svg>
         重新运行

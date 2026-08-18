@@ -65,6 +65,7 @@ interface FlowNode {
   lastRunAt: number | null;
   parentId: string | null;   // 引擎产出节点标记：本节点由哪个生成节点产出（重跑顶掉旧产出用）；手建节点恒 null
   trace: GenerationTrace | null; // 生成档案：该节点主视觉图的配方；text-gen / 手建未跑节点为 null
+  isAsset?: boolean;         // 素材态标记（仅 image-gen 节点为素材时 true；text-gen / 自建 image-gen 缺省 undefined，序列化不输出 key）
 }
 
 /** 画布连线：模板默认连好，首版不支持手动新建 */
@@ -120,8 +121,8 @@ interface StyleTransferParams {
   aspectRatio: string;        // '3:4' | '1:1' | '16:9' | 'Auto'
   resolution: string;         // '1k' | '2k' | '4k'
   count: number;              // 1-4
-  modelType?: 'draw' | 'text'; // image-gen 模型 chip 类型：绘图（默认，生成图）/ 文本（反推）
-  textModel?: string;          // image-gen 文本模型（modelType='text' 时用于反推，chat 模型）
+  modelType?: 'draw' | 'text'; // 保留字段、运行时忽略（Q7 旧数据容错）：不再用于引擎分派 / UI 展示 / canRun 判定，旧 modelType='text' 节点一律按 draw 处理
+  textModel?: string;          // 保留字段、无 UI 入口（旧数据残留无害）：不再被引擎/面板使用
 }
 
 /** 前端统一错误（映射自 backend {success:false,error_code,message}） */
