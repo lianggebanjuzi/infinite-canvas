@@ -214,10 +214,20 @@ class AssetDrawer {
     this.grid.appendChild(div);
   }
 
-  /** 查看大图（复用 #img-modal；origin.path = 原图本地路径，按需加载） */
+  /** 查看大图（复用 #img-modal；origin.path = 原图本地路径，按需加载；携带信息栏配方） */
   private _viewImage(url: string, item: AssetAsset): void {
     if (!url) return;
-    void openImageModal(url, item.originalPath ? { path: item.originalPath } : null);
+    const meta = this._recipeMeta(item);
+    const rec = item.record;
+    void openImageModal(url, item.originalPath ? { path: item.originalPath } : null,
+      undefined,
+      {
+        model: rec.model ?? meta?.model,
+        createdAt: rec.createdAt ?? meta?.createdAt,
+        aspectRatio: rec.aspectRatio ?? meta?.aspectRatio,
+        resolution: rec.resolution ?? meta?.resolution,
+        prompt: rec.prompt ?? meta?.prompt,
+      });
   }
 
   /**

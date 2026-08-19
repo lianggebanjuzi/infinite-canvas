@@ -48,6 +48,12 @@ interface BatchProgress {
   lastError: string | null;
 }
 
+interface ActiveRun {
+  nodeId: string;
+  cancelled: boolean;
+  historySuspended: boolean;
+}
+
 /** 生成请求并发数上限/下限 */
 const COUNT_MIN = 1;
 const COUNT_MAX = 4;
@@ -111,6 +117,7 @@ function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
 class RunEngine {
   /** 全局串行：同一时间只跑一个任务（避免 pywebview 轮询互相干扰；批次内并发、批次间串行） */
   private busy = false;
+  private activeRun: ActiveRun | null = null;
 
   /** 批次瞬时进度（不持久化）：nodeId → {total,done,failed} */
   private batchProgress = new Map<string, BatchProgress>();
@@ -155,6 +162,30 @@ class RunEngine {
     return this.busy;
   }
 
+  /** Stop owning this local run without waiting for an upstream task that cannot be cancelled. */
+  cancel(nodeId: string): boolean {
+    const active = this.activeRun;
+    if (!active || active.nodeId !== nodeId) return false;
+
+    active.cancelled = true;
+    this.activeRun = null;
+    this.busy = false;
+    this.batchProgress.delete(nodeId);
+    linkView.setNodeFlowing(nodeId, false);
+    if (active.historySuspended) {
+      flowHistory.resume();
+      active.historySuspended = false;
+    }
+    const node = flowState.getNode(nodeId);
+    if (node?.status === 'run') flowState.updateNode(nodeId, { status: 'idle', error: null });
+    else flowState.notify();
+    return true;
+  }
+
+  private _isActive(run: ActiveRun): boolean {
+    return this.activeRun === run && !run.cancelled;
+  }
+
   async run(nodeId: string): Promise<void> {
     const node = flowState.getNode(nodeId);
     if (!node) return;
@@ -167,18 +198,26 @@ class RunEngine {
     const check = def.canRun(node, ctx);
     if (typeof check === 'string') { showToast(check, false); return; }
 
+    const active: ActiveRun = { nodeId, cancelled: false, historySuspended: true };
     this.busy = true;
+    this.activeRun = active;
     flowHistory.suspend(); // 引擎内部状态/产出变更不入撤销栈（R5.5）
     try {
       if (node.type === 'text-gen') {
-        await this.runTextGen(nodeId);
+        await this.runTextGen(nodeId, active);
       } else {
         // 旧 modelType='text' 反推分支已删除（Q7）：image-gen 一律按 draw 走 runBatch
-        await this.runBatch(nodeId);
+        await this.runBatch(nodeId, active);
       }
     } finally {
-      flowHistory.resume();
-      this.busy = false;
+      if (active.historySuspended) {
+        flowHistory.resume();
+        active.historySuspended = false;
+      }
+      if (this.activeRun === active) {
+        this.activeRun = null;
+        this.busy = false;
+      }
     }
   }
 
@@ -201,7 +240,9 @@ class RunEngine {
     if (refs.length === 0) { showToast('请先合成扩图底图', false); return; }
     if (!opts.model) { showToast('请先在设置中配置 Nano Banana 系列模型', false); return; }
 
+    const active: ActiveRun = { nodeId, cancelled: false, historySuspended: true };
     this.busy = true;
+    this.activeRun = active;
     flowHistory.suspend(); // 引擎内部状态/产出节点不入撤销栈
     const prevStatus = node.status;
     try {
@@ -221,15 +262,18 @@ class RunEngine {
         TASK_CREATE_TIMEOUT_MS,
         '扩图任务创建超时',
       );
+      if (!this._isActive(active)) return;
       if (!created || !created.task_id) {
         throw new Error('任务创建失败，未返回 task_id');
       }
       const result = await pollTask(created.task_id);
+      if (!this._isActive(active)) return;
       if (!result.success) {
         throw new Error(result.error || '扩图失败');
       }
       // 展示图解析：缩略图优先；为空且有 originalPath → loadLocalImage 按路径取图（治本：大图不进轮询响应）
       const displayUrl = await this._resolveImageUrl(result);
+      if (!this._isActive(active)) return;
       if (!displayUrl) throw new Error(result.error || '扩图成功但未返回图片数据');
       // P3：未配置图片保存路径 → 生成图未落盘（tempfile 兜底），人话提示不阻断
       if (result.savedToDisk === false) {
@@ -257,7 +301,8 @@ class RunEngine {
         model: opts.model,
         aspectRatio: opts.aspectRatio || '1:1',
         resolution: opts.resolution || '4k',
-      }, { outputType: 'outpaint', refs: refs, batchId }, origin);
+      }, { outputType: 'outpaint', refs: refs, batchId }, origin, undefined, result.width, result.height, active);
+      if (!this._isActive(active)) return;
 
       // 新产出节点从 stale 传播豁免；源节点旧下游标 stale（与引擎其它成功链路口径一致）
       this._createdCardIds.clear();
@@ -268,14 +313,21 @@ class RunEngine {
       flowState.updateNode(nodeId, { status: prevStatus, error: null });
       showToast('扩图完成');
     } catch (e) {
+      if (!this._isActive(active)) return;
       const message = (e as Error).message || '扩图失败';
       // 失败也不破坏源节点：恢复执行前状态，仅 toast 提示
       flowState.updateNode(nodeId, { status: prevStatus, error: null });
       showToast(message, false);
     } finally {
-      linkView.setNodeFlowing(nodeId, false);
-      flowHistory.resume();
-      this.busy = false;
+      if (this._isActive(active)) linkView.setNodeFlowing(nodeId, false);
+      if (active.historySuspended) {
+        flowHistory.resume();
+        active.historySuspended = false;
+      }
+      if (this.activeRun === active) {
+        this.activeRun = null;
+        this.busy = false;
+      }
     }
   }
 
@@ -288,7 +340,7 @@ class RunEngine {
    * 失败/空文本：fail + error，不写历史。
    * 前置：canRun 已通过；busy 锁已持有。
    */
-  private async runTextGen(nodeId: string): Promise<void> {
+  private async runTextGen(nodeId: string, active: ActiveRun): Promise<void> {
     const node = flowState.getNode(nodeId);
     if (!node) return;
 
@@ -320,6 +372,7 @@ class RunEngine {
       const system = '你是电商视觉文案处理助手，只输出处理后的文本，不要解释、不要引号';
       const user = currentText ? `原文：\n${currentText}\n\n指令：${command}` : command;
       const res = await Backend.chatV2(user, { ...options, metaPrompt: system });
+      if (!this._isActive(active)) return;
       const text = (res.text || '').trim();
       if (!text) throw new Error('处理结果为空');
 
@@ -331,11 +384,13 @@ class RunEngine {
       void historyPersist.appendTrace(historyPersist.buildTextTrace(node));
       showToast('已完成');
     } catch (e) {
+      if (!this._isActive(active)) return;
       // 5. 失败：fail + 原因；不写历史
       const message = (e as Error).message || '处理失败';
       flowState.updateNode(nodeId, { status: 'fail', error: message });
       showToast(message, false);
     } finally {
+      if (!this._isActive(active)) return;
       linkView.setNodeFlowing(nodeId, false);
       // 命令是临时的：执行后清空（成功/失败均清），避免下次空输入点发送经 cmd-panel 兜底
       // （input.value || instruction）静默重跑旧命令；兜底逻辑本身保留，仅消费一次。
@@ -361,7 +416,7 @@ class RunEngine {
    * 批次执行（生成节点专用）：并发 N 个单张请求，按入口参考图分叉为文生图/图生图。
    * 前置：canRun 已通过；busy 锁已持有。
    */
-  private async runBatch(nodeId: string): Promise<void> {
+  private async runBatch(nodeId: string, active: ActiveRun): Promise<void> {
     const node = flowState.getNode(nodeId);
     if (!node) return;
 
@@ -400,8 +455,9 @@ class RunEngine {
     //    布局游标在批次开始时快照生成节点位置，之后只随已放置卡片累计，完成顺序不定也不重叠。
     const layout: ResultLayout = { x: node.x + CARD_W + RESULT_GAP_X, cursorY: node.y };
     const jobs = Array.from({ length: total }, (_, i) =>
-      this.runOneWorker(nodeId, prompt, options, layout, progress, isTxt2Img, i, refs, batchId));
+      this.runOneWorker(nodeId, prompt, options, layout, progress, isTxt2Img, i, refs, batchId, active));
     await Promise.allSettled(jobs);
+    if (!this._isActive(active)) return;
 
     linkView.setNodeFlowing(nodeId, false);
     this.batchProgress.delete(nodeId);
@@ -440,20 +496,25 @@ class RunEngine {
     index: number,
     refs: string[],
     batchId: string, // R3：本批批次号，透传到该张成功图的 addImage / appendTrace
+    active: ActiveRun,
   ): Promise<void> {
     try {
+      if (!this._isActive(active)) return;
       const created = await withTimeout(
         Backend.generateImage(prompt, { ...options, count: COUNT_MIN }),
         TASK_CREATE_TIMEOUT_MS,
         '任务创建超时',
       );
+      if (!this._isActive(active)) return;
       if (!created || !created.task_id) {
         throw new Error('任务创建失败，未返回 task_id');
       }
       const result = await pollTask(created.task_id);
+      if (!this._isActive(active)) return;
       if (result.success) {
         // 展示图解析：缩略图优先；为空且有 originalPath → loadLocalImage 按路径取图（治本：大图不进轮询响应）
-        const displayUrl = await this._resolveImageUrl(result);
+      const displayUrl = await this._resolveImageUrl(result);
+      if (!this._isActive(active)) return;
         if (!displayUrl) throw new Error(result.error || '生成成功但未返回图片数据');
         // P3：该张图未落盘到用户配置目录（tempfile 兜底）→ 标记，批次结束统一 toast
         if (result.savedToDisk === false) this._sawNotSavedToDisk = true;
@@ -471,12 +532,12 @@ class RunEngine {
               outputType,
               refs,
               batchId,
-            }, origin, prompt);
+            }, origin, prompt, result.width, result.height, active);
             this._createdCardIds.add(card.id);
             progress.done += 1;
           } else {
             // 第 1 张（按 index=0，非完成顺序）写回源节点自身 imageUrl（文生图/图生图统一，Q1）
-            await this._writeBackToSelf(genId, displayUrl, origin, batchId, outputType, prompt);
+            await this._writeBackToSelf(genId, displayUrl, origin, batchId, outputType, prompt, result.width, result.height, active);
             progress.done += 1;
           }
         } else {
@@ -485,7 +546,7 @@ class RunEngine {
             outputType,
             refs,
             batchId,
-          }, origin, prompt);
+          }, origin, prompt, result.width, result.height, active);
           this._createdCardIds.add(card.id);
           progress.done += 1;
         }
@@ -493,9 +554,11 @@ class RunEngine {
         throw new Error(result.error || '生成失败');
       }
     } catch (e) {
+      if (!this._isActive(active)) return;
       progress.failed += 1;
       progress.lastError = (e as Error).message || '生成失败';
     } finally {
+      if (!this._isActive(active)) return;
       this._touchProgress(genId);
     }
   }
@@ -506,8 +569,11 @@ class RunEngine {
    * 保证图生图回写的旧图入历史与 trace 标记正确（W6-1/W6-2）。
    * 写回后源节点即「有输出图」，下游仍可自动取作参考图（getReferenceImages 语义不变）。
    * origin：原图引用（缩略图 + 原图路径，查看大图按需加载用）；旧后端无 original_path 时为 null。
-   * batchId：R3 本批批次号——仅新图 appendTrace 带（jsonl 行）；旧图 addImage 不带（旧图属上一次运行的批次）。
+   * batchId：R3 本批批次号——新图 addImage 与 appendTrace 均带（jsonl 行）；旧图 addImage 不带（旧图属上一次运行的批次）。
    * composedPrompt：本次实际使用的合成 prompt（上游文本 + 自身 prompt；trace 记录「线即真相」，W3-2）。
+   * imageWidth/imageHeight：原图真实像素（后端 PIL im.size 透传；旧后端缺失为 undefined）。
+   * 新图入库（B3）：无论旧图是否存在，写回成功后都要把「新图」addImage 入历史图库（旧实现只入旧图，
+   * 首次生成新图从不入库，导致图库缺生成图）。
    */
   private async _writeBackToSelf(
     genId: string,
@@ -516,9 +582,12 @@ class RunEngine {
     batchId?: string,
     outputType: GenerationTrace['outputType'] = 'txt2img',
     composedPrompt?: string,
+    imageWidth?: number,
+    imageHeight?: number,
+    active?: ActiveRun,
   ): Promise<void> {
     const node = flowState.getNode(genId);
-    if (!node) return;
+    if (!node || (active && !this._isActive(active))) return;
     if (node.imageUrl && node.imageUrl !== imageUrl) {
       const p = node.params as unknown as StyleTransferParams;
       historyDrawer.addImage(node.imageUrl, { // 旧图入历史图库保留（带搜索元数据 + 原图引用；不带当前 batchId）
@@ -535,10 +604,13 @@ class RunEngine {
       });
     }
     const ratio = await loadImageRatio(imageUrl);
-    flowState.setNodeImage(genId, imageUrl, ratio && ratio > 0 ? ratio : undefined);
+    if (active && !this._isActive(active)) return;
+    flowState.setNodeImage(genId, imageUrl, ratio && ratio > 0 ? ratio : undefined, imageWidth, imageHeight);
     // 写回自身：source of truth = node.trace，并追加一条 kind:'image' 流水（带 batchId）
     node.imageOrigin = origin; // 原图引用（缩略图 + 原图路径）
     const trace = historyPersist.buildImageTrace(node, [], outputType, imageUrl, composedPrompt);
+    if (typeof imageWidth === 'number' && imageWidth > 0) trace.imageWidth = imageWidth;
+    if (typeof imageHeight === 'number' && imageHeight > 0) trace.imageHeight = imageHeight;
     node.trace = trace;
     void historyPersist.appendTrace({
       kind: 'image',
@@ -549,6 +621,24 @@ class RunEngine {
       originalPath: origin?.path,
       originalUrl: origin?.url,
       ...(batchId ? { batchId } : {}),
+    });
+    // B3：新图本身也要入历史图库（带完整 meta：nodeId/prompt/model/aspectRatio/resolution/count/outputType/
+    // thumbnail/originalPath/originalUrl/batchId/真实像素）——旧实现只入旧图，首次生成新图从不入库。
+    const p2 = node.params as unknown as StyleTransferParams;
+    historyDrawer.addImage(imageUrl, {
+      nodeId: node.id,
+      prompt: typeof composedPrompt === 'string' ? composedPrompt : (typeof p2.prompt === 'string' ? p2.prompt : ''),
+      model: typeof p2.model === 'string' ? p2.model : '',
+      aspectRatio: typeof p2.aspectRatio === 'string' ? p2.aspectRatio : '4:3',
+      resolution: typeof p2.resolution === 'string' ? p2.resolution : '2k',
+      count: typeof p2.count === 'number' ? p2.count : 1,
+      outputType,
+      thumbnail: imageUrl, // 展示图=缩略图
+      originalPath: origin?.path,
+      originalUrl: origin?.url,
+      ...(batchId ? { batchId } : {}),
+      width: imageWidth,
+      height: imageHeight,
     });
   }
 
@@ -569,10 +659,14 @@ class RunEngine {
     trace: { outputType: GenerationTrace['outputType']; refs: string[]; batchId?: string } = { outputType: 'img2img', refs: [] },
     origin: ImageOrigin | null = null,
     composedPrompt?: string, // 本次实际使用的合成 prompt（上游文本 + 自身 prompt；trace/历史记录用，W3-2）
+    imageWidth?: number,     // 原图真实像素宽（后端 PIL im.size 透传；旧后端缺失为 undefined）
+    imageHeight?: number,    // 原图真实像素高
+    active?: ActiveRun,
   ): Promise<FlowNode> {
     const gen = flowState.getNode(genId);
     if (!gen) throw new Error('生成节点已删除，产出节点创建失败');
     const ratio = await loadImageRatio(imageUrl);
+    if (active && !this._isActive(active)) throw new Error('任务已暂停');
     const r = ratio && ratio > 0 ? ratio : 4 / 3;
     const cardH = Math.round(CARD_W / r);
     const y = layout.cursorY;
@@ -583,6 +677,8 @@ class RunEngine {
       parentId: genId,
       imageUrl,
       imageOrigin: origin, // 原图引用（缩略图 + 原图路径，查看大图按需加载用）
+      imageWidth: typeof imageWidth === 'number' && imageWidth > 0 ? imageWidth : undefined,
+      imageHeight: typeof imageHeight === 'number' && imageHeight > 0 ? imageHeight : undefined,
       ratio: r,
       status: 'done',
       error: null,
@@ -603,6 +699,8 @@ class RunEngine {
     flowState.addEdge(genId, node.id, { suppressStale: true });
     // 生成档案：写 node.trace（source of truth）+ 追加一条 kind:'image' 流水（imageUrl 冗余：跨会话图库解析优先用行内 URL）
     const nodeTrace = historyPersist.buildImageTrace(node, trace.refs, trace.outputType, imageUrl, composedPrompt);
+    if (typeof imageWidth === 'number' && imageWidth > 0) nodeTrace.imageWidth = imageWidth;
+    if (typeof imageHeight === 'number' && imageHeight > 0) nodeTrace.imageHeight = imageHeight;
     node.trace = nodeTrace;
     historyDrawer.addImage(imageUrl, {
       nodeId: node.id,
@@ -618,6 +716,8 @@ class RunEngine {
       originalPath: origin?.path,
       originalUrl: origin?.url,
       batchId: trace.batchId, // R3：同批全部成功图共用同一批次号
+      width: imageWidth,
+      height: imageHeight,
     });
     void historyPersist.appendTrace({
       kind: 'image',

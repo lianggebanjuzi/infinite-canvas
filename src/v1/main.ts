@@ -1,8 +1,9 @@
 // src/v1/main.ts
 // v1 应用启动编排：等待 pywebview → 注册节点 → 渲染画布 → 绑定 UI → 键盘/错误处理
 // A1：启动为空画布 + 空态引导（不自动加载模板）
-// 无边框窗口拖动说明：顶栏拖动由 pywebview 官方 drag-region 机制接管（不再手写 ctypes），
-// 前端只负责拦截交互元素防止误触发（详见 bindWindowControls）。
+// 无边框窗口拖动说明（B1）：顶栏拖动由前端自实现——mousedown 记录增量起点 → window mousemove
+// 累计增量调后端 win_move_relative 相对移动 → mouseup 结束；最大化状态下前端锁定（后端亦拒绝），
+// 双击顶栏空白切换最大化。不再使用 pywebview 官方 drag-region（最大化/还原后拖动失效的已知坑）。
 
 import '../bridge';
 
@@ -116,7 +117,10 @@ function bindKeyboard(): void {
       if (ids.length > 0) {
         e.preventDefault();
         flowHistory.record();
-        ids.forEach(id => flowState.removeNode(id));
+        ids.forEach(id => {
+          runEngine.cancel(id);
+          flowState.removeNode(id);
+        });
         selection.clear();
       }
       return;
@@ -169,23 +173,40 @@ function syncUndoRedo(): void {
   if (redoBtn) redoBtn.disabled = busy || !flowHistory.canRedo;
 }
 
-// ───────────────────────── 无边框窗口控制（自绘标题栏） ─────────────────────────
-// 窗口拖动由 pywebview 官方 drag-region 机制接管（不再手写 ctypes）：
-// pywebview 6.x 注入的 customize.js 在 document.body 上监听 mousedown（冒泡阶段），
-// 命中 '.pywebview-drag-region'（即本顶栏）后走内部桥接 pywebviewMoveWindow，
-// 由 WinForms 后端 move() 移动窗口（带 DPI 缩放；不经用户 js_api 异步层，稳定不抽搐）。
-// 前端只需：① 捕获阶段拦截"交互元素"上的 mousedown（stopPropagation），
-// 防止官方冒泡监听把点击项目名/窗口按钮误判为拖动；② 保留窗口控制按钮与双击最大化。
+// ───────────────────────── 无边框窗口控制（自绘标题栏，B1 自实现拖动） ─────────────────────────
+// 窗口拖动不再走 pywebview 官方 drag-region（其「绝对坐标 = screenX - initialX」公式与
+// 假最大化 SetWindowPos 贴工作区交互存在已知坑：最大化态可被拖走、还原后再拖失效）。
+// 改为前端自实现：
+//   - mousedown 顶栏空白：记录增量起点（screenX/screenY），若处于最大化态直接忽略（防假最大化窗口被拖走）；
+//   - window mousemove：累计增量（CSS px）经 requestAnimationFrame 合并后调后端
+//     win_move_relative(dx, dy)（后端按当前 DPI 换算物理像素、相对当前左上角移动，任何状态自洽）；
+//   - mouseup / 窗口失焦：结束拖动。
+// 保留：双击顶栏空白切换最大化、三个窗口按钮、输入框/按钮/顶栏右侧区的捕获拦截（防误触）。
 // W4：win_toggle_maximize 返回 {maximized} 切换 #win-max 图标；系统手势（Win+↑/↓）由
 // 后端 window.events.maximized/restored → evaluate_js(window.__icvWinMaxState) 兜底同步。
 
-/** 同步顶栏 #win-max 图标（□ ↔ ▣，W4） */
+/** 顶栏拖动增量累计（rAF 合并；accX/accY 为自上次发送以来的累计增量） */
+interface WinDragState {
+  lastScreenX: number;
+  lastScreenY: number;
+  accX: number;
+  accY: number;
+  rafId: number | null;
+}
+
+/** 当前是否处于最大化态（拖动锁定用；由 setWinMaxIcon / __icvWinMaxState 同步） */
+let winMaximized = false;
+/** 顶栏拖动进行中状态（null = 未拖动） */
+let winDrag: WinDragState | null = null;
+
+/** 同步顶栏 #win-max 图标（□ ↔ ▣，W4）+ 最大化态标志（B1 拖动锁定） */
 function setWinMaxIcon(maximized: boolean): void {
+  winMaximized = !!maximized;
   const btn = document.getElementById('win-max');
   if (btn) btn.classList.toggle('maximized', !!maximized);
 }
 
-/** 后端 evaluate_js 回调：系统手势进入/退出最大化时同步图标（W2 脱节兜底） */
+/** 后端 evaluate_js 回调：系统手势进入/退出最大化时同步图标与锁定标志（W2 脱节兜底） */
 (window as unknown as Record<string, unknown>).__icvWinMaxState = (maximized: boolean): void => {
   setWinMaxIcon(!!maximized);
 };
@@ -206,6 +227,65 @@ async function toggleMaximizeAndSyncIcon(): Promise<void> {
   } catch { /* 后端不可用时静默（纯浏览器调试场景） */ }
 }
 
+/** 顶栏 mousedown：开始自实现窗口拖动（B1）；交互元素/最大化态忽略 */
+function startWinDrag(e: MouseEvent): void {
+  // 交互元素（输入框/按钮/右侧窗口按钮区）不触发拖动（click 是独立事件，不受影响）
+  const t = e.target as HTMLElement;
+  if (t.closest('input, button, select, textarea, .topbar-right')) return;
+  // 最大化状态下禁止拖动：假最大化窗口被 SetWindowPos 拖走后标志位/还原基准会漂移（B1 核心）
+  if (winMaximized) return;
+  // 上一段拖动未正常结束（如鼠标在窗口外松开）时先复位，避免增量错乱
+  endWinDrag();
+  winDrag = { lastScreenX: e.screenX, lastScreenY: e.screenY, accX: 0, accY: 0, rafId: null };
+  window.addEventListener('mousemove', onWinDragMove);
+  window.addEventListener('mouseup', onWinDragUp);
+  // 鼠标在窗口外松开时窗口收不到 mouseup → 失焦兜底结束拖动
+  window.addEventListener('blur', onWinDragBlur);
+  e.preventDefault(); // 防止拖动期间文本选择/原生拖拽残留
+}
+
+function onWinDragMove(e: MouseEvent): void {
+  if (!winDrag) return;
+  // 累计增量（CSS px；后端按 DPI 换算物理像素，相对当前左上角移动）
+  winDrag.accX += e.screenX - winDrag.lastScreenX;
+  winDrag.accY += e.screenY - winDrag.lastScreenY;
+  winDrag.lastScreenX = e.screenX;
+  winDrag.lastScreenY = e.screenY;
+  if (winDrag.rafId !== null) return; // 上一帧待发送：增量已累计，避免高频 IPC
+  winDrag.rafId = requestAnimationFrame(() => {
+    const d = winDrag;
+    if (!d) return;
+    d.rafId = null;
+    const dx = d.accX;
+    const dy = d.accY;
+    d.accX = 0;
+    d.accY = 0;
+    if (dx === 0 && dy === 0) return;
+    // 后端不可用/最大化被后端拒绝时静默（纯浏览器调试场景）；失败不阻塞后续移动
+    window.pywebview.api.win_move_relative(dx, dy).catch(() => {});
+  });
+}
+
+function endWinDrag(): void {
+  if (!winDrag) return;
+  if (winDrag.rafId !== null) {
+    cancelAnimationFrame(winDrag.rafId);
+    winDrag.rafId = null;
+  }
+  winDrag = null;
+  window.removeEventListener('mousemove', onWinDragMove);
+  window.removeEventListener('mouseup', onWinDragUp);
+  window.removeEventListener('blur', onWinDragBlur);
+}
+
+function onWinDragUp(): void {
+  endWinDrag();
+}
+
+function onWinDragBlur(): void {
+  endWinDrag();
+}
+
 function bindWindowControls(): void {
   // 三个窗口按钮：关闭按钮走 closeGuard（不得直连 win_close，否则关闭保护形同虚设）
   document.getElementById('win-min')!.addEventListener('click', () => { window.pywebview.api.win_minimize(); });
@@ -214,13 +294,15 @@ function bindWindowControls(): void {
 
   const topbar = document.querySelector('.topbar') as HTMLElement;
 
-  // 捕获阶段（capture: true）拦截：交互元素（输入框/按钮/顶栏右侧窗口按钮区）不触发官方拖动。
-  // 只 stopPropagation、不 preventDefault：不影响 input 聚焦与按钮点击（click 是独立事件，不受影响）。
+  // 捕获阶段统一拦截顶栏 mousedown：无论 .pywebview-drag-region 类是否残留（旧 dist 兜底），
+  // 都 stopPropagation 阻止冒泡到 body 上的官方 drag-region 监听，避免「双拖动」冲突。
+  // 交互元素（输入框/按钮/右侧窗口按钮区）→ 仅拦截不拖动（click 是独立事件、input 聚焦是默认动作，均不受影响）；
+  // 空白处 → 开始自实现拖动（B1）。只 stopPropagation、不 preventDefault（拖动真正开始时才 preventDefault）。
   topbar.addEventListener('mousedown', (e: MouseEvent) => {
+    e.stopPropagation();
     const t = e.target as HTMLElement;
-    if (t.closest('input, button, select, textarea, .topbar-right')) {
-      e.stopPropagation();
-    }
+    if (t.closest('input, button, select, textarea, .topbar-right')) return;
+    startWinDrag(e);
   }, true);
 
   // 双击顶栏空白 = 最大化/还原（W1）

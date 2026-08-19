@@ -11,7 +11,7 @@ type NodeStatus = 'idle' | 'run' | 'done' | 'stale' | 'fail';
 /** text-gen 参数：命令（临时，发送后清空）+ 文本模型 */
 interface TextGenParams {
   instruction?: string;  // 命令；新建为空、用户自填、发送后清空（仅作命令暂存）
-  model: string;         // "provider_id:model_id"（chat 模型）
+  model: string;         // "provider_id:key_id:model_id"（chat 模型；旧两段值仍由后端兼容）
 }
 
 /** 节点级文本历史条目（text-gen 专属；不存图片信息，见架构决策） */
@@ -37,6 +37,8 @@ interface GenerationTrace {
   createdAt: number;
   parentId?: string | null;  // 生成源节点（手建节点自身生成时即自己 id）
   outputType: 'txt2img' | 'img2img' | 'outpaint';
+  imageWidth?: number;       // 原图真实像素宽（PIL im.size；旧 trace 缺失 → 展示回退 params）
+  imageHeight?: number;      // 原图真实像素高
 }
 
 
@@ -60,6 +62,8 @@ interface FlowNode {
   params: Record<string, unknown>;  // 节点参数（见 StyleTransferParams / TextGenParams）
   imageUrl: string | null;   // 本节点输出图（卡片主视觉=缩略图，与 refImages 严格分离）
   imageOrigin?: ImageOrigin | null; // 原图引用（查看大图按需加载用；旧节点缺省 null）
+  imageWidth?: number;       // 原图真实像素宽（生成/回写时透传；旧节点/旧数据缺失 → 展示回退 params）
+  imageHeight?: number;      // 原图真实像素高
   outputText: string | null; // 新增：text-gen 输出文本；其余类型恒 null
   textHistory: TextGenHistoryItem[]; // 新增：节点级文本历史；非 text-gen 恒 []
   refImages: string[];       // 用户主动挂载的参考图（默认 []；上游可作参考图的图由 getReferenceImages 派生）
@@ -119,7 +123,7 @@ interface NodeDefinition {
 /** 生成节点参数（统一节点复用） */
 interface StyleTransferParams {
   prompt: string;             // 生成指令；文本模型反推模式下复用为「命令」
-  model: string;              // "provider_id:model_id"（绘图模型）
+  model: string;              // "provider_id:key_id:model_id"（绘图模型；旧两段值仅在唯一匹配时兼容）
   aspectRatio: string;        // '3:4' | '1:1' | '16:9' | 'Auto'
   resolution: string;         // '1k' | '2k' | '4k'
   count: number;              // 1-4
@@ -142,7 +146,7 @@ interface OutpaintOptions {
   prompt: string;            // 组装后的完整提示词（固定前缀「白色区域是待补全区域…」+ 可选用户描述）
   referenceImages: string[]; // 合成底图（PNG dataURL，白底不透明 + 原图，长边 ≤4096）
   aspectRatio: string;       // 目标比例 '1:1' | '3:4' | '4:3' | '16:9' | '9:16'
-  model: string;             // 自动解析的 gemini/nano-banana/seedream 系绘图模型（"provider:model"）
+  model: string;             // 自动解析的 gemini/nano-banana/seedream 系绘图模型（"provider:key:model"）
   resolution: string;        // '4k'（不暴露分辨率选项，模型自动出图最高 4K）
 }
 
@@ -181,6 +185,8 @@ type HistoryEntry =
       parentId?: string | null;
       outputType: 'txt2img' | 'img2img' | 'outpaint';
       batchId?: string;        // R3：一次生成的批次号（count=N 共用一个；text 分支不加）；旧行缺失 → 读侧按单图回退展示
+      imageWidth?: number;     // 原图真实像素宽（PIL im.size；旧行缺失 → 展示回退 params）
+      imageHeight?: number;    // 原图真实像素高
     }
   | {
       kind: 'text';

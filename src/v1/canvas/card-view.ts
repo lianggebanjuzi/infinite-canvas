@@ -19,8 +19,8 @@ const ICON_LOCK = '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" s
 class CardView {
   private container: HTMLElement | null = null;
   private els = new Map<string, HTMLElement>();
-  /** 内容指纹缓存：主图/缩略行/标题/状态/文本/角标态/素材态/空态文案变化时才重建 img.innerHTML（避免高频调用反复重建大图 DOM） */
-  private _contentFingerprint = new Map<string, { mainSrc: string; refStrip: string; title: string; status: string; text: string; assetState: string; isAsset: string; emptyHint: string }>();
+  /** 内容指纹缓存：主图/缩略行/标题/状态/文本/角标态/素材态/空态文案/尺寸标注变化时才重建 img.innerHTML（避免高频调用反复重建大图 DOM） */
+  private _contentFingerprint = new Map<string, { mainSrc: string; refStrip: string; title: string; status: string; text: string; assetState: string; isAsset: string; emptyHint: string; sizeLabel: string }>();
   /** 当前处于就地编辑态的 text-gen 节点 id（编辑中跳过 img.innerHTML 重建，避免打字被重建打断） */
   private _editingNodeId: string | null = null;
 
@@ -160,7 +160,9 @@ class CardView {
     const emptyHint = isTextGen && flowState.getReferenceImages(node.id).length > 0
       ? '已连接上游图，可反推'
       : '双击输入文本';
-    const fp = { mainSrc, refStrip, title, status: node.status, text, assetState, isAsset: isAsset ? '1' : '0', emptyHint };
+    // 分辨率/比例标注（B2：真实像素优先，无则回退 params；纳入指纹，像素/配方变化时重建）
+    const sizeLabel = this._sizeLabel(node);
+    const fp = { mainSrc, refStrip, title, status: node.status, text, assetState, isAsset: isAsset ? '1' : '0', emptyHint, sizeLabel };
     const prev = this._contentFingerprint.get(node.id);
     const changed = !prev
       || prev.mainSrc !== fp.mainSrc
@@ -170,7 +172,8 @@ class CardView {
       || prev.text !== fp.text
       || prev.assetState !== fp.assetState
       || prev.isAsset !== fp.isAsset
-      || prev.emptyHint !== fp.emptyHint;
+      || prev.emptyHint !== fp.emptyHint
+      || prev.sizeLabel !== fp.sizeLabel;
     if (changed) {
       this._contentFingerprint.set(node.id, fp);
       // 就地编辑中跳过重建（避免状态等变化把 textarea 打没）；退出编辑态后由保存/取消路径强制重建
@@ -181,6 +184,10 @@ class CardView {
             <button class="pcard-badge adopt${adopted ? ' on' : ''}" title="${adopted ? '取消采纳' : '采纳（自动锁定）'}">${ICON_CHECK}</button>
             <button class="pcard-badge lock${locked ? ' on' : ''}" title="${locked ? '取消锁定' : '锁定'}">${ICON_LOCK}</button>
           </div>`;
+        // 分辨率/比例标注条（仅图片卡有图且可算文案时显示；指针穿透，不遮挡操作）
+        const sizeHtml = !isTextGen && mainSrc && sizeLabel
+          ? `<div class="pcard-size"><span>${escapeHtml(sizeLabel)}</span></div>`
+          : '';
         if (isTextGen) {
           // 文本为主视觉：白底文本区（内部滚动），有结果显示 outputText，空态显示占位文案（有图片上游 → 反推引导）
           img.innerHTML = text
@@ -189,7 +196,7 @@ class CardView {
         } else if (mainSrc) {
           // 素材节点：整卡显图 + 角标「素材」+ pcard-asset class（判分支 #9）
           const assetBadgeHtml = isAsset ? '<span class="pcard-asset-badge">素材</span>' : '';
-          img.innerHTML = `<div class="ph" style="background-image:url('${escapeUrl(mainSrc)}')"></div><div class="scan"></div>${refStrip}${badgesHtml}${assetBadgeHtml}`;
+          img.innerHTML = `<div class="ph" style="background-image:url('${escapeUrl(mainSrc)}')"></div><div class="scan"></div>${refStrip}${badgesHtml}${assetBadgeHtml}${sizeHtml}`;
         } else {
           img.innerHTML = `<div class="ph"><div class="ph-empty">${emptyContent()}</div></div><div class="scan"></div>${refStrip}`;
         }
@@ -217,12 +224,14 @@ class CardView {
     el.classList.toggle('selected', selection.isSelected(node.id));
     el.classList.toggle('pcard-asset', isAsset); // 素材态：边框/角标视觉（判分支 #9）
 
-    // 查看大图（按需加载原图：有 imageOrigin.path 时桥接取原图，失败回退缩略图）
+    // 查看大图（按需加载原图：有 imageOrigin.path 时桥接取原图，失败回退缩略图；携带真实像素 + 信息栏）
     const act = el.querySelector('.pcard-act') as HTMLButtonElement | null;
     if (act) {
       act.onclick = (e: MouseEvent) => {
         e.stopPropagation();
-        if (mainSrc) void openImageModal(mainSrc, node.imageOrigin);
+        if (mainSrc) {
+          void openImageModal(mainSrc, node.imageOrigin, { width: node.imageWidth, height: node.imageHeight }, imageModalInfoFromNode(node));
+        }
       };
     }
   }
@@ -306,7 +315,9 @@ class CardView {
     this.updateCard(el, node);
   }
 
-  /** 卡片底部参考图缩略行：展示 getReferenceImages(id)（本节点 refImages + 上游可作参考图的图） */
+  /**
+   * 卡片底部参考图缩略行：展示 getReferenceImages(id)（本节点 refImages + 上游可作参考图的图）
+   */
   private _refStrip(node: FlowNode): string {
     const isTextGen = node.type === 'text-gen';
     // 当主视觉正在用 refImages[0] 占位（即无输出图）时，缩略行排除这张占位图，避免重复显示
@@ -319,6 +330,27 @@ class CardView {
       .map(u => `<div class="pcard-up-thumb" style="background-image:url('${escapeUrl(u)}')" title="参考图"></div>`)
       .join('');
     return `<div class="pcard-upstreams">${thumbs}</div>`;
+  }
+
+  /**
+   * 卡片分辨率/比例标注文案：有真实像素（node.imageWidth/imageHeight）→ "1536×2048 · 3:4"；
+   * 无真实像素回退 params resolution+aspectRatio → "2K · 3:4"；均无 → ''（不显示）。
+   * 素材节点（无生成配方）与文本卡不显示。
+   */
+  private _sizeLabel(node: FlowNode): string {
+    if (node.type === 'text-gen' || flowState.isAssetNode(node)) return '';
+    const w = typeof node.imageWidth === 'number' && node.imageWidth > 0 ? node.imageWidth : 0;
+    const h = typeof node.imageHeight === 'number' && node.imageHeight > 0 ? node.imageHeight : 0;
+    const p = (node.params || {}) as unknown as StyleTransferParams;
+    const ratio = typeof p.aspectRatio === 'string' ? p.aspectRatio.trim() : '';
+    const res = typeof p.resolution === 'string' ? p.resolution.trim() : '';
+    if (w > 0 && h > 0) {
+      return ratio && ratio !== 'Auto' ? `${w}×${h} · ${ratio}` : `${w}×${h}`;
+    }
+    const parts: string[] = [];
+    if (res) parts.push(res.toUpperCase());
+    if (ratio && ratio !== 'Auto') parts.push(ratio);
+    return parts.join(' · ');
   }
 }
 
@@ -341,30 +373,83 @@ function escapeHtml(text: string): string {
     .replace(/'/g, '&#39;');
 }
 
+/** 大图信息栏数据（旧数据字段缺失 → 信息栏对应行显示 '—'，不报错不白屏） */
+export interface ImageModalInfo {
+  model?: string;
+  createdAt?: number;
+  aspectRatio?: string;
+  resolution?: string;
+  prompt?: string;
+}
+
+/** 由节点合成大图信息栏数据：trace（实际生成档案）优先，params 兜底（旧节点无 trace） */
+export function imageModalInfoFromNode(node: FlowNode): ImageModalInfo {
+  const p = (node.params || {}) as unknown as StyleTransferParams;
+  const t = node.trace;
+  return {
+    model: t?.model || p.model,
+    createdAt: t?.createdAt,
+    aspectRatio: t?.aspectRatio || p.aspectRatio,
+    resolution: t?.resolution || p.resolution,
+    prompt: t?.prompt || p.prompt,
+  };
+}
+
 /**
- * 大图查看（简单全屏浮层，图片性能优化版）：
+ * 大图查看（左右分栏：左信息栏 + 右大图；图片性能优化版）：
  * 先显示缩略图 src + loading（旧图 base64 直接显示）；
  * 有 origin.path → Backend.loadLocalImage 按需取原图（一次性，用完即弃不常驻）；
  * 成功替换为原图 data_url；失败/无 origin → 保持缩略图并 toast。
+ * dims：调用方已知的原图真实像素（可选；信息栏「分辨率」优先展示，原图加载后用 naturalWidth/Height 权威覆盖）。
+ * info：生成档案信息（可选；信息栏展示 模型/时间/比例/分辨率/提示词）。
  */
 export async function openImageModal(
   src: string,
   origin?: { path?: string; url?: string } | null,
+  dims?: { width?: number; height?: number },
+  info?: ImageModalInfo,
 ): Promise<void> {
   const modal = document.getElementById('img-modal') as HTMLElement | null;
   const img = document.getElementById('img-modal-img') as HTMLImageElement | null;
   const loading = document.getElementById('img-modal-loading') as HTMLElement | null;
   if (!modal || !img) return;
 
+  // 信息栏：渲染字段行（缺失字段 → '—'）；返回「分辨率」value 元素供原图加载后更新真实像素
+  const resValueEl = renderModalInfo(info, dims);
+
+  // 是否已加载原图（而非缩略图）：仅原图加载成功后才用 naturalWidth/Height 标注真实像素
+  // （缩略图最长边 1024px，naturalWidth 是缩略图尺寸，不能当作真实像素）
+  let showedOriginal = false;
+  const refreshMeta = (): void => {
+    if (showedOriginal && resValueEl) {
+      const nw = img.naturalWidth;
+      const nh = img.naturalHeight;
+      if (nw > 0 && nh > 0) resValueEl.textContent = `${nw}×${nh}`;
+    }
+    // 未加载原图：保留 dims/info 初值（下方设置），不因缩略图 onload 覆盖
+  };
+  img.onload = refreshMeta;
+
   // 1. 先显示缩略图（几十 KB 秒开）+ loading
   img.src = src;
   modal.classList.add('show');
   if (loading) loading.style.display = 'flex';
 
-  const close = () => modal.classList.remove('show');
-  modal.onclick = close;
+  const close = (): void => modal.classList.remove('show');
+  // 关闭：点背景（含右侧大图区）或右上 ×；信息栏内点击不关闭
+  modal.onclick = (e: MouseEvent) => {
+    const t = e.target as Element;
+    if (t === modal || t.closest('.img-modal-stage')) close();
+  };
+  const closeBtn = document.getElementById('img-modal-close') as HTMLElement | null;
+  if (closeBtn) {
+    closeBtn.onclick = (e: MouseEvent) => {
+      e.stopPropagation();
+      close();
+    };
+  }
 
-  // 2. 无原图引用（旧节点/旧历史 base64 直显）→ 直接完成
+  // 2. 无原图引用（旧节点/旧历史 base64 直显）→ 直接完成（标注仅依赖 dims/info）
   const path = origin?.path;
   if (!path) {
     if (loading) loading.style.display = 'none';
@@ -375,6 +460,7 @@ export async function openImageModal(
   try {
     const res = await Backend.loadLocalImage(path);
     if (res.status === 'success' && res.data_url) {
+      showedOriginal = true; // 先置位再换 src，onload 时用自然尺寸更新分辨率
       img.src = res.data_url;
     } else {
       showToast('原图加载失败，已显示缩略图', false);
@@ -383,6 +469,96 @@ export async function openImageModal(
     showToast('原图加载失败，已显示缩略图', false);
   } finally {
     if (loading) loading.style.display = 'none';
+  }
+}
+
+/** 渲染大图信息栏字段行（缺失 → '—'）；返回「分辨率」value 元素（原图加载后更新真实像素用） */
+function renderModalInfo(info?: ImageModalInfo, dims?: { width?: number; height?: number }): HTMLElement | null {
+  const fields = document.getElementById('img-modal-fields') as HTMLElement | null;
+  if (!fields) return null;
+  const data = info || {};
+  const model = shortModel(data.model);
+  const time = formatDateTime(data.createdAt);
+  const ratio = (data.aspectRatio || '').trim();
+  const ratioText = ratio && ratio !== 'Auto' ? ratio : '—';
+  const w = dims && typeof dims.width === 'number' && dims.width > 0 ? dims.width : 0;
+  const h = dims && typeof dims.height === 'number' && dims.height > 0 ? dims.height : 0;
+  const resText = w > 0 && h > 0 ? `${w}×${h}` : ((data.resolution || '').trim() ? (data.resolution as string).trim().toUpperCase() : '—');
+  const prompt = (data.prompt || '').trim();
+
+  fields.innerHTML = `
+    <div class="img-modal-field">
+      <div class="img-modal-label">生成模型</div>
+      <div class="img-modal-value">${escapeHtml(model || '—')}</div>
+    </div>
+    <div class="img-modal-field">
+      <div class="img-modal-label">生成时间</div>
+      <div class="img-modal-value">${escapeHtml(time || '—')}</div>
+    </div>
+    <div class="img-modal-field">
+      <div class="img-modal-label">比例</div>
+      <div class="img-modal-value">${escapeHtml(ratioText)}</div>
+    </div>
+    <div class="img-modal-field">
+      <div class="img-modal-label">分辨率</div>
+      <div class="img-modal-value" data-field="resolution">${escapeHtml(resText)}</div>
+    </div>
+    <div class="img-modal-field">
+      <div class="img-modal-label">提示词</div>
+      <div class="img-modal-value prompt">${escapeHtml(prompt || '—')}</div>
+      ${prompt ? '<button class="img-modal-copy" type="button">复制提示词</button>' : ''}
+    </div>`;
+
+  const copyBtn = fields.querySelector('.img-modal-copy') as HTMLElement | null;
+  copyBtn?.addEventListener('click', () => copyText(prompt));
+
+  return fields.querySelector('[data-field="resolution"]') as HTMLElement | null;
+}
+
+/** 模型短名（"provider:key:model" → "model"；与 history-drawer 同思路，本地实现避免新增循环依赖） */
+function shortModel(modelId?: string): string {
+  if (!modelId) return '';
+  return modelId.split(':').pop() || modelId || '';
+}
+
+/** 完整时间格式：YYYY-MM-DD HH:mm（非法/缺失 → ''） */
+function formatDateTime(ts?: number): string {
+  if (!ts || !(ts > 0)) return '';
+  const d = new Date(ts);
+  const p = (n: number): string => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+/** 复制文本（Clipboard API 优先，pywebview 旧内核/非安全上下文无 API 时兜底 execCommand；校验返回值，成功 toast） */
+function copyText(text: string): void {
+  const value = (text || '').trim();
+  if (!value) { showToast('无提示词可复制', false); return; }
+  const done = (): void => showToast('提示词已复制');
+  const fail = (): void => showToast('复制失败', false);
+  if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+    void navigator.clipboard.writeText(value).then(done, fail);
+    return;
+  }
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = value;
+    ta.style.position = 'fixed';
+    ta.style.top = '-9999px';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.focus();
+    ta.select();
+    let copied = false;
+    try {
+      copied = document.execCommand('copy'); // WebView2 仍支持；返回 false 表示复制被拒
+    } finally {
+      // 无论如何都从 DOM 移除，避免残留隐藏 textarea
+      document.body.removeChild(ta);
+    }
+    if (copied) done();
+    else fail();
+  } catch {
+    fail();
   }
 }
 

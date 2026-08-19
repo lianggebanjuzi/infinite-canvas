@@ -16,6 +16,7 @@ import webview
 from backend.api.provider_api  import ProviderAPI
 from backend.api.unified_api   import UnifiedAPIRouter
 from backend.api.image_api     import ImageAPI
+from backend.api.video_api     import VideoAPI
 from backend.api.clipboard_api import ClipboardAPI
 from backend.api.project_api   import ProjectAPI
 from backend.api.settings_api  import SettingsAPI
@@ -76,8 +77,8 @@ def _get_window_hwnd():
 
     优先取 pywebview 暴露的 native 句柄（Windows 下为 WinForms 窗体对象，
     其 .Handle 即 HWND），不再依赖 FindWindowW 对窗口标题的耦合。失败返回 0。
-    当前用于 _apply_rounded_corners（圆角补偿）与 win_toggle_maximize（Win32 最大化）；
-    窗口拖动已由 pywebview 官方 drag-region 机制接管，不再需要手写 ctypes。
+    当前用于 _apply_rounded_corners（圆角补偿）、win_toggle_maximize（Win32 最大化）
+    与 win_move_relative（自实现顶栏拖动，B1）；不再使用 pywebview 官方 drag-region。
     """
     try:
         win = webview.windows[0]
@@ -168,6 +169,21 @@ def _set_window_pos(hwnd, rect):
         return False
 
 
+def _get_dpi_scale(hwnd):
+    """当前窗口所在显示器的 DPI 缩放系数（逻辑像素→物理像素；1.0=100%）。
+
+    与 pywebview winforms._scale 同口径（GetDpiForWindow/96），保证前端拖拽增量（CSS px）
+    换算成物理像素与窗口实际位置一致；GetDpiForWindow 不可用（Win10 1607 以下）时回退 1.0。
+    """
+    try:
+        dpi = ctypes.windll.user32.GetDpiForWindow(hwnd)
+        if dpi > 0:
+            return dpi / 96.0
+    except Exception:
+        pass
+    return 1.0
+
+
 # ─────────────────────────────────────────
 # 统一 API 类（所有 AI 逻辑统一走 UnifiedAPIRouter）
 # ─────────────────────────────────────────
@@ -178,6 +194,7 @@ class InfiniteCanvasAPI:
         self.settings  = SettingsAPI(SETTINGS_FILE, PROMPTS_FILE)
         self.unified   = UnifiedAPIRouter(self.provider, settings_api=self.settings)
         self.image     = ImageAPI(self.settings, self.unified)
+        self.video     = VideoAPI(self.unified)
         self.clipboard = ClipboardAPI()
         self.project   = ProjectAPI(settings_api=self.settings, fallback_dir=APP_DIR)
         # 无边框窗口状态（自绘标题栏）
@@ -263,6 +280,64 @@ class InfiniteCanvasAPI:
     def get_task_result(self, task_id):
         """查询异步任务结果"""
         return self.unified.get_task_result(task_id)
+
+    # ─────────────────────────────────────────
+    # AI 视频生成（FluxPort 全异步；本期仅后端，前端未接 UI）
+    # ─────────────────────────────────────────
+
+    def generate_video(self, prompt, config=None):
+        """视频生成（异步，立即返回 task_id）"""
+        try:
+            return self.video.generate_video_async(prompt, config)
+        except AppError as e:
+            return e.to_dict()
+        except Exception as e:
+            return UnknownError(str(e)).to_dict()
+
+    def generate_video_async(self, prompt, config=None):
+        """视频生成（异步，立即返回 task_id）— 兼容命名，同 generate_video"""
+        try:
+            return self.video.generate_video_async(prompt, config)
+        except AppError as e:
+            return e.to_dict()
+        except Exception as e:
+            return UnknownError(str(e)).to_dict()
+
+    def get_video_task_result(self, task_id):
+        """查询视频异步任务结果（中间态 queued/processing/pending_confirmation；终态 done）"""
+        try:
+            return self.video.get_video_task_result(task_id)
+        except AppError as e:
+            return e.to_dict()
+        except Exception as e:
+            return UnknownError(str(e)).to_dict()
+
+    def unified_generate_video(self, prompt, options=None):
+        """统一视频生成（异步，立即返回 task_id）"""
+        try:
+            return self.video.generate_video_async(prompt, options)
+        except AppError as e:
+            return e.to_dict()
+        except Exception as e:
+            return UnknownError(str(e)).to_dict()
+
+    def unified_generate_video_sync(self, prompt, options=None):
+        """统一视频生成（同步，阻塞等待结果；QA/console 直测用）"""
+        try:
+            return self.video.generate_video(prompt, options)
+        except AppError as e:
+            return e.to_dict()
+        except Exception as e:
+            return UnknownError(str(e)).to_dict()
+
+    def unified_get_video_task_result(self, task_id):
+        """查询视频异步任务结果"""
+        try:
+            return self.video.get_video_task_result(task_id)
+        except AppError as e:
+            return e.to_dict()
+        except Exception as e:
+            return UnknownError(str(e)).to_dict()
 
     # ─────────────────────────────────────────
     # Agent 对话（全部走 UnifiedAPIRouter）
@@ -456,6 +531,33 @@ class InfiniteCanvasAPI:
             except Exception:
                 pass
         return {"maximized": self._win_maximized}
+
+    def win_move_relative(self, dx, dy):
+        """按增量移动窗口（自实现顶栏拖动专用，B1）。
+
+        与 pywebview 官方 drag-region 的差异：drag-region 用「绝对坐标 = screenX - initialX」，
+        与假最大化（SetWindowPos 贴工作区，非系统 Maximized 态）交互存在已知坑——最大化态可被
+        拖走导致标志位/位置漂移，还原后再拖失效。本方法改为「相对当前左上角增量移动」：
+        任何窗口状态下都自洽；最大化状态下直接拒绝（前端同时锁定，双保险，避免假最大化窗口被拖走）。
+        dx/dy 为逻辑像素（CSS px），按当前显示器 DPI 换算物理像素后 SetWindowPos 相对移动。
+        返回 {"ok": bool}（供前端静默失败；最大化/无句柄/失败返回 ok=False）。
+        """
+        if self._win_maximized:
+            return {"ok": False}
+        hwnd = _get_window_hwnd()
+        if not hwnd:
+            return {"ok": False}
+        rect = _get_window_rect(hwnd)
+        if not rect:
+            return {"ok": False}
+        try:
+            scale = _get_dpi_scale(hwnd)
+        except Exception:
+            scale = 1.0
+        new_left = rect[0] + int(float(dx) * scale)
+        new_top = rect[1] + int(float(dy) * scale)
+        ok = _set_window_pos(hwnd, (new_left, new_top, rect[2], rect[3]))
+        return {"ok": ok}
 
     def _restore_window(self, hwnd):
         """还原窗口到最大化前矩形；无记录/无句柄时兜底 ShowWindow(SW_RESTORE=9)"""

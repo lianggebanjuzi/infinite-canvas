@@ -1,58 +1,60 @@
 sequenceDiagram
-    autonumber
-    participant U as 用户
-    participant I as Interactions
-    participant F as FlowState
-    participant D as DirtyMarker
+  autonumber
+  actor U as 用户
+  participant I as Interactions
+  participant FS as FlowState
+  participant CV as CardView
+  participant CP as CmdPanel
+  participant RE as RunEngine
+  participant BE as Backend(chatV2/generateImage)
 
-    Note over U,D: 流程一：拖图进画布
-    U->>I: 拖入图片（历史图/文件）
-    I->>I: _dropImage(src, world)
-    alt 命中节点
-        I->>F: addRefImage(nodeId, src)
-        F->>F: refImages 去重追加 + notify
-        I->>D: markStale(nodeId) 标待重跑
-    else 空白处
-        I->>F: addNode('image-gen', x, y, {refImages:[src]})
-        F->>F: 建节点(imageUrl=null) + notify
-        I->>I: selection.select + resolveDefaultModel 回填 model
-    end
+  Note over U,BE: A1 反推走线闭环（拖图→素材→文本→反推归位）
+  U->>I: 拖图到文本节点卡片
+  I->>FS: addNode('image-gen', {isAsset:true, imageUrl})
+  I->>FS: addEdge(素材, 文本)  // 素材→文本 连线
+  I-->>U: toast「已创建素材节点并连接」
+  U->>CP: 选中文本节点，输入「反推这个图片」并发送
+  CP->>RE: run(textNodeId)
+  RE->>FS: getReferenceImages(textId) // 取上游素材图
+  RE->>BE: chatV2(命令, {images:[data:image]})
+  BE-->>RE: text 反推描述
+  RE->>FS: updateNode({outputText, status:'done'})
+  RE->>FS: pushTextHistory(textId, text)
+  RE->>FS: dirty.markUpstreamChanged(textId)
+  FS-->>CV: notify → 卡片显示反推文本
 
-    Note over U,D: 流程二：运行（单节点）
-    participant CP as CmdPanel
-    participant RE as RunEngine
-    participant Def as NodeDefinition(image-gen)
-    participant B as Backend
-    U->>CP: 点发送 / 右键运行
-    CP->>RE: run(nodeId)
-    RE->>Def: canRun(node, ctx)
-    alt 不满足
-        Def-->>RE: "请输入提示词" / "请先选择绘图模型"
-        RE->>CP: showToast(原因)
-    else 满足
-        RE->>F: status='run'
-        RE->>Def: buildOptions(node, ctx)
-        Def->>F: getReferenceImages(node.id)
-        F-->>Def: refImages ∪ 上游 imageUrl
-        RE->>B: generateImage(prompt, options)
-        B-->>RE: {task_id}
-        RE->>RE: pollTask → {success, imageUrl}
-        RE->>F: setNodeImage(nodeId, imageUrl)
-        RE->>F: status='done'
-        RE->>D: markUpstreamChanged(nodeId) 下游标 stale
-    end
+  Note over U,BE: A2 文本关键词生图（文本→图片→生成回写自身）
+  U->>I: 拖线：文本节点 out → 自建图片节点
+  I->>FS: canConnect(from,to) // 允许
+  I->>FS: addEdge(文本, 图片)
+  U->>CP: 选中图片节点（自身 prompt 为空），发送
+  CP->>RE: run(imageNodeId)
+  RE->>FS: canRun → 有文本上游，允许
+  RE->>RE: composeImagePrompt = 上游文本(连线序) + 自身prompt
+  RE->>BE: generateImage(合成prompt, options)
+  BE-->>RE: result.imageUrl
+  RE->>RE: _writeBackToSelf(index=0, outputType='txt2img')
+  RE->>FS: 旧图入历史 + setNodeImage(新图)
+  RE->>FS: dirty.markUpstreamChangedExcept(imageNodeId)
 
-    Note over U,D: 流程三：旧项目加载迁移
-    participant P as Persistence
-    U->>P: open() / restore(raw)
-    P->>P: 校验 format==='icv'
-    P->>P: nodes.map(migrateNode)
-    loop 每个节点
-        alt type==='product-image'
-            P->>P: type='image-gen'; refImages=[imageUrl]; imageUrl=null; status='idle'
-        else style-transfer / image-gen
-            P->>P: type='image-gen'; refImages 保留（空）
-        end
-    end
-    P->>F: replaceAll({nodes, version:'3.1'})
-    F->>F: notify + 全量渲染
+  Note over U,BE: A3 文本就地编辑（旁路删除）
+  U->>CV: 点击文本卡内容 → textarea 编辑 → 保存
+  CV->>FS: updateNode({outputText})
+  CV->>FS: dirty.markUpstreamChanged(textId) // 不再覆盖下游 prompt
+  FS-->>CV: 下游图片节点标 stale（黄）
+
+  Note over U,BE: A4 拖图空白 → 素材节点
+  U->>I: 拖图到画布空白
+  I->>FS: addNode('image-gen', {isAsset:true, imageUrl, ratio})
+  I-->>U: toast「已创建素材节点」
+  U->>CV: 渲染：整卡图 + 角标「素材」
+  U->>CP: 选中素材节点 → 面板隐藏（无生成控件）
+
+  Note over U,BE: W6 图生图 count=1 回写自身
+  U->>CP: 自建图片节点（有素材上游）+ prompt → 发送
+  CP->>RE: run(imageNodeId)
+  RE->>RE: composeImagePrompt
+  RE->>BE: generateImage(prompt, {referenceImages:[素材]})
+  BE-->>RE: result.imageUrl
+  RE->>RE: _writeBackToSelf(index=0, outputType='img2img')
+  RE->>FS: 旧图入历史 + setNodeImage(新图) // 源节点 imageUrl 非空

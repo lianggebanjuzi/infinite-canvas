@@ -5,10 +5,12 @@
 from backend.api.errors import (
     AppError, UpstreamError, UpstreamTimeoutError, UnknownError
 )
+from backend.api.gemini_compat import resolve_chat_api_base
 from backend.api.model_rules import (
     DRAWING_MODEL_RULES,
     MODEL_TYPE_DRAWING,
     MODEL_TYPE_CHAT,
+    MODEL_TYPE_VIDEO,
     detect_model_type,
 )
 import json
@@ -167,7 +169,7 @@ class ProviderAPI:
                 'type':       provider_type,
                 'enabled':    True,
                 'api_url':    '',
-                'use_proxy':  True,
+                'use_proxy':  False,
                 'keys':       [{
                     'id':      f"key_{uuid.uuid4().hex[:8]}",
                     'name':    'key1',
@@ -235,9 +237,15 @@ class ProviderAPI:
 
             self._ensure_keys(target)
             self._normalize_keys(target)
+            requested_name = (key_name or '').strip()
+            if requested_name and any(
+                str(k.get('name') or '').strip().casefold() == requested_name.casefold()
+                for k in target['keys']
+            ):
+                return {"status": "error", "message": f"密钥名称「{requested_name}」已存在，请使用不同名称"}
             new_key = {
                 'id':      f"key_{uuid.uuid4().hex[:8]}",
-                'name':    key_name or self._next_key_name(target),
+                'name':    requested_name or self._next_key_name(target),
                 'api_key': '',
                 'enabled': True,
                 'models':  [],
@@ -301,6 +309,18 @@ class ProviderAPI:
             if not isinstance(updates, dict):
                 return {"status": "error", "message": "更新参数错误"}
 
+            if 'name' in updates:
+                new_name = str(updates['name'] or '').strip()
+                if not new_name:
+                    return {"status": "error", "message": "密钥名称不能为空"}
+                if any(
+                    k.get('id') != key_id and
+                    str(k.get('name') or '').strip().casefold() == new_name.casefold()
+                    for k in (target.get('keys') or [])
+                ):
+                    return {"status": "error", "message": f"密钥名称「{new_name}」已存在，请使用不同名称"}
+                updates = {**updates, 'name': new_name}
+
             for field, value in updates.items():
                 if field == 'id':
                     continue
@@ -320,14 +340,17 @@ class ProviderAPI:
         """
         拉取模型列表（url + key 独立拉取，逻辑不变；前端按 key 调用后写入对应 keys[i].models）
 
-        同时收集绘图模型与对话模型：
+        同时收集绘图模型、对话模型与视频模型：
         - 绘图模型：按显示名去重（带 -2k/-4k 后缀的直接过滤，由前端分辨率选择器控制）
         - 对话模型：按模型 ID 去重（对话模型通常 ID 唯一，保留全部，一个不漏）
-        每个模型带正确的 type 字段（'drawing' / 'chat'），分类规则复用公共模块 model_rules。
+        - 视频模型：按模型 ID 去重（type:'video'，FluxPort 视频任务协议）
+        FluxPort 供应商的模型列表必须走语言域（api.uselg.top）：媒体域 api.ai-media.vip
+        拉不到 chat/video 模型，故先用 resolve_chat_api_base 做域名归一（非 FluxPort 原样返回）。
+        每个模型带正确的 type 字段（'drawing' / 'chat' / 'video'），分类规则复用公共模块 model_rules。
         """
         print(f"正在从 {api_url} 拉取模型列表...")
         try:
-            base_url = api_url.rstrip('/')
+            base_url = resolve_chat_api_base(api_url).rstrip('/')
             if not base_url.endswith('/v1'):
                 base_url = base_url + '/v1'
             models_url = f"{base_url}/models"
@@ -344,6 +367,7 @@ class ProviderAPI:
                 # 第一步：按类型收集全部模型（不去重）
                 all_drawing = []
                 all_chat    = []
+                all_video   = []
                 seen_ids    = set()
 
                 if 'data' in data:
@@ -367,6 +391,14 @@ class ProviderAPI:
                                 'enabled': True
                             })
                             print(f"匹配到绘图模型: {model_id} -> {display_name}")
+                        elif m_type == MODEL_TYPE_VIDEO:
+                            all_video.append({
+                                'id':      model_id,
+                                'name':    model_id,
+                                'type':    MODEL_TYPE_VIDEO,
+                                'enabled': True
+                            })
+                            print(f"匹配到视频模型: {model_id}")
                         else:
                             # 对话模型没有显示名规则，name 直接用模型 ID（前端可再加工）
                             all_chat.append({
@@ -399,11 +431,11 @@ class ProviderAPI:
                     else:
                         print(f"去重跳过: {mid} (已有 [{name}] 的代表)")
 
-                # 对话模型按 ID 去重已在第一步完成，无需再处理
-                print(f"共 {len(deduped_drawing)} 个绘图模型、{len(all_chat)} 个对话模型")
+                # 对话/视频模型按 ID 去重已在第一步完成，无需再处理
+                print(f"共 {len(deduped_drawing)} 个绘图模型、{len(all_chat)} 个对话模型、{len(all_video)} 个视频模型")
                 return {
                     "status": "success",
-                    "models": deduped_drawing + all_chat
+                    "models": deduped_drawing + all_chat + all_video
                 }
             else:
                 error_msg = f"HTTP {response.status_code}: {response.text}"
@@ -419,10 +451,10 @@ class ProviderAPI:
             raise UnknownError(str(e))
 
     def test_api_connection(self, api_url, api_key):
-        """测试 API 连接（按 key 独立执行，逻辑不变）"""
+        """测试 API 连接（按 key 独立执行，逻辑不变；模型列表走语言域归一，与 fetch_models 一致）"""
         print(f"正在测试 API 连接: {api_url}")
         try:
-            base_url = api_url.rstrip('/')
+            base_url = resolve_chat_api_base(api_url).rstrip('/')
             if not base_url.endswith('/v1'):
                 base_url = base_url + '/v1'
             models_url = f"{base_url}/models"

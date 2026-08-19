@@ -16,6 +16,7 @@ from typing import List, Tuple
 # ─────────────────────────────────────────
 MODEL_TYPE_DRAWING = 'drawing'
 MODEL_TYPE_CHAT    = 'chat'
+MODEL_TYPE_VIDEO   = 'video'
 
 # ─────────────────────────────────────────
 # 绘图模型显示名规则（关键字 -> 显示名称）
@@ -41,7 +42,26 @@ DRAWING_RULES: List[Tuple[str, str]] = [
     ('dall-e-',      'openai_image'),
     # 子串匹配：gpt-image / gpt-image-1 / gpt-image-2 等均命中本规则 -> openai_image
     ('gpt-image',    'openai_image'),
+    # FluxPort 文档中的 Grok 图片模型同样走 OpenAI Images 协议。
+    # 缺这条时 grok-imagine-image-* 会落入默认 chat 路由，根本不会请求图片端点。
+    ('grok-imagine-image', 'openai_image'),
     ('dalle',        'openai_image'),
+]
+
+# ─────────────────────────────────────────
+# 视频模型关键字规则（关键字 -> API 格式名）
+# 格式名为字符串形式，与 unified_api.ApiFormat 枚举值一一对应
+# FluxPort 手册第 5 节明确：视频模型一律 POST /v1/videos 全异步任务协议。
+# 子串匹配为前缀自由匹配，对 /v1/models 返回的真实 id 低风险。
+# ─────────────────────────────────────────
+VIDEO_RULES: List[Tuple[str, str]] = [
+    ('grok-imagine-video', 'fluxport_video'),
+    ('veo',                'fluxport_video'),
+    ('kling',              'fluxport_video'),
+    ('runway',             'fluxport_video'),
+    ('pika',               'fluxport_video'),
+    ('sora',               'fluxport_video'),
+    ('wan',                'fluxport_video'),
 ]
 
 # ─────────────────────────────────────────
@@ -71,14 +91,18 @@ def detect_model_type(model_id: str) -> str:
     """
     根据模型 ID 关键字推断模型类型（纯函数，无副作用）。
 
-    返回 MODEL_TYPE_DRAWING 或 MODEL_TYPE_CHAT（字符串，与 ModelType 枚举值一致）。
-    先匹配绘图规则，再匹配对话规则，兜底按对话模型处理（与 unified_api 既有行为一致）。
+    返回 MODEL_TYPE_DRAWING / MODEL_TYPE_VIDEO / MODEL_TYPE_CHAT（字符串，与 ModelType 枚举值一致）。
+    匹配顺序：绘图规则 → 视频规则 → 对话规则，兜底按对话模型处理（与 unified_api 既有行为一致）。
     """
     lower = (model_id or '').lower().strip()
 
     for kw, _fmt in DRAWING_RULES:
         if kw in lower:
             return MODEL_TYPE_DRAWING
+
+    for kw, _fmt in VIDEO_RULES:
+        if kw in lower:
+            return MODEL_TYPE_VIDEO
 
     for kw, _fmt in CHAT_RULES:
         if kw in lower:
@@ -92,12 +116,16 @@ def detect_model_format_name(model_id: str) -> str:
     根据模型 ID 关键字推断 API 格式名（纯函数，无副作用）。
 
     返回格式名字符串（对应 unified_api.ApiFormat 枚举值）：
-    'openai_chat' / 'openai_image' / 'gemini_native'。
-    命中绘图/对话规则时返回对应格式名；均未命中时返回 'openai_chat'。
+    'openai_chat' / 'openai_image' / 'gemini_native' / 'fluxport_video'。
+    命中绘图/视频/对话规则时返回对应格式名；均未命中时返回 'openai_chat'。
     """
     lower = (model_id or '').lower().strip()
 
     for kw, fmt in DRAWING_RULES:
+        if kw in lower:
+            return fmt
+
+    for kw, fmt in VIDEO_RULES:
         if kw in lower:
             return fmt
 

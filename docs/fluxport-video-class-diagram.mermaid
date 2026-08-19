@@ -1,0 +1,104 @@
+classDiagram
+    direction LR
+
+    class model_rules {
+        +MODEL_TYPE_DRAWING = "drawing"
+        +MODEL_TYPE_CHAT = "chat"
+        +MODEL_TYPE_VIDEO = "video"  %% 新增
+        +DRAWING_MODEL_RULES
+        +DRAWING_RULES
+        +CHAT_RULES
+        +VIDEO_RULES  %% 新增: grok-imagine-video/veo/kling/runway/pika/sora/wan -> fluxport_video
+        +detect_model_type(model_id) str
+        +detect_model_format_name(model_id) str
+    }
+
+    class gemini_compat {
+        +resolve_image_api_base(api_url) str  %% 语言域uselg -> 媒体域ai-media (图片/视频)
+        +resolve_chat_api_base(api_url) str   %% 新增: 媒体域ai-media -> 语言域uselg (chat/models)
+        +strip_api_version_suffix(api_url) str
+    }
+
+    class ProviderAPI {
+        +fetch_models(api_url, api_key) dict  %% 改: chat域名 + video分支(type='video')
+        +test_api_connection(api_url, api_key) dict  %% 改: chat域名
+        +load_providers() dict
+        +save_providers(providers_data) dict
+    }
+
+    class UnifiedAPIRouter {
+        +chat(messages, options) dict
+        +chat_v2(user_input, options) dict       %% 反推多模态入口
+        +generate_image(prompt, options) dict
+        +generate_image_async(prompt, options) dict
+        +get_task_result(task_id) dict
+        +_resolve_chat_url(api_url) str          %% 改: resolve_chat_api_base
+        +_build_chat_payload(model_id, messages, options) dict  %% 改: stream=False
+        +_detect_model_type(model_id) tuple      %% 改: VIDEO
+        +_resolve_video_model(model_str) tuple   %% 新增: 三段/两段/兜底
+        +_first_available_model(providers, model_type) tuple  %% 改: VIDEO分支
+        +_is_chat_model(model_id) bool
+        +_handle_http_error(response) None
+        +_configured_image_save_dir() str
+    }
+    note for UnifiedAPIRouter "ModelType.VIDEO / ApiFormat.FLUXPORT_VIDEO / _API_FORMAT_MAP 新增；_resolve_chat_model 加视频防污染守卫"
+
+    class VideoAPI {
+        +generate_video_async(prompt, options) dict   %% {"success":true,"task_id":...}
+        +generate_video(prompt, options, _progress_task_id) dict
+        +get_video_task_result(task_id) dict
+        +_resolve_video_url(api_url) str
+        +_build_video_payload(model_id, prompt, options) dict
+        +_map_video_size(resolution, aspect_ratio) str
+        +_poll_video_task(task_data, origin, headers, proxies, _progress_task_id) dict
+        +_extract_video_url(data, origin) tuple
+        +_download_video_to_dir(url, save_dir, headers, proxies) str
+        +_download_video_content(task_id, origin, headers, proxies, save_dir) str
+        +_video_save_dir() str
+        +_make_video_filename(ext) str
+    }
+    note for VideoAPI "模块级 _video_tasks / _video_tasks_lock；新建文件 backend/api/video_api.py"
+
+    class InfiniteCanvasAPI {
+        +generate_video(prompt, config) dict     %% 新增 js_api
+        +generate_video_async(prompt, config) dict
+        +get_video_task_result(task_id) dict
+        +unified_generate_video(prompt, options) dict
+        +unified_generate_video_sync(prompt, options) dict
+        +unified_get_video_task_result(task_id) dict
+    }
+
+    class BackendModel {
+        +id: str
+        +name: str
+        +type: str   %% 'drawing' | 'chat' | 'video'(新增)
+        +enabled: bool
+    }
+
+    class BackendVideoTaskResult {
+        +status: string   %% pending|queued|processing|in_progress|pending_confirmation|done|not_found
+        +result: VideoResult
+    }
+    class VideoResult {
+        +success: bool
+        +video_url: string    %% file:/// 本地
+        +video_path: string
+        +original_url: string
+        +saved_to_disk: bool
+        +task_id: string      %% 上游
+        +width: int
+        +height: int
+        +duration: int
+        +size_bytes: int
+    }
+
+    ProviderAPI ..> model_rules : detect_model_type
+    ProviderAPI ..> gemini_compat : resolve_chat_api_base
+    UnifiedAPIRouter ..> model_rules : detect_model_type/detect_model_format_name
+    UnifiedAPIRouter ..> gemini_compat : resolve_image_api_base/resolve_chat_api_base
+    VideoAPI --> UnifiedAPIRouter : 复用 _resolve_video_model/_handle_http_error/_configured_image_save_dir/_join_origin_path/_get_api_origin/_parse_expires_at/_extract_task_error
+    VideoAPI ..> gemini_compat : resolve_image_api_base
+    InfiniteCanvasAPI --> UnifiedAPIRouter : 组装 unified
+    InfiniteCanvasAPI --> VideoAPI : 组装 video (main.py)
+    BackendModel --> BackendVideoTaskResult : 前端契约预留(backend.d.ts)
+    VideoResult --> BackendVideoTaskResult : result

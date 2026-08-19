@@ -1,0 +1,43 @@
+```mermaid
+sequenceDiagram
+    participant U as 用户
+    participant IX as Interactions
+    participant FS as FlowState
+    participant RE as RunEngine
+    participant NU as NodeRegistry
+    participant BK as Backend
+
+    Note over U,BK: M1 文本连图反推（S3）
+    U->>IX: 拖图到画布空白
+    IX->>FS: addNode('image', x, y, {imageUrl, ratio, status:'done'})
+    U->>IX: 从 image 拉线 → 空白 → 选「文本」
+    IX->>FS: addNode('text') + addEdge(image→text)
+    U->>RE: 选中 text → 命令「描述这张图」→ run(text)
+    RE->>FS: getUpstreamOutputs(text) → {images:[图], texts:[]}
+    RE->>BK: chatV2(命令, {model, images:[data:image...]})
+    BK-->>RE: {text: 描述结果}
+    RE->>FS: updateNode(text, {outputText, status:'done'}) + markUpstreamChanged(text)
+    Note over FS,BK: text 下游 gen 标 stale（不再覆盖 prompt）
+
+    Note over U,BK: M2 图操分家（S4）
+    U->>IX: image 拉线 → 选「生成」→ gen 空壳卡（无大图）
+    U->>RE: run(gen)
+    RE->>FS: getUpstreamOutputs(gen) → images=[原图], texts=[T1,T2]
+    RE->>FS: removeChildren(gen)（删旧 image 产物；锁定保留+stale）
+    RE->>RE: effectivePrompt = params.prompt || texts.join('\\n')
+    par 并发 worker count=N
+        RE->>BK: generateImage(prompt, {referenceImages, count:1})
+        BK-->>RE: imageUrl
+        RE->>FS: createResultImageNode('image', parentId=gen) + trace + edge(gen→image)
+        RE->>FS: updateNode(gen, {lastResultUrl, status:'done'})
+        RE->>RE: historyDrawer.addImage + appendTrace({batchId})
+    end
+
+    Note over U,BK: M3 一键重跑 stale 链（S5）
+    U->>FS: 替换链首 image 图（setNodeImage）→ dirty BFS 标全下游 stale
+    U->>BB: 底栏「运行整条链」
+    BB->>RE: runAll()（默认收集 stale 且可运行）
+    RE->>RE: _topoSort(stale) → [text, gen]（image 跳过）
+    RE->>RE: 顺序 run(text) → run(gen)（上游先跑；失败 break）
+    Note over RE,BK: 整条链按序更新，锁定产物不碰
+```

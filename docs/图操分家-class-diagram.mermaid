@@ -1,0 +1,202 @@
+```mermaid
+classDiagram
+    class FlowNode {
+        +string id
+        +NodeType type
+        +number x
+        +number y
+        +number ratio
+        +NodeStatus status
+        +string title
+        +Record params
+        +string imageUrl
+        +ImageOrigin imageOrigin
+        +string outputText
+        +TextGenHistoryItem[] textHistory
+        +string[] refImages
+        +string error
+        +number lastRunAt
+        +string parentId
+        +GenerationTrace trace
+        +string lastResultUrl
+    }
+    class NodeType {
+        <<enum>>
+        image
+        text
+        gen
+    }
+    class GenParams {
+        +string prompt
+        +string model
+        +string aspectRatio
+        +string resolution
+        +number count
+        +string mode
+    }
+    class TextGenParams {
+        +string instruction
+        +string model
+    }
+    class UpstreamOutputs {
+        +string[] images
+        +TextOutput[] texts
+    }
+    class TextOutput {
+        +string text
+        +string nodeId
+    }
+    class GenerationTrace {
+        +string prompt
+        +string model
+        +string aspectRatio
+        +string resolution
+        +number count
+        +string[] refImageHashes
+        +string[] refImageUrls
+        +string seed
+        +number createdAt
+        +string parentId
+        +string outputType
+    }
+    class FlowContext {
+        +getUpstreams(nodeId) FlowNode[]
+        +getDownstreams(nodeId) FlowNode[]
+        +getUpstreamOutputs(nodeId) UpstreamOutputs
+        +getReferenceImages(nodeId) string[]
+        +getImageModels() Promise~List~
+    }
+    class NodeDefinition {
+        +NodeType type
+        +string label
+        +string defaultTitle
+        +number defaultRatio
+        +Record defaultParams
+        +canRun(node, ctx) boolean|string
+        +buildOptions(node, ctx) Record
+    }
+    class NodeRegistry {
+        +register(def)
+        +get(type) NodeDefinition
+        +list() NodeDefinition[]
+    }
+    class FlowState {
+        +FlowNode[] nodes
+        +FlowEdge[] edges
+        +getUpstreams(id) FlowNode[]
+        +getDownstreams(id) FlowNode[]
+        +getAllDownstreams(id) FlowNode[]
+        +getUpstreamOutputs(id) UpstreamOutputs
+        +getReferenceImages(id) string[]
+        +getChildren(parentId) FlowNode[]
+        +removeChildren(parentId)
+        +canConnect(from, to) string|null
+        +connect(from, to)
+        +insertStep(edgeId) FlowNode
+        +addNode(type, x, y, extra) FlowNode
+        +removeNode(id)
+        +addEdge(from, to, opts) FlowEdge
+        +removeEdge(id)
+        +updateNode(id, patch)
+        +updateNodeParams(id, patch)
+        +setNodeImage(id, url, ratio)
+        +pushTextHistory(id, text)
+        +replaceAll(project)
+        +captureSnapshot() FlowSnapshot
+        +applySnapshot(snap)
+    }
+    class RunEngine {
+        +run(nodeId)
+        +runSelected()
+        +runAll(ids)
+        +runOutpaint(nodeId, opts)
+        +isBusy() boolean
+        -runTextNode(nodeId)
+        -runGenBatch(nodeId)
+        -runOneWorker(...)
+        -createResultImageNode(...)
+        -_isRunnable(id) boolean
+        -_topoSort(ids) string[]
+    }
+    class OutpaintUtil {
+        +RATIO_CANVAS
+        +OUTPAINT_PROMPT_PREFIX
+        +composeOutpaintDataUrl(src, ratio)
+    }
+    class Persistence {
+        +collect() FlowProject
+        +restore(raw) boolean
+        +save(silent)
+        +open()
+        -normalizeNodeV4(raw) FlowNode|null
+    }
+    class HistoryPersist {
+        +hashRef(url) string
+        +buildImageTrace(node, refs, outputType, imageUrl) GenerationTrace
+        +buildTextTrace(node) HistoryEntry
+        +appendTrace(entry)
+        +loadHistory() HistoryEntry[]
+    }
+    class AssetStore {
+        +adopt(key, nodeId, imageUrl, originalPath, meta)
+        +adoptByUrl(url, nodeId, meta, originalPath)
+        +metaFromNode(node) AdoptMeta
+        +recipeFromRecord(rec) AdoptMeta
+        +getAdoptedAssets() AssetAsset[]
+        +isLockedByImageUrl(url) boolean
+        +isLockedNode(nodeId) boolean
+    }
+    class CmdPanel {
+        +sync()
+        -_onSend()
+        -_renderRefs()
+        -_renderChips(node)
+    }
+    class CardView {
+        +renderAll()
+        -buildCard(node) HTMLElement
+        -updateCard(el, node)
+        -_buildGenCard(node) string
+        -_commitTextEdit(nodeId, ta)
+        -_refStrip(node) string
+    }
+    class Interactions {
+        -_dropImage(src, world, ...)
+        -_bindFileInput()
+        -_showCardMenu(x, y, node)
+        -_showNewNodeMenu(...)
+        -_createOutpaintGen(nodeId)
+        -_fillDefaultModelFor(nodeId)
+    }
+    class ComparePanel {
+        -_comparableNodes(ids) FlowNode[]
+        -_cellAdopt(url, nodeId)
+    }
+    class BottomBar {
+        -_comparableIds() string[]
+        +_sync()
+    }
+    class ReproduceService {
+        +reproduceFromNode(nodeId)
+        +reproduceFromHistory(entry)
+        -_createNodeFromTrace(trace, x, y) FlowNode
+    }
+
+    NodeRegistry o-- NodeDefinition
+    NodeDefinition --> FlowContext : canRun/buildOptions(ctx)
+    FlowState ..> UpstreamOutputs : 数据收集
+    RunEngine --> FlowState : 唯一生成入口
+    RunEngine --> NodeRegistry : def.get(type)
+    RunEngine --> OutpaintUtil : outpaint 合成
+    Persistence --> FlowState : collect/restore
+    Persistence ..> FlowProject : v4.0 无迁移
+    HistoryPersist --> Backend : appendTrace/loadHistory
+    AssetStore ..> FlowNode : metaFromNode(trace 优先)
+    CmdPanel --> RunEngine : send
+    CardView --> FlowState : 渲染
+    Interactions --> FlowState : 建节点/连线
+    Interactions --> RunEngine : run
+    ComparePanel --> AssetStore : 采纳/锁定
+    BottomBar --> RunEngine : runAll(stale)
+    ReproduceService --> RunEngine : run()
+```

@@ -1,0 +1,68 @@
+sequenceDiagram
+    autonumber
+    actor User
+    participant FE as 前端(本期不接视频,预留)
+    participant Bridge as main.py InfiniteCanvasAPI
+    participant Video as VideoAPI (video_api.py)
+    participant Unified as UnifiedAPIRouter
+    participant FP as FluxPort api.ai-media.vip
+
+    %% ============ 视频创建 ============
+    User->>FE: (未来)视频节点运行
+    FE->>Bridge: generate_video(prompt, {model, seconds, size, image_url})
+    Bridge->>Video: generate_video_async(prompt, options)
+    Video->>Video: 登记 _video_tasks[local_task_id]={status:pending}
+    Video-->>Bridge: {success:true, task_id: local_task_id}
+    Bridge-->>FE: {success:true, task_id}
+
+    Note over Video: daemon 线程启动同步链路
+    Video->>Unified: _resolve_video_model(model_str)
+    Unified-->>Video: (provider, key, ModelEntry(type=VIDEO))
+    Video->>Video: _resolve_video_url(api_url) -> {media}/v1/videos
+    Video->>Video: _build_video_payload(model_id, prompt, options)
+    Video->>FP: POST /v1/videos (Idempotency-Key: video-<uuid>, Bearer)
+    alt 200/202 回执
+        FP-->>Video: {task_id, status_url, poll_after_ms}
+        loop 轮询 GET status_url (poll_after_ms>=2s)
+            Video->>FP: GET {status_url}
+            FP-->>Video: {status: queued|processing|in_progress, poll_after_ms}
+            Video->>Video: 回写 _video_tasks 中间态(status=processing)
+            Note over Video: 429/网络错误: 退避5-10s; pending_confirmation: 60s后再查(<=10次)
+            Video->>Video: get_video_task_result 可读到 queued/processing
+        end
+        FP-->>Video: {status: completed, output:{video_url}, assets:[{signed_url}]}
+        Video->>Video: _extract_video_url -> (url, kind)
+        alt kind=url (signed_url 免鉴权)
+            Video->>FP: GET signed_url (stream, 分块)
+        else kind=fileuri (需鉴权) 或 下载失败
+            Video->>FP: GET {media}/v1/videos/{task_id}/content (Bearer, Accept: video/mp4)
+        end
+        FP-->>Video: 视频二进制 (video/mp4)
+        Video->>Video: _video_save_dir -> {image_save_path}/videos
+        Video->>Video: 分块落盘 unified_video_<ts>.mp4
+        Video->>Video: _video_tasks[local_task_id]={status:done, result:{success, video_url, video_path,...}}
+    else 创建失败(400/401/403/404/409/413/429/5xx)
+        FP-->>Video: 错误响应
+        Video->>Unified: _handle_http_error(response)
+        Video->>Video: _video_tasks[local_task_id]={status:done, result: AppError.to_dict()}
+    end
+
+    Note over FE,Video: 未来前端轮询
+    FE->>Bridge: get_video_task_result(task_id)
+    Bridge->>Video: get_video_task_result(task_id)
+    Video-->>Bridge: {status: queued|processing|pending_confirmation|done, result}
+    Bridge-->>FE: 同结构
+
+    %% ============ 文本反推(本期打通) ============
+    rect rgb(235, 245, 255)
+        Note over FE,FP: 文本反推(text-gen 反推归位, 本期验证)
+        FE->>Bridge: unified_chat_v2(user_input, {model:'p:k:gpt-5.4', images:[data:image...]})
+        Bridge->>Unified: chat_v2(user_input, options)
+        Unified->>Unified: 组 messages (system + image_url 多模态 content)
+        Unified->>Unified: _resolve_chat_url(api_url) -> resolve_chat_api_base -> {语言域}/v1/chat/completions
+        Unified->>FP: POST https://api.uselg.top/v1/chat/completions (Bearer, stream:false)
+        FP-->>Unified: choices[0].message.content
+        Unified->>Unified: _parse_chat_response
+        Unified-->>Bridge: {success:true, text}
+        Bridge-->>FE: {success:true, text}
+    end

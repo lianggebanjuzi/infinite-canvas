@@ -18,6 +18,7 @@ interface BackendProvider {
   short_name: string;
   enabled: boolean;
   api_url?: string;
+  text_api_url?: string;  // 可选：文本对话 URL（留空则与 api_url 共用；对话/拉模型/测连接优先走此 URL）
   use_proxy?: boolean;
   keys?: BackendProviderKey[];   // 新结构（load_providers 归一化后必有）
   api_key?: string;              // legacy：读兼容，新代码不写
@@ -51,6 +52,10 @@ interface BackendTaskResult {
     original_url?: string;   // file:// 引用（信息性，禁止直接渲染）
     original_urls?: string[];
     saved_to_disk?: boolean; // incremental-3：生成图是否写入用户配置目录（tempfile 兜底为 false）
+    width?: number;          // 原图真实像素宽（PIL im.size；缩略图不算；旧后端缺失）
+    height?: number;         // 原图真实像素高
+    widths?: number[];       // 多图：逐图原图宽（对应 images[]；无法解析为 null）
+    heights?: number[];      // 多图：逐图原图高
     error?: string;
     error_code?: number;
     message?: string;
@@ -62,6 +67,32 @@ interface BackendTaskResult {
 interface BackendTaskCreate {
   success?: boolean;
   task_id: string;
+}
+
+/** 视频任务创建响应（unified_generate_video / generate_video_async）——本期仅类型预留，未接 UI */
+interface BackendVideoTaskCreate {
+  success?: boolean;
+  task_id: string; // 本地 uuid（轮询 get_video_task_result 用）
+}
+
+/** 视频任务查询结果（unified_get_video_task_result）——本期仅类型预留，未接 UI */
+interface BackendVideoTaskResult {
+  status: string;            // not_found | pending | queued | processing | in_progress | pending_confirmation | done
+  result?: {
+    success?: boolean;
+    video_url?: string;      // 本地播放地址 file:/// 绝对路径
+    video_path?: string;     // 本地绝对路径（正斜杠）
+    original_url?: string;   // 远端下载地址（信息性，可能过期）
+    saved_to_disk?: boolean; // 未配置保存路径时 false
+    task_id?: string;        // 上游任务 id（未来 /content 复用）
+    width?: number | null;
+    height?: number | null;
+    duration?: number | null;
+    size_bytes?: number | null;
+    error?: string;
+    error_code?: number;
+    message?: string;
+  };
 }
 
 /** 保存/打开项目通用结果 */

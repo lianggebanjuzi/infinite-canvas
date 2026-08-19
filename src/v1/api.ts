@@ -5,9 +5,17 @@
 import { API } from '../utils/api';
 import { DEFAULT_CHAT_MODEL_KEY } from './nodes/text-gen';
 
+/** FluxPort 的不同 Key 代表不同账号组，模型选项必须保留 Key。 */
+function isFluxPortProvider(provider: BackendProvider): boolean {
+  const urls = [provider.api_url, provider.text_api_url]
+    .filter((url): url is string => typeof url === 'string')
+    .join(' ')
+    .toLowerCase();
+  return urls.includes('api.uselg.top') || urls.includes('api.ai-media.vip');
+}
+
 /** 拉取可用的绘图模型列表（三层遍历：enabled provider → enabled key → enabled drawing model；三段 id）。
- * label 简化：`${供应商短名} - ${模型名}`（去 key 名）；跨 key 重名模型按 `${p.id}:${m.id}` 去重，
- * 只保留第一个 enabled key 条目（id 路由到该 key；后端 keys[] 与三段解析零改动）。 */
+ * 仅 FluxPort 的同名模型保留每个 Key 的独立选项；普通供应商仍折叠重复项。 */
 export async function fetchImageModels(): Promise<Array<{ id: string; name: string }>> {
   try {
     const result = (await API.loadProviders()) as BackendProviderList;
@@ -17,16 +25,18 @@ export async function fetchImageModels(): Promise<Array<{ id: string; name: stri
     providers.forEach(p => {
       if (!p.enabled) return;
       const displayName = p.short_name || p.name.slice(0, 6);
+      const fluxPortMode = isFluxPortProvider(p);
       (p.keys || []).forEach(k => {
         if (k.enabled === false) return;
+        const keyLabel = (k.name || 'key').trim();
         (k.models || [])
           .filter(m => m.enabled !== false && m.type === 'drawing')
           .forEach(m => {
             const dedupeKey = `${p.id}:${m.id}`;
-            if (seen.has(dedupeKey)) return; // 跨 key 重名去重：保留第一个 enabled key 条目
+            if (!fluxPortMode && seen.has(dedupeKey)) return;
             seen.add(dedupeKey);
-            // 三段式完整 id：${providerId}:${keyId}:${modelId}；label 去 key 名
-            models.push({ id: `${p.id}:${k.id}:${m.id}`, name: `${displayName} - ${m.name}` });
+            const name = fluxPortMode ? `${displayName} · ${keyLabel} - ${m.name}` : `${displayName} - ${m.name}`;
+            models.push({ id: `${p.id}:${k.id}:${m.id}`, name });
           });
       });
     });
@@ -37,7 +47,7 @@ export async function fetchImageModels(): Promise<Array<{ id: string; name: stri
   }
 }
 
-/** 拉取可用的对话模型列表（text-gen 专用：与 fetchImageModels 同构，过滤 type==='chat'；label 简化 + 重名去重） */
+/** 拉取可用的对话模型列表（text-gen 专用；仅 FluxPort 保留同名模型的 Key 路由）。 */
 export async function fetchChatModels(): Promise<Array<{ id: string; name: string }>> {
   try {
     const result = (await API.loadProviders()) as BackendProviderList;
@@ -47,15 +57,18 @@ export async function fetchChatModels(): Promise<Array<{ id: string; name: strin
     providers.forEach(p => {
       if (!p.enabled) return;
       const displayName = p.short_name || p.name.slice(0, 6);
+      const fluxPortMode = isFluxPortProvider(p);
       (p.keys || []).forEach(k => {
         if (k.enabled === false) return;
+        const keyLabel = (k.name || 'key').trim();
         (k.models || [])
           .filter(m => m.enabled !== false && m.type === 'chat')
           .forEach(m => {
             const dedupeKey = `${p.id}:${m.id}`;
-            if (seen.has(dedupeKey)) return; // 跨 key 重名去重：保留第一个 enabled key 条目
+            if (!fluxPortMode && seen.has(dedupeKey)) return;
             seen.add(dedupeKey);
-            models.push({ id: `${p.id}:${k.id}:${m.id}`, name: `${displayName} - ${m.name}` });
+            const name = fluxPortMode ? `${displayName} · ${keyLabel} - ${m.name}` : `${displayName} - ${m.name}`;
+            models.push({ id: `${p.id}:${k.id}:${m.id}`, name });
           });
       });
     });
@@ -106,8 +119,8 @@ export async function resolveOutpaintModel(node: FlowNode | null | undefined): P
 
 /**
  * 宽容匹配模型 id（multi-key）：
- * 三段 id 精确命中；旧两段 id（provider:model）在已过滤的模型列表中找同名模型并返回三段 id；
- * 未命中返回 ''。任何写回一律三段（惰性重写，旧 localStorage 逐步自愈）。
+ * 三段 id 精确命中；旧两段 id 只在唯一匹配某把 Key 时才转换为三段，避免猜错账号组。
+ * 未命中或有歧义时返回 ''。任何写回一律三段（惰性重写，旧 localStorage 逐步自愈）。
  */
 function matchModelId(models: Array<{ id: string }>, saved: string): string {
   if (!saved) return '';
@@ -115,8 +128,8 @@ function matchModelId(models: Array<{ id: string }>, saved: string): string {
   const parts = saved.split(':');
   if (parts.length === 2) {
     const [pid, mid] = parts;
-    const hit = models.find(m => m.id.startsWith(`${pid}:`) && m.id.endsWith(`:${mid}`));
-    if (hit) return hit.id;
+    const hits = models.filter(m => m.id.startsWith(`${pid}:`) && m.id.endsWith(`:${mid}`));
+    if (hits.length === 1) return hits[0].id;
   }
   return '';
 }

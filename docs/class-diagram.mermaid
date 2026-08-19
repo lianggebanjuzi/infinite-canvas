@@ -1,74 +1,119 @@
 classDiagram
-    class FlowNode {
-        +id: string
-        +type: NodeType
-        +x: number
-        +y: number
-        +ratio: number
-        +status: NodeStatus
-        +title: string
-        +params: Record~string,unknown~
-        +imageUrl: string | null
-        +refImages: string[]
-        +error: string | null
-        +lastRunAt: number | null
-    }
-
-    class FlowEdge {
-        +id: string
-        +from: string
-        +to: string
-    }
-
-    class NodeDefinition {
-        +type: NodeType
-        +label: string
-        +defaultTitle: string
-        +defaultRatio: number
-        +defaultParams: Record~string,unknown~
-        +canRun(node, ctx) boolean | string
-        +buildOptions(node, ctx) Record~string,unknown~
-    }
-
-    class FlowContext {
-        +getUpstreams(nodeId) FlowNode[]
-        +getDownstreams(nodeId) FlowNode[]
-        +getReferenceImages(nodeId) string[]
-        +getImageModels() Promise
-    }
-
-    class FlowState {
-        +nodes: FlowNode[]
-        +edges: FlowEdge[]
-        +addNode(type, x, y, extra) FlowNode
-        +getReferenceImages(id) string[]
-        +addRefImage(id, url) void
-        +removeRefImage(id, url) void
-        +canConnect(from, to) string | null
-        +_wouldCycle(from, to) boolean
-        +addEdge(from, to) FlowEdge | null
-        +insertStep(edgeId) FlowNode | null
-        +removeEdge(id) void
-    }
-
-    class RunEngine {
-        +run(nodeId) Promise
-        +runSelected() Promise
-        +runAll(ids?) Promise
-    }
-
-    class Persistence {
-        +collect() FlowProject
-        +restore(raw) boolean
-        +migrateNode(raw) FlowNode | null
-        +save() Promise
-        +open() Promise
-    }
-
-    FlowState "1" *-- "0..N" FlowNode : 持有
-    FlowState "1" *-- "0..N" FlowEdge : 持有
-    FlowContext --> FlowState : 读取
-    RunEngine --> FlowState : 读写
-    RunEngine --> NodeDefinition : canRun/buildOptions
-    Persistence --> FlowState : replaceAll
-    FlowNode ..> NodeDefinition : type 映射到定义
+  class FlowNode {
+    +string id
+    +NodeType type
+    +number x
+    +number y
+    +number ratio
+    +NodeStatus status
+    +string title
+    +Record~string, unknown~ params
+    +string imageUrl
+    +ImageOrigin imageOrigin
+    +string outputText
+    +TextGenHistoryItem[] textHistory
+    +string[] refImages
+    +string error
+    +number lastRunAt
+    +string parentId
+    +GenerationTrace trace
+    +boolean isAsset
+  }
+  class FlowEdge {
+    +string id
+    +string from
+    +string to
+  }
+  class FlowState {
+    +FlowNode[] nodes
+    +FlowEdge[] edges
+    +getNode(id)
+    +getUpstreams(id)
+    +getDownstreams(id)
+    +getAllDownstreams(id)
+    +getUpstreamTextPrompts(id)
+    +isAsset(id)
+    +isAssetNode(node)
+    +getReferenceImages(id)
+    +canConnect(from, to)
+    +connect(from, to)
+    +addEdge(from, to, opts)
+    +insertStep(edgeId)
+    +addNode(type, x, y, extra)
+    +removeNode(id)
+    +pushTextHistory(id, text)
+    +removeChildren(parentId)
+  }
+  class RunEngine {
+    -busy
+    +run(nodeId)
+    +runSelected()
+    +runAll(ids)
+    +runOutpaint(nodeId, opts)
+    +composeImagePrompt(nodeId)
+    -runTextGen(nodeId)
+    -runBatch(nodeId)
+    -runOneWorker(...)
+    -_writeBackToSelf(genId, imageUrl, origin, batchId, outputType)
+    -createResultCard(...)
+  }
+  class NodeDefinition {
+    +NodeType type
+    +canRun(node, ctx)
+    +buildOptions(node, ctx)
+    +creatable
+  }
+  class ImageGenDef
+  class TextGenDef
+  class NodeRegistry {
+    +register(def)
+    +get(type)
+    +list()
+  }
+  class CmdPanel {
+    +sync()
+    -_openImageModelMenu(btn, node)
+    -_renderChips(node)
+    -_refillHistoryItem(nodeId, item)
+    -_renderRefs()
+  }
+  class CardView {
+    +renderAll()
+    -buildCard(node)
+    -updateCard(el, node)
+    -_commitTextEdit(nodeId, ta)
+    -_enterTextEdit(nodeId)
+  }
+  class Interactions {
+    -_dropImage(src, world, screenX, screenY)
+    -_showNewNodeMenu(x, y, fromId)
+    -_showCardMenu(x, y, node)
+    -_bindFileInput()
+    -_finishConnect(e)
+  }
+  class DirtyMarker {
+    +markUpstreamChanged(fromId)
+    +markStale(nodeId)
+    +markUpstreamChangedExcept(fromId, exceptIds)
+  }
+  class Persistence {
+    +collect()
+    +restore(raw)
+    -migrateNode(raw)
+  }
+  FlowState "1" *-- "many" FlowNode
+  FlowState "1" *-- "many" FlowEdge
+  ImageGenDef ..|> NodeDefinition : implements
+  TextGenDef ..|> NodeDefinition : implements
+  NodeRegistry o-- NodeDefinition
+  RunEngine ..> FlowState : uses
+  RunEngine ..> DirtyMarker : uses
+  RunEngine ..> NodeRegistry : uses
+  CmdPanel ..> FlowState : uses
+  CmdPanel ..> RunEngine : uses
+  CardView ..> FlowState : uses
+  CardView ..> DirtyMarker : uses
+  Interactions ..> FlowState : uses
+  Interactions ..> CardView : uses
+  Interactions ..> NodeRegistry : uses
+  Persistence ..> FlowState : uses

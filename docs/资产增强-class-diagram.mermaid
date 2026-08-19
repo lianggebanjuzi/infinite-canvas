@@ -1,0 +1,81 @@
+classDiagram
+    class ImageAssetRecord {
+        +string key
+        +string nodeId
+        +string imageUrl
+        +string thumbnail
+        +string originalPath
+        +string[] projectName
+        +boolean adopted
+        +boolean locked
+        +string[] tags
+        +string category
+        +number updatedAt
+        +string prompt
+        +string model
+        +string aspectRatio
+        +string resolution
+        +number count
+        +string[] refImageUrls
+        +string[] refImageHashes
+        +string outputType
+        +number createdAt
+    }
+    class HistoryEntry {
+        +string kind
+        +string nodeId
+        +string prompt
+        +string model
+        +number createdAt
+        +string batchId
+    }
+    class AdoptMeta {
+        +string prompt
+        +string model
+        +string aspectRatio
+        +string resolution
+        +number count
+        +string[] refImageUrls
+        +string[] refImageHashes
+        +string outputType
+        +number createdAt
+    }
+    class AssetStore {
+        +adopt(key, nodeId, imageUrl, originalPath, meta)
+        +adoptByUrl(url, nodeId, meta, originalPath)
+        +getAdoptedAssets() AssetAsset[]
+        +metaFromNode(node) AdoptMeta
+        +recipeFromRecord(rec) AdoptMeta
+        -_applyRecipe(rec, meta)
+        -_normalize(r) ImageAssetRecord
+    }
+    class HistoryPersist {
+        +appendTrace(entry)
+        +loadHistory() HistoryEntry[]
+        +buildImageTrace(node, refs, outputType, imageUrl) GenerationTrace
+    }
+    class HistoryDrawer {
+        +addImage(src, meta)
+        +loadFromHistory(entries)
+        +setView(view)
+        -_buildDisplay(items) HistoryDisplayItem[]
+        -_renderBatchCard(group)
+    }
+    class AssetDrawer {
+        -_renderCard(item)
+        -_toEntry(item) HistoryEntry
+    }
+    class RunEngine {
+        -runBatch(nodeId)
+        -runOutpaint(nodeId, opts)
+        -runOneWorker(..., batchId)
+        -createResultCard(..., trace)
+        -_writeBackToSelf(..., batchId)
+    }
+    AssetStore --> ImageAssetRecord : manages
+    AssetStore ..> AdoptMeta : 记录配方 = 持久化真相
+    HistoryPersist --> HistoryEntry : append-only jsonl
+    HistoryDrawer --> HistoryEntry : 读侧分组（batchId）
+    AssetDrawer --> AssetStore : 读配方（record 优先）
+    RunEngine --> HistoryPersist : appendTrace(batchId)
+    RunEngine --> HistoryDrawer : addImage(batchId)

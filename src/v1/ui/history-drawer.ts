@@ -8,13 +8,15 @@
 // 生成图自动加入（addImage 带搜索元数据）；拖拽缩略图到画布触发 A4 语义（由 interactions 处理落点）。
 // R3 批次分组：写侧 batchId（run-engine 生成，jsonl 行携带）→ 读侧 view='batch' 按 batchId 分组为批次卡；
 //   time 视图保持现有单图流水；无 batchId 旧行在 batch 视图下按单图回退展示；text 不入批次（text tab 隐藏视图切换）。
+// 2026-08-19 用户拍板：批次视图（按批次/按时间切换 + 批次卡）已移除，读侧不再分组，历史图库恒按时间平铺；
+//   batchId 写侧/数据层保留（addImage meta、jsonl 行、_toEntry 透传），向后兼容，未来可能恢复读侧分组。
 // 循环依赖注意（§8）：批次卡「查看大图」import openImageModal（来自 canvas/card-view），形成延迟使用型环
 //   history-drawer → card-view → run-engine → history-drawer；Vite/Rollup 对仅运行时调用安全（asset-drawer 同款）。
 
 import { flowState } from '../state/flow-state';
 import { assetStore } from '../asset-store';
-import { reproduceService } from '../reproduce';
 import { openImageModal } from '../canvas/card-view';
+import { showToast } from './toast';
 
 /** 图库条目（image/text 分区展示） */
 interface HistoryItem {
@@ -34,6 +36,8 @@ interface HistoryItem {
   originalPath?: string;    // 原图本地绝对路径（查看大图按需加载用）
   originalUrl?: string;     // file:// 引用（备用）
   batchId?: string;         // R3：一次生成的批次号（同批共用一个；旧行缺失 → batch 视图按单图回退）
+  width?: number;           // 原图真实像素宽（PIL im.size；旧行缺失 → 展示回退 resolution+aspectRatio）
+  height?: number;          // 原图真实像素高
   text?: string; // 文本记录：无图，展示 outputText 片段
 }
 
@@ -53,12 +57,9 @@ export interface HistoryImageMeta {
   originalPath?: string;    // 原图本地绝对路径
   originalUrl?: string;     // file:// 引用（备用）
   batchId?: string;         // R3：批次号（同批全部成功图共用）
+  width?: number;           // 原图真实像素宽
+  height?: number;          // 原图真实像素高
 }
-
-/** R3 展示项：batch 视图下 single（无 batchId 旧行 / time 视图全部）| batch（同 batchId 组） */
-type HistoryDisplayItem =
-  | { kind: 'single'; item: HistoryItem }
-  | { kind: 'batch'; batchId: string; items: HistoryItem[] };
 
 const ICON_CHECK = '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>';
 const ICON_LOCK = '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>';
@@ -72,8 +73,6 @@ class HistoryDrawer {
   private searchInput: HTMLInputElement | null = null;
   private emptyEl: HTMLElement | null = null;
   private tab: 'image' | 'text' = 'image';
-  /** R3 历史视图：batch（按批次分组，默认）/ time（按时间平铺）；text 不入批次，切到 text tab 时隐藏控件 */
-  private view: 'batch' | 'time' = 'batch';
   private query = '';
   private unsubscribeAsset: (() => void) | null = null;
   private mutex: (() => void) | null = null;
@@ -103,18 +102,6 @@ class HistoryDrawer {
       });
     });
 
-    // R3 视图切换（按批次 / 按时间；默认按批次，Q1 拍板）
-    const viewWrap = document.getElementById('history-view');
-    viewWrap?.querySelectorAll('.history-view-btn').forEach(btn => {
-      btn.addEventListener('click', () => {
-        const view = ((btn as HTMLElement).dataset.view) as 'batch' | 'time' | undefined;
-        if (!view) return;
-        this.setView(view);
-      });
-    });
-    this._syncViewButtons();
-    this._syncViewVisibility();
-
     // 订阅 AssetStore：采纳/锁定变更 → 图库只读角标即时刷新（X1 同步之一）
     this.unsubscribeAsset = assetStore.subscribe(() => this.render());
 
@@ -126,7 +113,7 @@ class HistoryDrawer {
     this.mutex = fn;
   }
 
-  /** 生成图自动入列（带搜索/复现元数据；展示图=缩略图 + 原图引用 + R3 batchId） */
+  /** 生成图自动入列（带搜索/复现元数据；展示图=缩略图 + 原图引用 + R3 batchId + 真实像素） */
   addImage(src: string, meta: HistoryImageMeta = {}): void {
     if (!src) return;
     this.items.unshift({
@@ -146,6 +133,8 @@ class HistoryDrawer {
       originalPath: meta.originalPath,
       originalUrl: meta.originalUrl,
       batchId: meta.batchId,
+      width: meta.width,
+      height: meta.height,
     });
     this.render();
     if (!this.open) this.openDrawer(true);
@@ -181,6 +170,8 @@ class HistoryDrawer {
           originalPath: typeof e.originalPath === 'string' ? e.originalPath : undefined,
           originalUrl: typeof e.originalUrl === 'string' ? e.originalUrl : undefined,
           batchId: typeof e.batchId === 'string' ? e.batchId : undefined, // R3：旧行缺失 → undefined 按单图回退
+          width: typeof e.imageWidth === 'number' && e.imageWidth > 0 ? e.imageWidth : undefined,
+          height: typeof e.imageHeight === 'number' && e.imageHeight > 0 ? e.imageHeight : undefined,
         });
       } else {
         resolved.push({ src: '', timestamp: e.createdAt, kind: 'text', text: e.outputText || '' });
@@ -198,30 +189,7 @@ class HistoryDrawer {
       const el = btn as HTMLElement;
       el.classList.toggle('active', el.dataset.tab === tab);
     });
-    // R3：text 不入批次 → 切到文本 tab 时隐藏视图切换控件
-    this._syncViewVisibility();
     this.render();
-  }
-
-  /** R3：切换历史视图（batch 按批次分组 / time 按时间平铺；text tab 下视图不生效） */
-  setView(view: 'batch' | 'time'): void {
-    if (this.view === view) return;
-    this.view = view;
-    this._syncViewButtons();
-    this.render();
-  }
-
-  /** 同步视图切换按钮 active 态 */
-  private _syncViewButtons(): void {
-    document.querySelectorAll('.history-view-btn').forEach(btn => {
-      const el = btn as HTMLElement;
-      el.classList.toggle('active', el.dataset.view === this.view);
-    });
-  }
-
-  /** 视图切换控件显隐：text tab（text 不入批次）隐藏；image tab 显示 */
-  private _syncViewVisibility(): void {
-    document.getElementById('history-view')?.classList.toggle('hidden', this.tab === 'text');
   }
 
   setQuery(q: string): void {
@@ -245,14 +213,13 @@ class HistoryDrawer {
     this.drawer?.classList.toggle('open', open);
   }
 
-  /** 过滤 + 渲染（tab / 搜索 / R3 批次分组 / 采纳锁定角标 / hover 动作；分批插入，避免大量大图一次阻塞 JS 主线程） */
+  /** 过滤 + 渲染（tab / 搜索 / 采纳锁定角标 / hover 动作；恒按时间平铺；分批插入，避免大量大图一次阻塞 JS 主线程） */
   private render(): void {
     this._syncTabCounts();
     if (!this.grid) return;
-    const filtered = this._filtered();
-    const display = this._buildDisplay(filtered);
+    const items = this._filtered();
 
-    if (display.length === 0) {
+    if (items.length === 0) {
       this.renderSeq++; // 作废在途分批渲染
       this.grid.innerHTML = '';
       if (this.emptyEl) {
@@ -267,26 +234,24 @@ class HistoryDrawer {
     this.renderSeq++;
     const seq = this.renderSeq;
     this.grid.innerHTML = '';
-    this._renderBatch(display, 0, seq);
+    this._renderBatch(items, 0, seq);
   }
 
-  /** 分批渲染（display 项）：每批 BATCH 项，requestIdleCallback 空闲时续批；seq 失配即被新渲染取代 */
-  private _renderBatch(display: HistoryDisplayItem[], index: number, seq: number): void {
+  /** 分批渲染（HistoryItem 平铺）：每批 BATCH 项，requestIdleCallback 空闲时续批；seq 失配即被新渲染取代 */
+  private _renderBatch(items: HistoryItem[], index: number, seq: number): void {
     if (seq !== this.renderSeq || !this.grid) return;
     const BATCH = 12;
-    const end = Math.min(index + BATCH, display.length);
+    const end = Math.min(index + BATCH, items.length);
     for (let i = index; i < end; i++) {
-      const d = display[i];
-      if (d.kind === 'batch') {
-        this._renderBatchCard(d);
-      } else if (d.item.kind === 'text') {
-        this._renderTextItem(d.item);
+      const item = items[i];
+      if (item.kind === 'text') {
+        this._renderTextItem(item);
       } else {
-        this._renderImageItem(d.item);
+        this._renderImageItem(item);
       }
     }
-    if (end < display.length) {
-      this._scheduleIdle(() => this._renderBatch(display, end, seq));
+    if (end < items.length) {
+      this._scheduleIdle(() => this._renderBatch(items, end, seq));
     }
   }
 
@@ -319,43 +284,9 @@ class HistoryDrawer {
   }
 
   /**
-   * R3：把过滤后的流水项转换为展示项。
-   * image tab + view==='batch'：按 batchId 分组（Map，无 batchId → single）；输出按组内最新时间戳倒序。
-   * text tab / view==='time'：全部 single（保持现有平铺渲染路径，零改动）。
+   * R3 批次分组已移除（2026-08-19 用户拍板）：读侧不再按 batchId 分组，
+   * 过滤结果恒按时间平铺渲染（text 卡照常显示）。batchId 仅在数据层保留（_toEntry 透传，向后兼容）。
    */
-  private _buildDisplay(items: HistoryItem[]): HistoryDisplayItem[] {
-    if (this.tab === 'text' || this.view !== 'batch') {
-      return items.map(item => ({ kind: 'single' as const, item }));
-    }
-    const groups = new Map<string, HistoryItem[]>();
-    items.forEach(item => {
-      if (item.batchId) {
-        const arr = groups.get(item.batchId);
-        if (arr) arr.push(item);
-        else groups.set(item.batchId, [item]);
-      }
-    });
-    const display: HistoryDisplayItem[] = [];
-    groups.forEach((groupItems, batchId) => {
-      display.push({ kind: 'batch', batchId, items: groupItems });
-    });
-    items.forEach(item => {
-      if (!item.batchId) display.push({ kind: 'single', item });
-    });
-    // 按组内最新时间戳倒序（single = 自身时间戳；batch = 组内最新）
-    display.sort((a, b) => {
-      const ta = a.kind === 'batch' ? this._maxTs(a.items) : a.item.timestamp;
-      const tb = b.kind === 'batch' ? this._maxTs(b.items) : b.item.timestamp;
-      return tb - ta;
-    });
-    return display;
-  }
-
-  /** 组内最新时间戳 */
-  private _maxTs(items: HistoryItem[]): number {
-    return items.reduce((max, i) => Math.max(max, i.timestamp), 0);
-  }
-
   private _syncTabCounts(): void {
     const imageCount = this.items.filter(i => i.kind === 'image').length;
     const textCount = this.items.filter(i => i.kind === 'text').length;
@@ -377,25 +308,27 @@ class HistoryDrawer {
     this.grid.appendChild(div);
   }
 
-  /** 成图卡：缩略图 + 只读角标（S2，采纳/锁定态仍提示但不可点）+ hover 动作（仅复现，S1）+ 拖入手势 */
+  /** 成图卡：图片完整显示（不裁切）+ 只读角标（S2）+ 底部常驻按钮行（复制提示词；无 prompt 不渲染）+ 拖入手势 + 点击查看大图 */
   private _renderImageItem(item: HistoryItem): void {
     if (!this.grid) return;
     const div = document.createElement('div');
     div.className = 'history-thumb';
     div.draggable = true;
-    div.style.backgroundImage = `url('${item.src.replace(/'/g, "\\'")}')`;
     div.title = new Date(item.timestamp).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
 
     const adopted = item.src ? assetStore.isAdoptedByImageUrl(item.src) : false;
     const locked = item.src ? assetStore.isLockedByImageUrl(item.src) : false;
+    const hasPrompt = !!(item.prompt || '').trim();
     div.innerHTML = `
+      <div class="ht-media"><img class="ht-img" src="${escapeAttr(item.src)}" alt="" draggable="false" loading="lazy"></div>
       <div class="ht-badges">
         ${adopted ? `<span class="ht-badge adopt" title="已采纳">${ICON_CHECK}</span>` : ''}
         ${locked ? `<span class="ht-badge lock" title="已锁定">${ICON_LOCK}</span>` : ''}
       </div>
-      <div class="ht-actions">
-        <button class="ht-act" data-act="reproduce">复现</button>
-      </div>`;
+      ${hasPrompt ? `
+      <div class="ht-actions ht-actions-static">
+        <button class="ht-act" data-act="copy">复制提示词</button>
+      </div>` : ''}`;
 
     // 拖入手势（A4 语义保留）
     div.addEventListener('dragstart', (e: DragEvent) => {
@@ -405,16 +338,24 @@ class HistoryDrawer {
     });
     div.addEventListener('dragend', () => { div.style.opacity = ''; });
 
-    // hover 动作：仅复现（A6，采纳/锁定已按 S1 移除；角标只读，点击卡片本体不触发动作）
+    // 底部按钮行：复制提示词（常驻可见，非 hover；stopPropagation 防误触拖拽/查看大图）
     div.addEventListener('click', (e: MouseEvent) => {
       const btn = (e.target as Element).closest('.ht-act') as HTMLElement | null;
-      if (!btn) return;
+      if (btn) {
+        e.preventDefault();
+        e.stopPropagation();
+        const act = btn.dataset.act || '';
+        if (act === 'copy') {
+          this._copyPrompt(item.prompt || '');
+        }
+        return;
+      }
+      // 点击图片本体 → 查看大图（携带 info：模型/时间/比例/分辨率/提示词）
       e.preventDefault();
       e.stopPropagation();
-      if ((btn.dataset.act || '') === 'reproduce') {
-        // A6：图库复现（trace 从 HistoryEntry 构造）
-        void reproduceService.reproduceFromHistory(this._toEntry(item));
-      }
+      void openImageModal(item.src, item.originalPath ? { path: item.originalPath } : null,
+        { width: item.width, height: item.height },
+        { model: item.model, createdAt: item.timestamp, aspectRatio: item.aspectRatio, resolution: item.resolution, prompt: item.prompt });
     });
 
     this.grid.appendChild(div);
@@ -427,101 +368,40 @@ class HistoryDrawer {
     return item ? this._toEntry(item) : null;
   }
 
-  /**
-   * R3 批次卡：同 batchId 的成功图合并为一张卡。
-   * 缩略图组（≤4 张 +「+N」角标）、右上成功计数 x/y（x=组内行数，y=items[0].count ?? x）、
-   * 配方摘要（首行 prompt 截断 + model · 比例）；逐缩略图保留 拖拽 / hover 复现 / 点击查看大图。
-   */
-  private _renderBatchCard(group: { batchId: string; items: HistoryItem[] }): void {
-    if (!this.grid) return;
-    const items = group.items;
-    const first = items[0];
-    const done = items.length;
-    const total = typeof first?.count === 'number' && first.count > 0 ? first.count : done;
-    const visible = items.slice(0, 4);
-    const extra = items.length - visible.length;
-    const prompt = (first?.prompt || '').trim();
-    const chipsHtml = this._batchChips(first);
-    const maxTs = this._maxTs(items);
-
-    const div = document.createElement('div');
-    div.className = `history-batch history-batch-c${Math.min(4, visible.length)}`;
-    div.title = `批次 ${group.batchId}`;
-    div.innerHTML = `
-      <div class="history-batch-head">
-        <span class="history-batch-count" title="成功 ${done}/${total}">${done}/${total}</span>
-        <span class="history-batch-time">${this._fmtTime(maxTs)}</span>
-      </div>
-      <div class="history-batch-thumbs">
-        ${visible.map(item => `
-          <div class="history-batch-thumb" style="background-image:url('${escapeUrl(item.src)}')" title="${escapeAttr(prompt || '查看大图')}"></div>
-        `).join('')}
-        ${extra > 0 ? `<div class="history-batch-more">+${extra}</div>` : ''}
-      </div>
-      <div class="history-batch-recipe">
-        <div class="history-batch-prompt"${prompt ? ` title="${escapeAttr(prompt)}"` : ''}>${escapeHtml(prompt || '无提示词')}</div>
-        ${chipsHtml ? `<div class="history-batch-chips">${chipsHtml}</div>` : ''}
-      </div>
-    `;
-
-    // 逐缩略图：拖拽 / hover 复现 / 点击查看大图（分组不损失单图能力，A3）
-    const thumbEls = div.querySelectorAll('.history-batch-thumb');
-    visible.forEach((item, idx) => {
-      const el = thumbEls[idx] as HTMLElement | undefined;
-      if (!el) return;
-      el.draggable = true;
-      // 拖入画布（复用 application/history-image 语义）
-      el.addEventListener('dragstart', (e: DragEvent) => {
-        e.dataTransfer!.setData('application/history-image', item.src);
-        e.dataTransfer!.setData('text/plain', item.src);
-        el.style.opacity = '0.6';
-      });
-      el.addEventListener('dragend', () => { el.style.opacity = ''; });
-      // 点击查看大图（openImageModal：先缩略图 + 按需加载原图；import 见文件头循环依赖说明）
-      el.addEventListener('click', (e: MouseEvent) => {
-        e.preventDefault();
-        e.stopPropagation();
-        void openImageModal(item.src, item.originalPath ? { path: item.originalPath } : null);
-      });
-      // hover 复现：逐张复现（参数为该图 trace）
-      const repro = document.createElement('button');
-      repro.className = 'history-batch-repro';
-      repro.textContent = '复现';
-      repro.title = '复现该图';
-      repro.addEventListener('mousedown', (e: MouseEvent) => e.stopPropagation()); // 防拖动误触发
-      repro.addEventListener('click', (e: MouseEvent) => {
-        e.preventDefault();
-        e.stopPropagation();
-        void reproduceService.reproduceFromHistory(this._toEntry(item));
-      });
-      el.appendChild(repro);
-    });
-
-    this.grid.appendChild(div);
+  /** 复制提示词（Clipboard API 优先，pywebview 旧内核/非安全上下文无 API 时兜底 execCommand；成功 toast） */
+  private _copyPrompt(prompt: string): void {
+    const text = (prompt || '').trim();
+    if (!text) { showToast('无提示词可复制', false); return; }
+    const done = () => showToast('提示词已复制');
+    const fail = () => showToast('复制失败', false);
+    if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+      void navigator.clipboard.writeText(text).then(done, fail);
+      return;
+    }
+    try {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.position = 'fixed';
+      ta.style.top = '-9999px';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.focus();
+      ta.select();
+      let copied = false;
+      try {
+        copied = document.execCommand('copy'); // WebView2 仍支持；返回 false 表示复制被拒
+      } finally {
+        // 无论如何都从 DOM 移除，避免残留隐藏 textarea
+        document.body.removeChild(ta);
+      }
+      if (copied) done();
+      else fail();
+    } catch {
+      fail();
+    }
   }
 
-  /** 批次卡配方摘要 chips（model · 比例；空则返回 ''） */
-  private _batchChips(item: HistoryItem | undefined): string {
-    if (!item) return '';
-    const model = this._shortModel(item.model || '');
-    const ratio = item.aspectRatio || '';
-    return [model, ratio]
-      .filter(Boolean)
-      .map(s => `<span class="history-batch-chip">${escapeHtml(s)}</span>`)
-      .join('');
-  }
-
-  /** 模型短名（"provider:key:model" → "model"） */
-  private _shortModel(modelId: string): string {
-    return modelId.split(':').pop() || modelId || '';
-  }
-
-  /** 时间短格式（HH:mm） */
-  private _fmtTime(ts: number): string {
-    return new Date(ts).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
-  }
-
-  /** HistoryItem → HistoryEntry（图库复现用；会话内条目携带完整参数 + 缩略图/原图引用 + R3 batchId 保真） */
+  /** HistoryItem → HistoryEntry（资产库复现 S9 经 getEntryByImageUrl 反查用；会话内条目携带完整参数 + 缩略图/原图引用 + R3 batchId + 真实像素） */
   private _toEntry(item: HistoryItem): HistoryEntry {
     return {
       kind: 'image',
@@ -542,18 +422,10 @@ class HistoryDrawer {
       parentId: null,
       outputType: (item.outputType === 'img2img' || item.outputType === 'outpaint' ? item.outputType : 'txt2img') as 'txt2img' | 'img2img' | 'outpaint',
       ...(item.batchId ? { batchId: item.batchId } : {}),
+      ...(typeof item.width === 'number' && item.width > 0 ? { imageWidth: item.width } : {}),
+      ...(typeof item.height === 'number' && item.height > 0 ? { imageHeight: item.height } : {}),
     };
   }
-}
-
-/** HTML 转义（prompt/模型名展示用，防注入） */
-function escapeHtml(text: string): string {
-  return String(text)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
 }
 
 /** 属性值转义（title 内嵌用户文本用） */
@@ -562,11 +434,6 @@ function escapeAttr(text: string): string {
     .replace(/&/g, '&amp;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;');
-}
-
-/** URL 转义（background-image 内嵌 dataURL 用） */
-function escapeUrl(url: string): string {
-  return String(url).replace(/'/g, "\\'").replace(/"/g, '\\"');
 }
 
 export const historyDrawer = new HistoryDrawer();

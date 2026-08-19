@@ -103,6 +103,21 @@ def resolve_image_api_base(api_url):
     return strip_api_version_suffix(raw)
 
 
+def resolve_chat_api_base(api_url):
+    """
+    chat / 模型列表域归一（resolve_image_api_base 的反向）：
+    FluxPort 媒体域 api.ai-media.vip → 语言域 https://api.uselg.top/v1（对话与 /models 必须走语言域）。
+    其它域名原样返回（保留原 api_url，含 /v1 路径段；由调用方按需剥离/拼接）。
+    """
+    raw = (api_url or '').strip()
+    if not raw:
+        return raw
+    parsed = urlparse(raw)
+    if parsed.hostname and parsed.hostname.lower() == 'api.ai-media.vip':
+        return 'https://api.uselg.top/v1'
+    return raw.rstrip('/')
+
+
 def strip_api_version_suffix(api_url):
     """
     去掉 api_url 末尾的 /v1beta 或 /v1 路径段（最长优先，避免 /v1beta 被 /v1 误伤），

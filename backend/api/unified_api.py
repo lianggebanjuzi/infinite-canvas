@@ -32,6 +32,7 @@ from backend.api.gemini_compat import (
     nearest_aspect_ratio,
     normalize_gemini_aspect_ratio,
     normalize_gemini_image_size,
+    resolve_chat_api_base,
     resolve_image_api_base,
 )
 from backend.api.model_rules import (
@@ -80,6 +81,7 @@ _tasks_lock = threading.Lock()
 class ModelType(Enum):
     CHAT    = "chat"
     DRAWING = "drawing"
+    VIDEO   = "video"
 
 
 # ─────────────────────────────────────────
@@ -89,6 +91,7 @@ class ApiFormat(Enum):
     OPENAI_CHAT   = "openai_chat"
     OPENAI_IMAGE = "openai_image"
     GEMINI_NATIVE = "gemini_native"
+    FLUXPORT_VIDEO = "fluxport_video"
 
 
 # ─────────────────────────────────────────
@@ -126,6 +129,7 @@ _API_FORMAT_MAP = {
     'openai_chat':   ApiFormat.OPENAI_CHAT,
     'openai_image':  ApiFormat.OPENAI_IMAGE,
     'gemini_native': ApiFormat.GEMINI_NATIVE,
+    'fluxport_video': ApiFormat.FLUXPORT_VIDEO,
 }
 
 # 分辨率后缀映射（用于 Gemini 图片模型）
@@ -194,13 +198,15 @@ class UnifiedAPIRouter:
         if not provider:
             raise AppError(503, "没有可用的对话模型，请先在设置中配置")
 
-        if not (provider.get('api_url') or '').strip() or not (key.get('api_key') or '').strip():
+        # 文本对话 URL（text_api_url）优先，留空则回退共用 api_url（图片/视频 URL）；
+        # 校验按「任一 URL 非空」放行：只填 text_api_url 也能对话，图片/视频仍强制走 api_url。
+        if not ((provider.get('text_api_url') or '').strip() or (provider.get('api_url') or '').strip()) or not (key.get('api_key') or '').strip():
             raise AppError(503, f"供应商「{provider.get('name', '')}」尚未填写 API 地址或密钥，请到设置中补充")
 
-        api_url   = provider['api_url'].rstrip('/')
+        api_url   = ((provider.get('text_api_url') or '').strip() or provider['api_url']).rstrip('/')
         api_key   = key['api_key']
-        use_proxy = provider.get('use_proxy', True)
-        proxies   = None if use_proxy else {"http": None, "https": None}
+        use_proxy = provider.get('use_proxy', False)
+        proxies   = None if use_proxy else {"http": None, "https": None, "all": None}
 
         url     = self._resolve_chat_url(api_url)
         headers = {
@@ -330,32 +336,34 @@ class UnifiedAPIRouter:
 
         api_url   = provider['api_url'].rstrip('/')
         api_key   = key['api_key']
-        use_proxy = provider.get('use_proxy', True)
-        proxies   = None if use_proxy else {"http": None, "https": None}
+        use_proxy = provider.get('use_proxy', False)
+        proxies   = None if use_proxy else {"http": None, "https": None, "all": None}
 
-        url, payload = self._build_image_request(api_url, model_entry, prompt, options)
+        url, request_body = self._build_image_request(api_url, model_entry, prompt, options)
         # FluxPort 等中转站推荐（非强制）提交时带唯一幂等键，避免重复提交产生重复任务
         idempotency_key = (
             (options or {}).get('idempotencyKey')
             or f"icv-img-{uuid.uuid4().hex}"
         )
         headers = {
-            'Content-Type':    'application/json',
             'Authorization':   f'Bearer {api_key}',
             'Idempotency-Key': idempotency_key,
         }
+        # multipart 的 Content-Type（含 boundary）必须由 requests 生成；JSON 才显式声明。
+        if 'files' not in request_body:
+            headers['Content-Type'] = 'application/json'
 
         print(f"[UnifiedAPI] 图片请求 | provider={provider['name']} | model={model_entry.id} | format={model_entry.api_format.value} | url={url}")
 
         try:
             response = requests.post(
-                url, headers=headers, json=payload, timeout=300, proxies=proxies
+                url, headers=headers, timeout=300, proxies=proxies, **request_body
             )
 
             if response.status_code == 200:
                 result = self._parse_image_response(response.json(), model_entry.api_format)
                 if result.get('success'):
-                    result = self._save_images_to_local(result)
+                    result = self._save_images_to_local(result, proxies=proxies)
                 return result
             elif response.status_code == 202:
                 # FluxPort 等中转站对 Gemini 图片走「异步任务」模式：
@@ -369,7 +377,7 @@ class UnifiedAPIRouter:
                 origin = self._get_api_origin(response.url)
                 result = self._poll_async_image_task(task_data, origin, headers, proxies)
                 if result.get('success'):
-                    result = self._save_images_to_local(result)
+                    result = self._save_images_to_local(result, proxies=proxies)
                 return result
             else:
                 try:
@@ -447,6 +455,8 @@ class UnifiedAPIRouter:
 
         if m_type_str == ModelType.DRAWING.value:
             return ModelType.DRAWING, fmt
+        if m_type_str == ModelType.VIDEO.value:
+            return ModelType.VIDEO, fmt
         return ModelType.CHAT, fmt
 
     def _resolve_chat_model(self, model_str=None):
@@ -478,13 +488,23 @@ class UnifiedAPIRouter:
                     if m.get('id') != model_id:
                         continue
                     m_type = m.get('type', '')
-                    if m_type == 'chat' or (not m_type and self._is_chat_model(m['id'])):
-                        return p, key, ModelEntry(
-                            id=m['id'], name=m.get('name', m['id']),
-                            type=ModelType.CHAT,
-                            api_format=self._detect_api_format(m['id'], ModelType.CHAT),
-                            enabled=m.get('enabled', True)
-                        )
+                    # 视频防污染守卫：旧数据中曾落入 chat 兜底的视频模型（如 grok-imagine-video-* 存成
+                    # type='chat'）按实时规则拒绝，避免误发 /chat/completions；手动添加且未命中规则的
+                    # chat 模型兜底 detect_model_type 返回 CHAT → 放行，无回归。
+                    if m_type == 'chat':
+                        if not self._is_chat_model(m['id']):
+                            continue
+                    elif not m_type:
+                        if not self._is_chat_model(m['id']):
+                            continue
+                    else:
+                        continue
+                    return p, key, ModelEntry(
+                        id=m['id'], name=m.get('name', m['id']),
+                        type=ModelType.CHAT,
+                        api_format=self._detect_api_format(m['id'], ModelType.CHAT),
+                        enabled=m.get('enabled', True)
+                    )
                 # key 存在但模型已删除/停用：同样提示重选模型（旧节点引用失效）
                 raise AppError(503, "模型所属 Key 已删除或停用，请重新选择模型")
             # provider 未找到/停用 → 回退全量第一个可用模型
@@ -505,13 +525,21 @@ class UnifiedAPIRouter:
                         if m.get('id') != model_id:
                             continue
                         m_type = m.get('type', '')
-                        if m_type == 'chat' or (not m_type and self._is_chat_model(m['id'])):
-                            return p, key, ModelEntry(
-                                id=m['id'], name=m.get('name', m['id']),
-                                type=ModelType.CHAT,
-                                api_format=self._detect_api_format(m['id'], ModelType.CHAT),
-                                enabled=m.get('enabled', True)
-                            )
+                        # 视频防污染守卫（同上）
+                        if m_type == 'chat':
+                            if not self._is_chat_model(m['id']):
+                                continue
+                        elif not m_type:
+                            if not self._is_chat_model(m['id']):
+                                continue
+                        else:
+                            continue
+                        return p, key, ModelEntry(
+                            id=m['id'], name=m.get('name', m['id']),
+                            type=ModelType.CHAT,
+                            api_format=self._detect_api_format(m['id'], ModelType.CHAT),
+                            enabled=m.get('enabled', True)
+                        )
             # 未命中 → 回退全量第一个可用模型
             return self._first_available_model(providers, ModelType.CHAT)
 
@@ -579,6 +607,76 @@ class UnifiedAPIRouter:
         # ── 未指定/空 → 全量第一个可用模型 ──
         return self._first_available_model(providers, ModelType.DRAWING)
 
+    def _resolve_video_model(self, model_str=None):
+        """解析视频生成模型（multi-key：与 _resolve_drawing_model 同构）。
+
+        model_str: "provider_id:key_id:model_id" / 旧两段 "provider_id:model_id" / None
+        返回: (provider_dict, key_dict, ModelEntry|None)
+        匹配条件：m_type == 'video'，或未存 type 但实时规则判定为视频模型（旧数据兼容）。
+        """
+        providers = self._load_providers()
+        parts = (model_str or '').split(':') if model_str else []
+
+        # ── 三段 id：精确命中 key，用 key.api_key 出视频 ──
+        if len(parts) >= 3:
+            provider_id, key_id, model_id = parts[0], parts[1], ':'.join(parts[2:])
+            for p in providers:
+                if p.get('id') != provider_id or not p.get('enabled'):
+                    continue
+                keys = p.get('keys') or []
+                key  = next((k for k in keys if k.get('id') == key_id), None)
+                if key is None or not key.get('enabled', True):
+                    raise AppError(503, "模型所属 Key 已删除或停用，请重新选择模型")
+                for m in key.get('models', []):
+                    if not m.get('enabled', True):
+                        continue
+                    if m.get('id') != model_id:
+                        continue
+                    m_type = m.get('type', '')
+                    if m_type == 'video' or (
+                        not m_type and self._detect_model_type(m['id'])[0] == ModelType.VIDEO
+                    ):
+                        return p, key, ModelEntry(
+                            id=m['id'], name=m.get('name', m['id']),
+                            type=ModelType.VIDEO,
+                            api_format=self._detect_api_format(m['id'], ModelType.VIDEO),
+                            enabled=m.get('enabled', True)
+                        )
+                # key 存在但模型已删除/停用：同样提示重选模型（旧节点引用失效）
+                raise AppError(503, "模型所属 Key 已删除或停用，请重新选择模型")
+            # provider 未找到/停用 → 回退全量第一个可用视频模型
+            return self._first_available_model(providers, ModelType.VIDEO)
+
+        # ── 两段 id（旧项目/旧 localStorage）：provider 各 enabled key 依次匹配同名模型 ──
+        if len(parts) == 2:
+            provider_id, model_id = parts
+            for p in providers:
+                if p.get('id') != provider_id or not p.get('enabled'):
+                    continue
+                for key in p.get('keys') or []:
+                    if not key.get('enabled', True):
+                        continue
+                    for m in key.get('models', []):
+                        if not m.get('enabled', True):
+                            continue
+                        if m.get('id') != model_id:
+                            continue
+                        m_type = m.get('type', '')
+                        if m_type == 'video' or (
+                            not m_type and self._detect_model_type(m['id'])[0] == ModelType.VIDEO
+                        ):
+                            return p, key, ModelEntry(
+                                id=m['id'], name=m.get('name', m['id']),
+                                type=ModelType.VIDEO,
+                                api_format=self._detect_api_format(m['id'], ModelType.VIDEO),
+                                enabled=m.get('enabled', True)
+                            )
+            # 未命中 → 回退全量第一个可用视频模型
+            return self._first_available_model(providers, ModelType.VIDEO)
+
+        # ── 未指定/空 → 全量第一个可用视频模型 ──
+        return self._first_available_model(providers, ModelType.VIDEO)
+
     def _first_available_model(self, providers, model_type):
         """
         全量第一个可用模型（enabled provider + api_url 非空 → enabled key + api_key 非空
@@ -599,7 +697,19 @@ class UnifiedAPIRouter:
                         continue
                     m_type = m.get('type', '')
                     if model_type == ModelType.CHAT:
-                        is_match = (m_type == 'chat' or (not m_type and self._is_chat_model(m['id'])))
+                        # 视频防污染守卫：旧数据里曾以 type='chat' 落盘的视频模型按实时规则拒绝，
+                        # 避免误发 /chat/completions（手动添加的 chat 模型兜底 detect 仍为 chat → 放行）
+                        if m_type == 'chat':
+                            is_match = self._is_chat_model(m['id'])
+                        elif not m_type:
+                            is_match = self._is_chat_model(m['id'])
+                        else:
+                            is_match = False
+                    elif model_type == ModelType.VIDEO:
+                        is_match = (
+                            m_type == 'video'
+                            or (not m_type and self._detect_model_type(m['id'])[0] == ModelType.VIDEO)
+                        )
                     else:
                         is_match = (m_type == 'drawing' or (not m_type and not self._is_chat_model(m['id'])))
                     if not is_match:
@@ -630,28 +740,30 @@ class UnifiedAPIRouter:
     # 内部方法：URL 解析
     # ─────────────────────────────────────────
     def _resolve_chat_url(self, api_url):
-        """解析对话请求 URL"""
-        base = api_url.rstrip('/')
+        """解析对话请求 URL（FluxPort 媒体域先归一到语言域，再按 OpenAI Chat Completions 拼接）"""
+        base = resolve_chat_api_base(api_url).rstrip('/')
         if base.endswith('/chat/completions'):
             return base
         if base.endswith('/v1'):
             return f"{base}/chat/completions"
         return f"{base}/v1/chat/completions"
 
-    def _resolve_image_url(self, api_url, model_id, api_format):
+    def _resolve_image_url(self, api_url, model_id, api_format, operation='generations'):
         """
         解析图片请求 URL。
         FluxPort 的语言域名 api.uselg.top 先映射到图片直连域名 api.ai-media.vip，
         再剥离 api_url 已带的 /v1、/v1beta 路径段（避免双重前缀），最后按格式拼接：
           - GEMINI_NATIVE  -> {origin}/v1beta/models/{model_id}:generateContent
-          - OPENAI_IMAGE   -> {origin}/v1/images/generations
+          - OPENAI_IMAGE   -> {origin}/v1/images/generations 或 /edits
         """
         base = resolve_image_api_base(api_url)
         if api_format == ApiFormat.GEMINI_NATIVE:
             model_id = self._apply_resolution_suffix(model_id)
             return f"{base}/v1beta/models/{model_id}:generateContent"
         elif api_format == ApiFormat.OPENAI_IMAGE:
-            return f"{base}/v1/images/generations"
+            if operation not in ('generations', 'edits'):
+                raise ValueError(f"未知 OpenAI 图片操作: {operation}")
+            return f"{base}/v1/images/{operation}"
 
         raise ModelNotSupportedError(model_id)
 
@@ -663,10 +775,11 @@ class UnifiedAPIRouter:
     # 内部方法：Payload 构建
     # ─────────────────────────────────────────
     def _build_chat_payload(self, model_id, messages, options):
-        """构建对话请求 payload"""
+        """构建对话请求 payload（显式 stream:false，对齐 FluxPort 手册示例，防御默认开流通道）"""
         payload = {
             "model":    model_id,
-            "messages": messages
+            "messages": messages,
+            "stream":   False,
         }
 
         temp = options.get('temperature')
@@ -680,7 +793,7 @@ class UnifiedAPIRouter:
         return payload
 
     def _build_image_request(self, api_url, model_entry, prompt, options):
-        """构建图片请求，返回 (url, payload)"""
+        """构建图片请求，返回 (url, requests.post 的 body kwargs)。"""
         fmt = model_entry.api_format
         model_id = model_entry.id
 
@@ -756,7 +869,7 @@ class UnifiedAPIRouter:
         }
 
         url = self._resolve_image_url(api_url, model_id, ApiFormat.GEMINI_NATIVE)
-        return url, payload
+        return url, {'json': payload}
 
     def _map_openai_image_size(self, resolution='1k', aspect_ratio='Auto'):
         """
@@ -804,17 +917,13 @@ class UnifiedAPIRouter:
                 options.get('aspectRatio', 'Auto'),
             )
         n = options.get('count', 1)
+        # 仅 FluxPort 图片直连域支持并推荐 async / 任务资产协议；其它 OpenAI 兼容供应商
+        # 保持既有同步请求，避免给未知供应商额外字段造成 400。
+        image_origin = resolve_image_api_base(api_url)
+        is_fluxport_media = (urlparse(image_origin).hostname or '').lower() == 'api.ai-media.vip'
 
-        payload = {
-            "model":  model_id,
-            "prompt": prompt,
-            "n":      n,
-            "size":   size,
-        }
-
-        # 参考图（图生图/换风格）：OpenAI gpt-image 系 images/generations 支持 image 输入。
-        # ⚠️ FluxPort 中转站参考图协议待真机确认，若 4xx 需调整字段（如 OpenAI edits 风格 multipart）。
-        # 参考图解析失败则忽略并打日志，不阻断文生图。
+        # 参考图必须走 OpenAI Images edits 的 multipart 协议；文档示例明确不接受
+        # generations JSON 里的自定义 image 字段。无参考图时走 generations JSON。
         ref_images = []
         for img_data in options.get('referenceImages', []):
             parsed = self._parse_data_url_image(img_data)
@@ -822,12 +931,45 @@ class UnifiedAPIRouter:
                 print("[UnifiedAPI] OpenAI 图片参考图解析失败，已忽略该图（不阻断文生图）")
                 continue
             mime, data = parsed
-            ref_images.append({"mimeType": mime, "data": data})
+            ref_images.append((mime, data))
+        model_lower = model_id.lower()
+        # FluxPort 的 Grok 文档将文生图与编辑模型明确分开，提前给出可行动的错误，
+        # 不把 quality 模型误送到 /images/edits 后再返回难懂的 4xx。
+        if 'grok-imagine-image' in model_lower:
+            is_edit_model = 'edit' in model_lower
+            if ref_images and not is_edit_model:
+                raise ValidationError('Grok 带参考图编辑请改用 grok-imagine-image-edit 模型')
+            if not ref_images and is_edit_model:
+                raise ValidationError('grok-imagine-image-edit 需要至少一张参考图；文生图请改用 grok-imagine-image-quality')
         if ref_images:
-            payload["image"] = ref_images
+            files = [
+                ('image', (f'reference-{index}.{mime.split("/")[-1]}', b64lib.b64decode(data), mime))
+                for index, (mime, data) in enumerate(ref_images, start=1)
+            ]
+            form_data = {
+                'model': model_id,
+                'prompt': prompt,
+                'n': str(n),
+                'size': size,
+            }
+            if is_fluxport_media:
+                # 避免同步回包把大 base64 穿过 pywebview；服务端若有兼容策略会自行改写。
+                form_data.update({'response_format': 'url', 'async': 'true'})
+            url = self._resolve_image_url(api_url, model_id, ApiFormat.OPENAI_IMAGE, 'edits')
+            return url, {'data': form_data, 'files': files}
 
+        payload = {
+            'model': model_id,
+            'prompt': prompt,
+            'n': n,
+            'size': size,
+        }
+        if is_fluxport_media:
+            # FluxPort 图片直连接口推荐异步任务；响应仍可能是同步 200，调用方兼容两种。
+            # 平台可能按 Key/分组改写 response_format；客户端仍兼容 b64_json 与 url。
+            payload.update({'async': True, 'response_format': 'url'})
         url = self._resolve_image_url(api_url, model_id, ApiFormat.OPENAI_IMAGE)
-        return url, payload
+        return url, {'json': payload}
 
     # ─────────────────────────────────────────
     # 内部方法：异步任务轮询（HTTP 202 -> 轮询出图）
@@ -1084,6 +1226,14 @@ class UnifiedAPIRouter:
                 print("[UnifiedAPI] 异步任务轮询响应非 JSON，稍后重试...")
                 time.sleep(poll_interval)
                 continue
+
+            # 平台允许每次状态响应调整建议轮询间隔，仍遵守至少 2 秒的下限。
+            next_poll_after = data.get('poll_after_ms') if isinstance(data, dict) else None
+            try:
+                if next_poll_after is not None:
+                    poll_interval = max(2.0, float(next_poll_after) / 1000.0)
+            except (TypeError, ValueError):
+                pass
 
             status = data.get('status') if isinstance(data, dict) else None
             status_l = str(status).strip().lower() if status is not None else ''
@@ -1412,13 +1562,14 @@ class UnifiedAPIRouter:
     # ─────────────────────────────────────────
     # 内部方法：图片本地保存（返回缩略图 + 原图路径引用，图片性能优化）
     # ─────────────────────────────────────────
-    def _save_images_to_local(self, parsed, save_dir=''):
+    def _save_images_to_local(self, parsed, save_dir='', proxies=None):
         """
         主链路后处理：原图落盘 + 缩略图生成 + 路径收集（图片性能优化）。
         - 逐图流程：归一原始图（base64 data URL / http URL → 下载转 base64）→ 原图落盘收集 original_path
           → 生成 JPEG q85 / 最长边 1024px 缩略图 data URL → 展示图（image_url/images）切换为缩略图。
         - 返回结构（新）：thumbnail/thumbnails（data URL）、original_path/original_paths（绝对路径，正斜杠）、
-          original_url/original_urls（file:// 引用，仅信息性，禁止直接用于渲染）。
+          original_url/original_urls（file:// 引用，仅信息性，禁止直接用于渲染）、
+          width/height（原图真实像素，PIL im.size；多图时另有 widths/heights，均可能为 None）。
         - 双轨回退：逐图缩略图失败 → 该图 image 保留原 base64、original_* 对应项置 None（不阻断）；
           http 下载失败 → 保持原 URL（沿用旧语义）。
         - saved_to_disk: bool —— 是否写入用户配置目录（tempfile 兜底为 false，前端据此提示不阻断）。
@@ -1431,6 +1582,8 @@ class UnifiedAPIRouter:
         thumbnails = []
         original_paths = []
         original_urls = []
+        widths = []
+        heights = []
 
         def process(img):
             # 展示图策略（治本：done 响应不携带大 payload / 不可访问 URL——大 base64 跨 pywebview
@@ -1444,11 +1597,13 @@ class UnifiedAPIRouter:
             thumb = None
             orig_path = None
             orig_url = None
+            orig_w = None
+            orig_h = None
 
             original_data_url = img if isinstance(img, str) else None
             if isinstance(img, str) and img.startswith('http'):
                 # http → 下载转 base64（下载成功才可能生成缩略图）；失败保留原 URL 作展示兜底
-                original_data_url = self._download_url_to_base64(img)
+                original_data_url = self._download_url_to_base64(img, proxies=proxies)
                 if not original_data_url:
                     display = img
                     original_data_url = None
@@ -1472,10 +1627,19 @@ class UnifiedAPIRouter:
                     # 兜底：缩略图失败且原图未落盘 → 回退原 base64（唯一可展示途径；罕见）
                     display = original_data_url
                 # 缩略图失败但有 original_path：display 保持 None（不回退大 base64），前端按路径取图
+                # 原图真实像素（PIL im.size；必须原图尺寸，缩略图不算）
+                if image_bytes:
+                    try:
+                        with Image.open(io.BytesIO(image_bytes)) as im:
+                            orig_w, orig_h = im.size
+                    except Exception:
+                        pass
 
             thumbnails.append(thumb)
             original_paths.append(orig_path)
             original_urls.append(orig_url)
+            widths.append(orig_w)
+            heights.append(orig_h)
             return display
 
         if parsed.get('images'):
@@ -1491,12 +1655,18 @@ class UnifiedAPIRouter:
             parsed['thumbnail'] = thumbnails[0] if thumbnails else None
             parsed['original_path'] = original_paths[0] if original_paths else None
             parsed['original_url'] = original_urls[0] if original_urls else None
+            parsed['widths'] = widths
+            parsed['heights'] = heights
+            parsed['width'] = widths[0] if widths else None
+            parsed['height'] = heights[0] if heights else None
         elif parsed.get('image_url'):
             single = process(parsed['image_url'])
             parsed['image_url'] = single
             parsed['thumbnail'] = thumbnails[0] if thumbnails else None
             parsed['original_path'] = original_paths[0] if original_paths else None
             parsed['original_url'] = original_urls[0] if original_urls else None
+            parsed['width'] = widths[0] if widths else None
+            parsed['height'] = heights[0] if heights else None
         parsed['saved_to_disk'] = saved_to_disk
         return parsed
 
@@ -1588,13 +1758,14 @@ class UnifiedAPIRouter:
             print(f"[UnifiedAPI] URL 下载保存失败: {e}")
             return None
 
-    def _download_url_to_base64(self, url):
+    def _download_url_to_base64(self, url, proxies=None):
         """
         将 URL 图片下载并转换为 base64 data URL 格式
         确保中转站返回的 URL 图片也能以 base64 格式返回给前端
         """
         try:
-            resp = requests.get(url, timeout=60)
+            print(f"[UnifiedAPI] 下载签名图片 | url={url[:120]}")
+            resp = requests.get(url, timeout=(10, 30), proxies=proxies)
             if resp.status_code != 200:
                 return None
 

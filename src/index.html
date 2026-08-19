@@ -8,8 +8,10 @@
 <body>
 
 <!-- ═══════════ 顶部：极简 ═══════════ -->
-<!-- pywebview-drag-region：官方拖动区域标记（无边框窗口拖拽由此接管，见 main.ts bindWindowControls） -->
-<header class="topbar pywebview-drag-region">
+<!-- 顶栏拖动（B1）：不再使用 pywebview 官方 drag-region（最大化/还原后拖动失效的已知坑），
+     改由 main.ts bindWindowControls 自实现：mousedown 记增量 → 后端 win_move_relative 相对移动；
+     最大化状态下前端锁定 + 后端拒绝。因此本 header 不带 .pywebview-drag-region 类。 -->
+<header class="topbar">
   <div class="logo">
     <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><path d="M17.5 14v7M14 17.5h7"/></svg>
     Infinite Canvas
@@ -59,11 +61,6 @@
       <div class="history-tabs" id="history-tabs">
         <button class="history-tab active" data-tab="image"><span class="history-tab-name">成图</span><span class="history-tab-count"></span></button>
         <button class="history-tab" data-tab="text"><span class="history-tab-name">文本</span><span class="history-tab-count"></span></button>
-      </div>
-      <!-- R3：历史批次/时间视图切换（默认按批次；text 不入批次 → 切到文本 tab 时由 JS 隐藏） -->
-      <div class="history-view" id="history-view">
-        <button class="history-view-btn active" data-view="batch">按批次</button>
-        <button class="history-view-btn" data-view="time">按时间</button>
       </div>
       <div class="history-grid" id="history-grid"></div>
       <div class="history-empty" id="history-empty" style="display:none;"></div>
@@ -246,10 +243,19 @@
   </div>
 </div>
 
-<!-- 大图查看（图片性能优化：先显示缩略图 + loading，再按需加载原图） -->
+<!-- 大图查看（左右分栏：左信息栏 + 右大图；图片性能优化：先显示缩略图 + loading，再按需加载原图；信息栏字段由 JS 填充） -->
 <div class="img-modal" id="img-modal">
-  <img id="img-modal-img" alt="">
-  <div class="img-modal-loading" id="img-modal-loading">加载原图中…</div>
+  <div class="img-modal-panel" id="img-modal-panel">
+    <button class="img-modal-close" id="img-modal-close" title="关闭">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
+    </button>
+    <div class="img-modal-title">图片信息</div>
+    <div class="img-modal-fields" id="img-modal-fields"></div>
+  </div>
+  <div class="img-modal-stage" id="img-modal-stage">
+    <img id="img-modal-img" alt="">
+    <div class="img-modal-loading" id="img-modal-loading">加载原图中…</div>
+  </div>
 </div>
 
 <!-- 扩图弹层（image-gen 悬浮「扩图」入口；挂 .overlay 类 → interactions.ts 已把 .overlay 排除在画布交互外，天然防冲突） -->

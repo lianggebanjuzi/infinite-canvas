@@ -17,6 +17,8 @@ export interface PollResult {
   originalPath?: string;    // 原图本地绝对路径（查看大图按需加载用）
   originalUrl?: string;     // file:// 引用（备用）
   savedToDisk?: boolean; // incremental-3：生成图是否写入用户配置目录（tempfile 兜底为 false；后端旧版无该字段时为 undefined）
+  width?: number;         // 原图真实像素宽（PIL im.size；旧后端缺失为 undefined）
+  height?: number;        // 原图真实像素高
   code?: number;
   error?: string;
 }
@@ -103,6 +105,8 @@ export async function pollTask(taskId: string, opts: PollOptions = {}): Promise<
           originalPath: typeof r.original_path === 'string' ? r.original_path : undefined,
           originalUrl: typeof r.original_url === 'string' ? r.original_url : undefined,
           savedToDisk: typeof r.saved_to_disk === 'boolean' ? r.saved_to_disk : undefined,
+          width: typeof r.width === 'number' && r.width > 0 ? r.width : undefined,
+          height: typeof r.height === 'number' && r.height > 0 ? r.height : undefined,
         };
       }
       // 失败：错误码 + 消息（不自动切供应商，由用户手动重跑）；success 但无任何可展示/可回退的图 → 明确提示，不静默白屏

@@ -258,12 +258,14 @@ export class FlowState {
     this.notify();
   }
 
-  /** 替换节点图片（换图/生成回写），并更新比例 */
-  setNodeImage(id: string, imageUrl: string | null, ratio?: number): void {
+  /** 替换节点图片（换图/生成回写），并更新比例与原图真实像素尺寸（width/height 可选，旧数据缺失） */
+  setNodeImage(id: string, imageUrl: string | null, ratio?: number, imageWidth?: number, imageHeight?: number): void {
     const node = this.getNode(id);
     if (!node) return;
     if (imageUrl !== null && imageUrl !== undefined) node.imageUrl = imageUrl;
     if (ratio && ratio > 0) node.ratio = ratio;
+    if (typeof imageWidth === 'number' && imageWidth > 0) node.imageWidth = imageWidth;
+    if (typeof imageHeight === 'number' && imageHeight > 0) node.imageHeight = imageHeight;
     this.updatedAt = Date.now();
     this.dirty = true;
     this.notify();

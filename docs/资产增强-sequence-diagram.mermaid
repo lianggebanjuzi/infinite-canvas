@@ -1,0 +1,38 @@
+sequenceDiagram
+    participant U as 用户
+    participant CV as 画布节点/对比面板
+    participant AS as AssetStore
+    participant BK as Backend(assets.json)
+    participant RE as RunEngine
+    participant HD as HistoryDrawer
+    participant HP as HistoryPersist
+
+    Note over RE,HP: R3 写侧：一次生成 count=N
+    RE->>RE: batchId = nodeId + 批次启动时间戳
+    par 并发 worker（N 张）
+        RE->>RE: 每张成功 → createResultCard / _writeBackToSelf
+        RE->>HD: addImage(src, {..., batchId})
+        RE->>HP: appendTrace({..., batchId})
+    end
+    Note over HD,HP: jsonl 仍为单行 append，行内多 batchId 字段
+
+    Note over U,HP: R2 写侧：采纳带配方
+    U->>CV: 点「采纳」
+    CV->>AS: adoptByUrl(url, nodeId, metaFromNode(node), originalPath)
+    AS->>AS: record.prompt/model/... 写入记录本体 + metaByKey 缓存
+    AS->>BK: 防抖 300ms saveAssets(records)
+    Note over AS,BK: assets.json 记录含配方 → 跨项目可恢复
+
+    Note over U,HP: R2 读侧：资产库展示/复现
+    U->>AS: 打开资产库 → getAdoptedAssets()
+    AS-->>AS: meta = metaByKey ?? recipeFromRecord(record)
+    AS-->>U: 卡片配方信息区（prompt 摘要 + model/比例/分辨率）
+    U->>AS: 点「复现」
+    AS->>AS: _toEntry：record 配方优先 → meta → 反查兜底
+    AS-->>U: reproduceFromHistory(entry) → 新建节点自动重跑
+
+    Note over U,HD: R3 读侧：批次视图
+    U->>HD: 历史抽屉（默认按批次）
+    HD->>HD: _buildDisplay：按 batchId 分组 → 批次卡（缩略图组 + x/y + 摘要）
+    U->>HD: 批次卡内点缩略图
+    HD->>HD: 查看大图 / 拖入画布 / 逐张复现（单图能力保留）

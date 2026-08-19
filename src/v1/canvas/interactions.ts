@@ -8,7 +8,7 @@ import { dirty } from '../state/dirty';
 import { flowHistory } from '../state/history';
 import { nodeRegistry } from '../nodes/node-registry';
 import { canvasView, CARD_W } from './canvas-view';
-import { cardView, openImageModal } from './card-view';
+import { cardView, openImageModal, imageModalInfoFromNode } from './card-view';
 import { linkView } from './link-view';
 import { runEngine } from '../engine/run-engine';
 import { showToast } from '../ui/toast';
@@ -137,8 +137,8 @@ class Interactions {
       if (!cardEl) return;
       const node = flowState.getNode(cardEl.dataset.nodeId || '');
       if (!node) return;
-      // 有图 → 查看大图（按需加载原图：带 imageOrigin 路径）；空图片卡（无输出图且无参考图，非文本卡）双击 → 弹文件选择器加载参考图
-      if (node.imageUrl) { void openImageModal(node.imageUrl, node.imageOrigin); return; }
+      // 有图 → 查看大图（按需加载原图：带 imageOrigin 路径 + 真实像素标注 + 信息栏）；空图片卡（无输出图且无参考图，非文本卡）双击 → 弹文件选择器加载参考图
+      if (node.imageUrl) { void openImageModal(node.imageUrl, node.imageOrigin, { width: node.imageWidth, height: node.imageHeight }, imageModalInfoFromNode(node)); return; }
       if (node.type !== 'text-gen' && (!node.refImages || node.refImages.length === 0)) {
         this.openFilePickerForRef(node.id);
       }
@@ -917,6 +917,7 @@ class Interactions {
       }
       case 'delete': {
         flowHistory.record();
+        runEngine.cancel(nodeId);
         flowState.removeNode(nodeId);
         selection.clear();
         break;

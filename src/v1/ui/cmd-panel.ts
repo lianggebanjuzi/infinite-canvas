@@ -20,6 +20,8 @@ const RES_OPTIONS = ['1k', '2k', '4k'];
 const COUNT_OPTIONS = [1, 2, 3, 4];
 
 const DEL_SVG = '<svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>';
+const SEND_SVG = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>';
+const PAUSE_SVG = '<svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor"><path d="M7 5h3v14H7zM14 5h3v14h-3z"/></svg>';
 
 /** 指令输入框占位提示：text-gen 用命令示例，图片节点用绘图指令（反推模式 UI 已删除，W2-2） */
 const PROMPT_INPUT_PLACEHOLDER = '输入指令编辑这张图，如：把背景换成浅灰水泥墙，加一盆绿萝';
@@ -132,6 +134,10 @@ class CmdPanel {
   private _onSend(): void {
     const node = selection.single();
     if (!node) return;
+    if (node.status === 'run') {
+      runEngine.cancel(node.id);
+      return;
+    }
     if (node.type === 'text-gen') {
       // 命令是临时的：从输入框读命令执行；输入框被 sync 清空时退回节点已暂存的 command（params.instruction），
       // 避免「输命令→点模型 chip（sync 清空输入框）→点发送」丢命令。执行后仍清空命令框（卡片只显示结果）。
@@ -268,7 +274,10 @@ class CmdPanel {
 
     // chip/发送钮 title 文案随节点类型切换（文本处理 / 图片生成）
     this.chipModelBtn.title = isTextGen ? '选择文本模型' : '选择绘图模型';
-    this.send.title = isTextGen ? '处理文本' : '生成';
+    const isRunning = node.status === 'run';
+    this.send.title = isRunning ? '暂停' : (isTextGen ? '处理文本' : '生成');
+    this.send.setAttribute('aria-label', this.send.title);
+    this.send.innerHTML = isRunning ? PAUSE_SVG : SEND_SVG;
 
     // 输入框占位提示跟随节点类型（切换选中节点时同步变化）
     if (isTextGen) {
@@ -292,7 +301,7 @@ class CmdPanel {
         this.input.value = p.prompt || '';
       }
     }
-    this.send.disabled = node.status === 'run';
+    this.send.disabled = false;
 
     this._renderRefs();
     this._renderChips(node);
