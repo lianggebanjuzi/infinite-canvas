@@ -26,7 +26,7 @@ from backend.api.errors import (
     UpstreamError, UpstreamTimeoutError, UnknownError,
     ValidationError, ModelNotSupportedError
 )
-from backend.api.image_api import make_thumbnail_data_url
+from backend.api.image_api import make_thumbnail_data_url, make_thumbnail_data_url_from_file
 from backend.api.gemini_compat import (
     extract_image_urls_from_text,
     nearest_aspect_ratio,
@@ -1128,22 +1128,52 @@ class UnifiedAPIRouter:
 
         return [], None
 
-    def _download_authed_image_to_base64(self, url, headers, proxies):
+    def _download_image_to_file(self, url, headers=None, proxies=None, save_dir='', label='图片'):
+        """流式下载原图到本地，返回正斜杠绝对路径。
+
+        不把 4K 原图塞进 base64 字符串：这既会额外占用约 33% 内存，也会让后续
+        pywebview 桥接不得不等待一个根本不会展示给用户的大 payload。fileUri 可
+        传 headers 下载；签名/公开 URL 则不传 headers。
         """
-        带 Authorization 下载图片并转 base64 data URL。
-        fileUri 指向的资源是受保护资产，必须带 Bearer key 才能下载。
-        """
+        file_path = None
+        started_at = time.perf_counter()
+        total_bytes = 0
         try:
-            resp = requests.get(url, headers=headers, timeout=60, proxies=proxies)
+            resp = requests.get(
+                url,
+                headers=headers,
+                timeout=(10, 120),
+                proxies=proxies,
+                stream=True,
+            )
             if resp.status_code != 200:
-                print(f"[UnifiedAPI] 异步任务图片下载失败: HTTP {resp.status_code} | {url[:80]}")
+                print(f"[UnifiedAPI] {label}下载失败: HTTP {resp.status_code} | {url[:80]}")
                 return None
+
             content_type = resp.headers.get('Content-Type', 'image/png')
-            ext = _guess_image_ext(content_type, resp.content)
-            b64_data = b64lib.b64encode(resp.content).decode('utf-8')
-            return f"data:image/{ext};base64,{b64_data}"
+            ext = _guess_image_ext(content_type, b'')
+            directory = self._get_save_dir(save_dir)
+            file_path = os.path.join(directory, self._make_filename(ext))
+            chunks = getattr(resp, 'iter_content', None)
+            iterator = chunks(chunk_size=256 * 1024) if callable(chunks) else (resp.content,)
+            with open(file_path, 'wb') as f:
+                for chunk in iterator:
+                    if not chunk:
+                        continue
+                    f.write(chunk)
+                    total_bytes += len(chunk)
+
+            elapsed = time.perf_counter() - started_at
+            normalized = file_path.replace('\\', '/')
+            print(f"[UnifiedAPI] {label}已落盘 | {total_bytes / 1024 / 1024:.1f}MB | {elapsed:.1f}s | {normalized}")
+            return normalized
         except Exception as e:
-            print(f"[UnifiedAPI] 异步任务图片下载异常: {e}")
+            print(f"[UnifiedAPI] {label}下载异常: {e}")
+            if file_path:
+                try:
+                    os.remove(file_path)
+                except OSError:
+                    pass
             return None
 
     def _poll_async_image_task(self, task_data, origin, headers, proxies):
@@ -1266,21 +1296,22 @@ class UnifiedAPIRouter:
             if images:
                 print(f"[UnifiedAPI] 异步任务完成 | task_id={task_id or '-'} | 图片 {len(images)} 张 | kind={kind}")
                 if kind == 'fileuri':
-                    # fileUri / 相对 url：受保护资源，需带 Authorization 下载转 base64
-                    converted = [
-                        u for u in (
-                            self._download_authed_image_to_base64(u, headers, proxies)
+                    # fileUri / 相对 url：受保护资源，带 Authorization 直接流式落盘。
+                    # 后续 _save_images_to_local 从文件生成缩略图，避免 4K base64 往返。
+                    local_paths = [
+                        path for path in (
+                            self._download_image_to_file(u, headers=headers, proxies=proxies, label='异步任务原图')
                             for u in images
                         )
-                        if u
+                        if path
                     ]
-                    if not converted:
+                    if not local_paths:
                         raise UpstreamError(
                             502,
                             "异步任务图片下载失败（需鉴权的资源无法获取），请检查 API 密钥或稍后重试"
                         )
-                    images = converted
-                # kind == 'url'：signed_url / 绝对直链，无需鉴权（_save_images_to_local 负责下载）
+                    images = [f"file:///{path}" for path in local_paths]
+                # kind == 'url'：signed_url / 绝对直链，无需鉴权（_save_images_to_local 流式下载）
                 # kind == 'base64'：data URL 直接可用
                 return {
                     "success":   True,
@@ -1601,14 +1632,36 @@ class UnifiedAPIRouter:
             orig_h = None
 
             original_data_url = img if isinstance(img, str) else None
-            if isinstance(img, str) and img.startswith('http'):
-                # http → 下载转 base64（下载成功才可能生成缩略图）；失败保留原 URL 作展示兜底
-                original_data_url = self._download_url_to_base64(img, proxies=proxies)
-                if not original_data_url:
-                    display = img
+            local_path = None
+            if isinstance(img, str) and img.startswith('file:///'):
+                # fileUri 已在异步链路鉴权并流式保存；直接从文件生成缩略图，勿再读成大 base64。
+                candidate = img[len('file:///'):]
+                if os.path.isfile(candidate):
+                    local_path = candidate.replace('\\', '/')
+                else:
+                    print(f"[UnifiedAPI] 本地原图不存在: {candidate}")
+                    original_data_url = None
+            elif isinstance(img, str) and img.startswith('http'):
+                # 签名 URL / 公开直链同样直接流式落盘。此前这里会先转成整张图的 base64，
+                # 对 4K 图造成额外编码、解码和内存峰值，且延迟前端拿到缩略图。
+                local_path = self._download_image_to_file(img, proxies=proxies, save_dir=save_dir, label='原图')
+                if not local_path:
+                    display = img  # 公开直链下载失败仍让前端自行尝试加载
                     original_data_url = None
 
-            if isinstance(original_data_url, str) and original_data_url.startswith('data:image'):
+            if local_path:
+                orig_path = local_path
+                orig_url = f"file:///{local_path}"
+                thumb = make_thumbnail_data_url_from_file(local_path)
+                if thumb:
+                    display = thumb
+                try:
+                    with Image.open(local_path) as im:
+                        orig_w, orig_h = im.size
+                except Exception:
+                    pass
+
+            if not local_path and isinstance(original_data_url, str) and original_data_url.startswith('data:image'):
                 # 原图落盘（失败不影响返回；缩略图仍可基于 bytes 生成）
                 file_path = self._save_base64_to_dir(original_data_url, save_dir)
                 if file_path:

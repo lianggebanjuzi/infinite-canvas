@@ -6,7 +6,7 @@
   T01-1 make_thumbnail_data_url：JPEG q85 / 最长边 1024px / 字节量级（几十 KB）/ 失败回退 None
   T01-2 _save_images_to_local 返回结构：thumbnail/thumbnails/original_path(s)/original_url(s)；
         image_url/images 语义切换为缩略图；saved_to_disk 语义
-  T01-3 双轨回退：缩略图生成失败 → 该图 image 保留原 base64、original_* 置 None（mock 补丁）
+  T01-3 双轨回退：缩略图生成失败 → 前端按 original_path 读取原图（mock 补丁）
   T01-4 http URL 输入：下载转 base64 → 缩略图 + 原图落盘
   T01-5 同步 generate_image 主链路（mock 上游）→ 返回缩略图 + original_path（三条出图路径统一生效）
 """
@@ -90,6 +90,17 @@ class _FakeGetResp:
         self.status_code = status_code
 
 
+class _FakeTaskResp:
+    """模拟异步任务状态响应。"""
+    def __init__(self, payload):
+        self.payload = payload
+        self.status_code = 200
+        self.headers = {'Content-Type': 'application/json'}
+
+    def json(self):
+        return self.payload
+
+
 def main():
     root = tempfile.mkdtemp(prefix='icv_imageperf_')
     try:
@@ -162,16 +173,56 @@ def main():
         check('单图 thumbnail 存在', isinstance(res_single.get('thumbnail'), str) and res_single['thumbnail'] == res_single['image_url'])
         check('单图 original_path 存在', isinstance(res_single.get('original_path'), str) and os.path.exists(res_single['original_path']))
 
-        # ═════════════ T01-3 双轨回退：缩略图失败 → 原 base64 + original_* 置 None ═════════════
+        # ═════════════ T01-3 双轨回退：缩略图失败 → 由 original_path 兜底 ═════════════
 
         with mock.patch('backend.api.unified_api.make_thumbnail_data_url', return_value=None):
             res_fb = ua._save_images_to_local({'success': True, 'image_url': d1, 'images': [d1, d2]}, save_dir)
         fb_imgs = res_fb.get('images', [])
-        check('双轨回退：image 保留原 base64', len(fb_imgs) == 2 and all(u == d1 or u == d2 for u in fb_imgs), str([u[:30] for u in fb_imgs]))
+        check('双轨回退：image 不回传原 base64', fb_imgs == [None, None], str(fb_imgs))
         check('双轨回退：thumbnails 全 None', res_fb.get('thumbnails') == [None, None], str(res_fb.get('thumbnails')))
-        check('双轨回退：original_paths 全 None', res_fb.get('original_paths') == [None, None], str(res_fb.get('original_paths')))
-        check('双轨回退：original_urls 全 None', res_fb.get('original_urls') == [None, None], str(res_fb.get('original_urls')))
-        check('双轨回退：image_url 保留原 base64', (res_fb.get('image_url') or '').startswith('data:image/png'), str(res_fb.get('image_url'))[:30])
+        check('双轨回退：original_paths 全部存在', all(isinstance(p, str) and os.path.exists(p) for p in res_fb.get('original_paths', [])), str(res_fb.get('original_paths')))
+        check('双轨回退：original_urls 为 file:/// 引用', all(isinstance(u, str) and u.startswith('file:///') for u in res_fb.get('original_urls', [])), str(res_fb.get('original_urls')))
+        check('双轨回退：image_url 为空，前端按路径加载', res_fb.get('image_url') is None, str(res_fb.get('image_url')))
+
+        # ═════════════ T01-3b fileUri：已落盘原图不再下载/转大 base64 ═════════════
+
+        local_source = os.path.join(save_dir, 'already_downloaded.png')
+        with open(local_source, 'wb') as f:
+            f.write(raw_bytes)
+        local_uri = f"file:///{local_source.replace('\\\\', '/')}"
+        with mock.patch('backend.api.unified_api.requests.get') as get_mock:
+            res_fileuri = ua._save_images_to_local(
+                {'success': True, 'image_url': local_uri, 'images': [local_uri]},
+                save_dir,
+            )
+        check('fileUri：不再次发起 HTTP 下载', not get_mock.called)
+        check('fileUri：image_url 为缩略图', (res_fileuri.get('image_url') or '').startswith('data:image/jpeg'), str(res_fileuri.get('image_url'))[:30])
+        check('fileUri：复用已落盘原图', os.path.samefile(res_fileuri.get('original_path', ''), local_source), str(res_fileuri.get('original_path')))
+
+        # ═════════════ T01-3c 异步 fileUri：鉴权下载直接落盘，不经原图 base64 ═════════════
+
+        task_response = _FakeTaskResp({
+            'status': 'success',
+            'candidates': [{'content': {'parts': [{'fileData': {'fileUri': '/protected/result.png'}}]}}],
+        })
+        auth_capture = []
+
+        def fake_async_get(url, headers=None, stream=False, **_kwargs):
+            auth_capture.append((url, (headers or {}).get('Authorization'), stream))
+            return _FakeGetResp(raw_bytes) if stream else task_response
+
+        with mock.patch('backend.api.unified_api.requests.get', side_effect=fake_async_get):
+            async_raw = ua._poll_async_image_task(
+                {'task_id': 'imgtask_test', 'poll_url': '/v1/images/tasks/imgtask_test'},
+                'https://api.ai-media.vip',
+                {'Authorization': 'Bearer sk-test'},
+                None,
+            )
+        async_is_file_uri = (async_raw.get('image_url') or '').startswith('file:///')
+        async_res = ua._save_images_to_local(async_raw, save_dir)
+        check('异步 fileUri：下载带 Authorization', any(auth == 'Bearer sk-test' and stream for _, auth, stream in auth_capture), str(auth_capture))
+        check('异步 fileUri：原图以 file URI 传递，不含 base64', async_is_file_uri, str(async_raw.get('original_path')))
+        check('异步 fileUri：前端结果为缩略图', (async_res.get('image_url') or '').startswith('data:image/jpeg'), str(async_res.get('image_url'))[:30])
 
         # ═════════════ T01-4 http URL 输入：下载 → 缩略图 + 原图落盘 ═════════════
 
@@ -214,7 +265,7 @@ def main():
 
         with mock.patch('backend.api.unified_api.requests.post', side_effect=fake_post):
             res_gen = ua.generate_image('一只猫', {'model': 'provider_aaa:key_A:gemini-3-pro-image-preview', 'resolution': '1k', 'aspectRatio': '1:1'})
-            check('generate_image 成功', res_gen.get('success') is True, str(res_gen))
+            check('generate_image 成功', res_gen.get('success') is True, f"image_url={str(res_gen.get('image_url'))[:30]}, original_path={res_gen.get('original_path')}")
             check('generate_image image_url 为缩略图（同步路径统一生效）',
                   (res_gen.get('image_url') or '').startswith('data:image/jpeg'), str(res_gen.get('image_url'))[:30])
             check('generate_image thumbnail 存在', isinstance(res_gen.get('thumbnail'), str), str(res_gen.get('thumbnail'))[:30])

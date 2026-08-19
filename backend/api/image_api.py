@@ -32,6 +32,27 @@ def make_thumbnail_data_url(image_bytes: bytes, max_edge: int = 1024, quality: i
         return None
 
 
+def make_thumbnail_data_url_from_file(image_path: str, max_edge: int = 1024, quality: int = 85) -> str | None:
+    """本地原图文件 → JPEG 缩略图 data URL。
+
+    大图任务的结果可能是受保护 fileUri。该路径直接从文件解码，避免先将整张
+    4K 原图编码为 base64、再立即解码一次；前端最终仍只接收缩略图。
+    """
+    try:
+        import io
+        from PIL import Image
+
+        with Image.open(image_path) as img:
+            img.thumbnail((max_edge, max_edge), Image.Resampling.LANCZOS)
+            buf = io.BytesIO()
+            img.convert('RGB').save(buf, 'JPEG', quality=quality, optimize=True)
+        b64 = base64.b64encode(buf.getvalue()).decode('utf-8')
+        return f"data:image/jpeg;base64,{b64}"
+    except Exception as e:
+        print(f"从本地文件生成缩略图失败: {e}")
+        return None
+
+
 class ImageAPI:
 
     def __init__(self, settings_api, unified_api=None):
