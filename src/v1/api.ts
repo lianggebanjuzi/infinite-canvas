@@ -28,6 +28,11 @@ export async function fetchImageModels(): Promise<Array<{ id: string; name: stri
       const fluxPortMode = isFluxPortProvider(p);
       (p.keys || []).forEach(k => {
         if (k.enabled === false) return;
+      // Skip models from text-generation keys (e.g., "text" key) - these models
+      // are for text generation (chat), not image generation, and should not
+      // appear in image node model selection
+      const keyName = (k.name || '').toLowerCase();
+      if (keyName.includes('text') || keyName.includes('文本')) return;
         const keyLabel = (k.name || 'key').trim();
         (k.models || [])
           .filter(m => m.enabled !== false && m.type === 'drawing')

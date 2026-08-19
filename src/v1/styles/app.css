@@ -445,6 +445,38 @@ button:focus-visible, input[type="range"]:focus-visible, [tabindex]:focus-visibl
 .cmd-input::placeholder { color: var(--text-3); }
 /* 无边框指令输入框：聚焦时用内侧单线（accent）提示，避免无反馈，也不与面板边框叠成双层 */
 .cmd-input:focus { box-shadow: inset 0 0 0 1px var(--accent); }
+
+/* 提示词库入口 */
+.cmd-prompt-lib { padding: 4px 14px; }
+.cmd-lib-btn {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 4px 8px; border: 1px solid var(--border-soft); border-radius: 4px;
+  background: var(--bg-1); color: var(--text-2); font-size: 11px;
+  cursor: pointer; transition: all 0.15s;
+}
+.cmd-lib-btn:hover { background: var(--bg-2); color: var(--text-1); border-color: var(--accent); }
+
+/* 提示词库弹窗 */
+.prompt-lib-popup {
+  position: absolute; bottom: 100%; left: 0; right: 0; max-height: 240px;
+  background: var(--bg-0); border: 1px solid var(--border-soft); border-radius: 6px;
+  box-shadow: 0 -4px 12px rgba(0,0,0,0.15); display: flex; flex-direction: column;
+  z-index: 100; overflow: hidden; margin-bottom: 8px;
+}
+.prompt-lib-search { padding: 8px; border-bottom: 1px solid var(--border-soft); }
+.prompt-lib-search input {
+  width: 100%; padding: 4px 8px; border: 1px solid var(--border-soft); border-radius: 4px;
+  background: var(--bg-1); font-size: 12px; color: var(--text-1); outline: none;
+}
+.prompt-lib-search input:focus { border-color: var(--accent); }
+
+.prompt-lib-list { flex: 1; overflow-y: auto; padding: 4px; }
+.prompt-lib-item {
+  padding: 8px; border-radius: 4px; cursor: pointer; font-size: 12px; color: var(--text-1);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; line-height: 1.4;
+}
+.prompt-lib-item:hover { background: var(--bg-2); color: var(--accent); }
+.prompt-lib-empty { padding: 16px; text-align: center; color: var(--text-3); font-size: 12px; }
 .cmd-controls {
   display:flex; align-items:center; gap:6px; padding:8px 10px 10px; flex-wrap:wrap;
 }

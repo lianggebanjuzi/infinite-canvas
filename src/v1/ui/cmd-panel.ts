@@ -14,8 +14,28 @@ import { Backend, fetchImageModels, fetchChatModels } from '../api';
 import { DEFAULT_CHAT_MODEL_KEY } from '../nodes/text-gen';
 import { showToast } from './toast';
 import { floatingPanels } from './floating-panels';
+import { getSupportedAspectRatios, getModelCapabilities } from '../nodes/model-config';
 
-const RATIO_OPTIONS = ['3:4', '2:3', '4:5', '9:16', '1:4', '1:8', '1:1', '4:3', '3:2', '5:4', '16:9', '21:9', '4:1', '8:1', 'Auto'];
+const DEFAULT_RATIO_OPTIONS = ['1:1', '3:4', '4:3', '9:16', '16:9', '21:9', '2:3', '3:2', '4:5', '5:4', '1:4', '4:1', '1:8', '8:1', 'Auto'];
+
+/**
+ * 根据当前选中的模型ID动态计算支持的比例选项
+ * @param modelId 当前选中的模型ID
+ * @returns 支持的比例列表
+ */
+function getDynamicRatioOptions(modelId?: string): string[] {
+  if (!modelId) return DEFAULT_RATIO_OPTIONS;
+
+  try {
+    const capabilities = getModelCapabilities(modelId);
+    return capabilities.aspectRatios;
+  } catch (e) {
+    console.error('获取模型能力失败:', e);
+    return DEFAULT_RATIO_OPTIONS;
+  }
+}
+
+const RATIO_OPTIONS = DEFAULT_RATIO_OPTIONS;
 const RES_OPTIONS = ['1k', '2k', '4k'];
 const COUNT_OPTIONS = [1, 2, 3, 4];
 
@@ -29,7 +49,6 @@ const TEXT_GEN_INPUT_PLACEHOLDER = '输入命令，如：改得更专业、翻�
 
 class CmdPanel {
   private el: HTMLElement | null = null;
-  private ctxThumb!: HTMLElement;
   private ctxName!: HTMLElement;
   private ctxHint!: HTMLElement;
   private refs!: HTMLElement;
@@ -47,12 +66,13 @@ class CmdPanel {
   private chatModelOptions: Array<{ id: string; name: string }> = [];
   /** 动态参考图缩略元素（随 refImages/上游增删重建） */
   private _multiRefs: HTMLElement[] = [];
+  /** 提示词库弹窗 */
+  private libPopup: HTMLElement | null = null;
 
   init(): void {
     this.el = document.getElementById('cmd-panel');
     if (!this.el) return;
 
-    this.ctxThumb = document.getElementById('ctx-thumb') as HTMLElement;
     this.ctxName = document.getElementById('ctx-name') as HTMLElement;
     this.ctxHint = document.getElementById('ctx-hint') as HTMLElement;
     this.refs = document.getElementById('cmd-refs') as HTMLElement;
@@ -113,7 +133,13 @@ class CmdPanel {
     });
     document.getElementById('chip-ratio')?.addEventListener('click', (e: MouseEvent) => {
       e.stopPropagation();
-      this._showChipMenu(e.currentTarget as HTMLElement, RATIO_OPTIONS.map(v => ({ id: v, name: v })), 'aspectRatio');
+      const node = selection.single();
+      if (!node) return;
+      // 根据模型ID获取支持的比例
+      const modelId = (node.params as any).model; // 从 params 中获取 model ID
+      const capabilities = getModelCapabilities(modelId || '');
+      const filteredRatios = capabilities.aspectRatios.map(v => ({ id: v, name: v }));
+      this._showChipMenu(e.currentTarget as HTMLElement, filteredRatios, 'aspectRatio');
     });
     document.getElementById('chip-res')?.addEventListener('click', (e: MouseEvent) => {
       e.stopPropagation();
@@ -129,6 +155,147 @@ class CmdPanel {
       if (!node) return;
       interactions.openFilePickerForRef(node.id);
     });
+
+    // 提示词库按钮
+    document.getElementById('cmd-lib-btn')?.addEventListener('click', (e: MouseEvent) => {
+      e.stopPropagation();
+      this._toggleLibPopup();
+    });
+
+    // 保存提示词按钮
+    document.getElementById('cmd-lib-save')?.addEventListener('click', (e: MouseEvent) => {
+      e.stopPropagation();
+      this._saveCurrentPromptToLibrary();
+    });
+  }
+
+  // ==================== 提示词库 ====================
+
+  private static readonly LIB_KEY = 'icv_prompt_library';
+
+  private _getLibrary(): string[] {
+    try {
+      const raw = localStorage.getItem(CmdPanel.LIB_KEY);
+      if (raw) return JSON.parse(raw);
+    } catch { /* ignore */ }
+    return [];
+  }
+
+  private _saveCurrentPromptToLibrary(): void {
+    const text = this.input.value.trim();
+    if (!text) {
+      showToast('提示词不能为空');
+      return;
+    }
+    const lib = this._getLibrary();
+    if (lib.includes(text)) {
+      showToast('已在提示词库中');
+      return;
+    }
+    lib.unshift(text);
+    this._saveLibrary(lib);
+    showToast('已保存到提示词库');
+  }
+
+  private _saveLibrary(list: string[]): void {
+    localStorage.setItem(CmdPanel.LIB_KEY, JSON.stringify(list));
+  }
+
+  private _toggleLibPopup(): void {
+    if (this.libPopup) {
+      this.libPopup.remove();
+      this.libPopup = null;
+      return;
+    }
+    this._showLibPopup();
+  }
+
+  private _showLibPopup(): void {
+    if (!this.el) return;
+    const lib = this._getLibrary();
+
+    const saveBtnHtml = lib.length === 0 || lib.includes(this.input.value.trim())
+      ? ''
+      : `<button class="cmd-lib-save-btn" id="cmd-lib-save" style="position: absolute; right: 8px; top: 8px; background: var(--accent); color: var(--on-accent); border: none; border-radius: 4px; padding: 4px 8px; font-size: 12px; cursor: pointer;">💾 保存</button>`;
+
+    const popup = document.createElement('div');
+    popup.className = 'prompt-lib-popup';
+    this.libPopup = popup;
+
+    // 搜索框
+    const searchWrap = document.createElement('div');
+    searchWrap.className = 'prompt-lib-search';
+    const searchInput = document.createElement('input');
+    searchInput.placeholder = '搜索提示词…';
+    searchInput.type = 'text';
+    searchWrap.appendChild(searchInput);
+    popup.appendChild(searchWrap);
+
+    // 保存按钮区
+    const saveWrap = document.createElement('div');
+    saveWrap.className = 'prompt-lib-save-wrapper';
+    saveWrap.innerHTML = saveBtnHtml;
+    popup.insertBefore(saveWrap, popup.firstChild);
+
+    // 列表
+    const list = document.createElement('div');
+    list.className = 'prompt-lib-list';
+    popup.appendChild(list);
+
+    const renderList = (filter = '') => {
+      list.innerHTML = '';
+      const items = filter ? lib.filter(p => p.toLowerCase().includes(filter.toLowerCase())) : lib;
+      if (items.length === 0) {
+        const empty = document.createElement('div');
+        empty.className = 'prompt-lib-empty';
+        empty.textContent = '无匹配提示词';
+        list.appendChild(empty);
+        return;
+      }
+      items.forEach(prompt => {
+        const item = document.createElement('div');
+        item.className = 'prompt-lib-item';
+        item.textContent = prompt;
+        item.title = prompt;
+        item.addEventListener('click', () => {
+          this.input.value = prompt;
+          this.input.dispatchEvent(new Event('input'));
+          this.libPopup?.remove();
+          this.libPopup = null;
+        });
+        list.appendChild(item);
+      });
+    };
+
+    renderList();
+    searchInput.addEventListener('input', () => renderList(searchInput.value));
+
+    // 关闭处理
+    const closeHandler = (e: MouseEvent) => {
+      if (!popup.contains(e.target as Node) && !(e.target as HTMLElement)?.closest('#cmd-lib-btn')) {
+        popup.remove();
+        this.libPopup = null;
+        document.removeEventListener('click', closeHandler);
+      }
+    };
+    setTimeout(() => document.addEventListener('click', closeHandler), 0);
+
+    // 使用 fixed 定位，避免父容器 overflow:hidden 裁剪
+    popup.style.position = 'fixed';
+    const btn = document.getElementById('cmd-lib-btn');
+    if (btn) {
+      const rect = btn.getBoundingClientRect();
+      popup.style.left = rect.left + 'px';
+      popup.style.bottom = (window.innerHeight - rect.top + 4) + 'px';
+      popup.style.width = rect.width + 'px';
+    } else {
+      popup.style.left = '50%';
+      popup.style.bottom = '100px';
+      popup.style.transform = 'translateX(-50%)';
+    }
+
+    document.body.appendChild(popup);
+    searchInput.focus();
   }
 
   private _onSend(): void {
@@ -264,7 +431,6 @@ class CmdPanel {
 
     // 上下文标识
     this.ctxName.textContent = node.title || '节点';
-    this.ctxThumb.style.backgroundImage = node.imageUrl ? `url('${node.imageUrl.replace(/'/g, "\\'")}')` : 'none';
 
     // text-gen 面板：隐藏绘图参数 chips（比例/分辨率/张数）与参考图区，模型 chip 切到文本模型；
     // image-gen 面板：绘图参数 chips 全显示（反推模式 UI 已删除，W2-2）
@@ -396,15 +562,10 @@ class CmdPanel {
     showToast('已回填历史反推文本');
   }
 
-  /** P1（W3-4）：最终 prompt 预览——仅 image-gen（非素材）显示 composeImagePrompt 只读结果，帮助理解「线即真相」 */
+  /** P1（W3-4）：最终 prompt 预览——已禁用，不再显示最终 prompt 预览 */
   private _renderPromptPreview(node: FlowNode): void {
     if (!this.promptPreview) return;
-    if (node.type === 'image-gen' && !flowState.isAssetNode(node)) {
-      const prompt = runEngine.composeImagePrompt(node.id);
-      this.promptPreview.textContent = prompt ? `最终 prompt：${prompt}` : '';
-      this.promptPreview.hidden = !prompt;
-      return;
-    }
+    // 用户不需要最终 prompt 预览，直接隐藏
     this.promptPreview.hidden = true;
   }
 

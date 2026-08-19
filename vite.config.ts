@@ -38,7 +38,7 @@ export default defineConfig({
 
   build: {
     outDir: '../gui/dist',
-    emptyOutDir: true,
+    emptyOutDir: false,
     // 单入口，不拆分 chunk，简化 pywebview 加载
     rollupOptions: {
       input: resolve(__dirname, 'src/index.html'),

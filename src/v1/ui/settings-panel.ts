@@ -41,6 +41,10 @@ interface KeyCardCtx {
   onKeysChange(next: BackendProviderKey[]): void;
   /** 重新渲染 key 卡片列表（增删 key 后调用） */
   onRenderKeys(): void;
+  /** 重新渲染模型列表（Key 级模型变更后调用） */
+  onRenderModels(): void;
+  /** 是否为 FluxPort 供应商（用于判断每个 Key 是否独立拉取模型） */
+  fluxPortMode: boolean;
 }
 
 class SettingsPanel {
@@ -637,6 +641,8 @@ class SettingsPanel {
         getUrl: () => textApiUrlInput.value.trim() || urlInput.value.trim(),
         onKeysChange: syncKeys,
         onRenderKeys: renderKeys,
+        onRenderModels: renderModelRows,
+        fluxPortMode: fluxPortMode,
       })));
     };
 
@@ -894,6 +900,7 @@ class SettingsPanel {
     const providerId = p.id;
     const keyId = k.id;
     let keyVisible = false;
+    const { fluxPortMode } = ctx;
 
     // ── 头部：key 名输入 + 启停 + 删除 ──
     const head = document.createElement('div');
@@ -952,9 +959,18 @@ class SettingsPanel {
     testBtn.className = 'mini-btn';
     testBtn.textContent = '测试连接';
     testBtn.addEventListener('click', () => void testConnection());
+
+    // FluxPort 模式下给每个 Key 单独"拉取模型"按钮
+    const fetchKeyModelsBtn = document.createElement('button');
+    fetchKeyModelsBtn.className = 'mini-btn';
+    fetchKeyModelsBtn.textContent = '拉取模型';
+    fetchKeyModelsBtn.style.display = fluxPortMode ? '' : 'none';
+    fetchKeyModelsBtn.addEventListener('click', () => void fetchKeyModels());
+
     keyBody.appendChild(keyInput);
     keyBody.appendChild(eyeBtn);
     keyBody.appendChild(testBtn);
+    if (fluxPortMode) keyBody.appendChild(fetchKeyModelsBtn);
     keyField.appendChild(keyBody);
     card.appendChild(keyField);
 
@@ -986,6 +1002,43 @@ class SettingsPanel {
         else showToast(res.message || '连接失败', false);
       } catch (e) {
         showToast('测试失败：' + (e as Error).message, false);
+      }
+    };
+
+    /** FluxPort 模式：用该 Key 自己的 API Key 拉取模型列表，只保存到这个 Key 下面 */
+    const fetchKeyModels = async (): Promise<void> => {
+      const url = ctx.getUrl();
+      const key = keyInput.value;
+      if (!url) { showToast('请先填写 API 地址', false); return; }
+      if (!key) { showToast('请先填写 API 密钥', false); return; }
+      try {
+        fetchKeyModelsBtn.disabled = true;
+        fetchKeyModelsBtn.textContent = '拉取中...';
+        const res = await Backend.fetchModels(url, key);
+        if (res.status !== 'success' || !res.models) {
+          showToast(res.message || '拉取模型失败', false);
+          return;
+        }
+        const models = res.models.map(m => ({
+          id: m.id,
+          name: m.name || m.id,
+          type: m.type === 'video' ? 'video' : (m.type === 'chat' ? 'chat' : 'drawing'),
+          enabled: m.enabled !== false,
+        }));
+        const saveRes = await Backend.updateKey(providerId, keyId, { models });
+        if (saveRes.status === 'success' && saveRes.keys) {
+          ctx.onKeysChange(saveRes.keys);
+          ctx.onRenderKeys();
+          ctx.onRenderModels();
+          showToast(`已拉取 ${models.length} 个模型`);
+        } else {
+          showToast(saveRes.message || '保存失败', false);
+        }
+      } catch (e) {
+        showToast('拉取模型失败：' + (e as Error).message, false);
+      } finally {
+        fetchKeyModelsBtn.disabled = false;
+        fetchKeyModelsBtn.textContent = '拉取模型';
       }
     };
 
