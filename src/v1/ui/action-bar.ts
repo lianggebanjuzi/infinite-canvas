@@ -1,6 +1,6 @@
 // src/v1/ui/action-bar.ts
 // 卡片上方操作条：仅单选出现，贴卡上沿，智能避让翻转（原型行为）
-// 首版动作按钮：扩图/复现已接入；其余为后续版本能力，点击提示
+// 首版动作按钮：扩图已接入；其余为后续版本能力，点击提示（复现已移除——配方信息保留即够用）
 
 import { flowState } from '../state/flow-state';
 import { selection } from '../state/selection';
@@ -9,7 +9,6 @@ import { cardView } from '../canvas/card-view';
 import { showToast } from './toast';
 import { cmdPanel } from './cmd-panel';
 import { outpaintPanel } from './outpaint-panel';
-import { reproduceService } from '../reproduce';
 import { floatingPanels } from './floating-panels';
 
 class ActionBar {
@@ -49,12 +48,6 @@ class ActionBar {
       void outpaintPanel.open(node.id);
       return;
     }
-    if (action === 'reproduce') {
-      // 复现（A1-A5）：带 trace 节点一键回填参数并重跑（新建独立节点，不破坏原图）；无 trace 节点按钮不可见
-      if (!node.trace) { showToast('该节点没有生成档案，无法复现', false); return; }
-      void reproduceService.reproduceFromNode(node.id);
-      return;
-    }
     // 多角度/打光/高清放大：第二版能力
     showToast('该能力将在后续版本开放', false);
   }
@@ -68,7 +61,7 @@ class ActionBar {
       return;
     }
     const node = selection.single();
-    // 文本节点 / 素材节点：隐藏操作条（素材仅展示图，无扩图/复现/下载等生成入口，判分支 #16+）
+    // 文本节点 / 素材节点：隐藏操作条（素材仅展示图，无扩图/下载等生成入口，判分支 #16+）
     if (!node || node.type === 'text-gen' || node.type === 'text-split' || flowState.isAssetNode(node)) {
       this.el.classList.remove('show', 'pos-below');
       return;
@@ -79,10 +72,6 @@ class ActionBar {
     const wr = wrap.getBoundingClientRect();
     const { x: cx0, y: topY } = canvasView.worldToWrap(node.x + CARD_W / 2, node.y);
     const botY = canvasView.worldToWrap(0, node.y + (node.h ?? cardView.cardHeight(node))).y;
-
-    // 复现按钮显隐：仅带 trace 的节点显示（A1：无 trace 节点不出现；text 反推产物 trace=null 天然隐藏）
-    const reproduceBtn = this.el.querySelector('[data-action="reproduce"]') as HTMLElement | null;
-    if (reproduceBtn) reproduceBtn.classList.toggle('act-hidden', !node.trace);
 
     // 与指令面板同侧翻转：面板在上 → 操作条在下
     const cpH = (document.getElementById('cmd-panel') as HTMLElement)?.offsetHeight || 240;

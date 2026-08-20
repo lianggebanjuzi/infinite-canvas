@@ -3,16 +3,14 @@
 // 数据源 = assetStore.getAdoptedAssets()；订阅 assetStore 即时刷新（X1 四处同步之一，S7）。
 // 卡片动作：取消采纳（X3 变更前 flowHistory.record()）/ 锁定·解锁 / 查看大图（复用 #img-modal）/
 //           复制配方（R2：一键复制 prompt 全文，无配方置灰）/
-//           拖入画布（复用 application/history-image 拖拽语义）/ 复现（R2 起：记录配方优先，
-//           → meta 会话缓存 → historyDrawer 反查兜底，见 _toEntry）。
+//           拖入画布（复用 application/history-image 拖拽语义）。（复现入口已移除：配方信息保留即够用）
 // R2 配方信息区：prompt 摘要（1-2 行截断，title 全文）+ model · 比例 · 分辨率 chips；无配方显示缺失占位。
 // 搜索（S8 P1）：按 prompt / model / tags 过滤；空态/无匹配文案见共享知识 3（人话常量）。
 // 抽屉互斥（S5）：setMutex 由 main.ts 编排，不内部 import 历史图库单例做关闭（避免循环依赖）；
-//           对 historyDrawer 仅单向依赖 getEntryByImageUrl（复现反查，类图明示）。
+//           对 historyDrawer 仅单向依赖 getEntryByImageUrl（旧记录配方反查，类图明示）。
 
 import { flowHistory } from '../state/history';
 import { assetStore } from '../asset-store';
-import { reproduceService } from '../reproduce';
 import { historyDrawer } from './history-drawer';
 import { openImageModal } from '../canvas/card-view';
 import { showToast } from './toast';
@@ -135,7 +133,7 @@ class AssetDrawer {
     });
   }
 
-  /** 卡片：缩略图 + 配方信息区（R2）/ 采纳+锁定角标 / hover 动作（取消采纳·锁定·查看·复制配方·复现）/ 拖入手势（S4） */
+  /** 卡片：缩略图 + 配方信息区（R2）/ 采纳+锁定角标 / hover 动作（取消采纳·锁定·查看·复制配方）/ 拖入手势（S4） */
   private _renderCard(item: AssetAsset): void {
     if (!this.grid) return;
     const div = document.createElement('div');
@@ -169,7 +167,6 @@ class AssetDrawer {
         <button class="ht-act${locked ? ' on' : ''}" data-act="lock">${locked ? '已锁定' : '锁定'}</button>
         <button class="ht-act" data-act="view">查看</button>
         <button class="ht-act" data-act="copy"${hasRecipe ? '' : ' disabled title="配方缺失"'}>复制配方</button>
-        <button class="ht-act" data-act="reproduce">复现</button>
       </div>`;
 
     // 拖入手势（复用 history-image 拖拽语义；拖入画布传递缩略图 data URL，构图参考足够；无 URL 的占位卡不可拖）
@@ -205,9 +202,6 @@ class AssetDrawer {
         // R2：复制配方（prompt 全文；无配方按钮已置灰）
         const meta = this._recipeMeta(item);
         this._copyPrompt(meta?.prompt || '');
-      } else if (act === 'reproduce') {
-        // S9：复现（记录配方优先 → meta → historyDrawer 反查，_toEntry 内部统一）
-        void reproduceService.reproduceFromHistory(this._toEntry(item));
       }
     });
 
@@ -231,7 +225,7 @@ class AssetDrawer {
   }
 
   /**
-   * AssetAsset → HistoryEntry（复现 S9 / 搜索 S8 用）。
+   * AssetAsset → HistoryEntry（搜索 S8 / 旧记录配方反查用）。
    * R2 取数优先级（共享知识 8.3）：记录配方（持久化真相）→ meta（会话缓存）→ historyDrawer 反查兜底。
    */
   private _toEntry(item: AssetAsset): Extract<HistoryEntry, { kind: 'image' }> {

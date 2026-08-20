@@ -1,10 +1,11 @@
 // src/v1/ui/history-drawer.ts
 // 左侧悬浮历史图库抽屉 + 拖入手势（改造自 src/components/history-sidebar.ts）
 // 增量（成图库收口）：B1 成图/文本分区 tab（默认成图）；B5 搜索（prompt/model/tags 过滤成图，outputText 过滤文本）
-//   B2/B3 采纳/锁定动作 + 角标（同一 AssetStore，X1 同步之一）；A6 图库卡片 hover「复现」
+//   B2/B3 采纳/锁定动作 + 角标（同一 AssetStore，X1 同步之一）
 // incremental-3 拆分（S1/S2）：历史图库专注「全部出图/文本记录」——移除采纳/锁定 hover 动作，
-//   保留只读角标（已采纳/已锁定，天然不可点）；复现/拖入画布/搜索/tab 全部保留；
-//   新增 setMutex（互斥回调，由 main.ts 编排，不内部 import 资产抽屉）与 getEntryByImageUrl（资产库复现 S9 反查）。
+//   保留只读角标（已采纳/已锁定，天然不可点）；复制提示词/拖入画布/搜索/tab 全部保留；
+//   新增 setMutex（互斥回调，由 main.ts 编排，不内部 import 资产抽屉）与 getEntryByImageUrl（资产库配方反查）。
+//   （复现入口已于 2026-08-20 移除：配方信息保留即够用，见当日 memory）
 // 生成图自动加入（addImage 带搜索元数据）；拖拽缩略图到画布触发 A4 语义（由 interactions 处理落点）。
 // R3 批次分组：写侧 batchId（run-engine 生成，jsonl 行携带）→ 读侧 view='batch' 按 batchId 分组为批次卡；
 //   time 视图保持现有单图流水；无 batchId 旧行在 batch 视图下按单图回退展示；text 不入批次（text tab 隐藏视图切换）。
