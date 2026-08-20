@@ -16,6 +16,7 @@ import tempfile
 import base64 as b64lib
 import io
 import os
+import re
 
 from urllib.parse import urlparse
 
@@ -66,6 +67,25 @@ def _guess_image_ext(content_type, content):
             return _IMAGE_EXT_MAP.get(fmt, 'png')
     except Exception:
         return 'png'
+
+
+def _repair_utf8_mojibake(text):
+    """修复中转站将 UTF-8 字节错误按 Latin-1 返回时产生的中文乱码。
+
+    仅在存在多个典型乱码标记、且修复后 CJK 字符明显增加时替换，避免改动正常文本。
+    """
+    if not isinstance(text, str):
+        return text
+    markers = 'ÃÂâäåæçèéêëïðñòó'
+    if sum(text.count(char) for char in markers) < 2:
+        return text
+    try:
+        repaired = text.encode('latin-1').decode('utf-8')
+    except (UnicodeEncodeError, UnicodeDecodeError):
+        return text
+    cjk_before = sum('\u4e00' <= char <= '\u9fff' for char in text)
+    cjk_after = sum('\u4e00' <= char <= '\u9fff' for char in repaired)
+    return repaired if cjk_after >= cjk_before + 2 else text
 
 
 # ─────────────────────────────────────────
@@ -142,41 +162,26 @@ _RESOLUTION_MAP = {'1k': '1K', '2k': '2K', '4k': '4K'}
 # OpenAI 图片（gpt-image-2）尺寸映射
 # ─────────────────────────────────────────
 # 来源：https://platform.openai.com/docs/guides/image-generation
-# gpt-image-2 支持的约束：
+# gpt-image-2 官方 size 约束：
 #   - 最大边长 ≤ 3840px
 #   - 两边均须为 16 的倍数
 #   - 长短边比例 ≤ 3:1
 #   - 总像素范围：655,360 ~ 8,294,400
-_OPENAI_IMAGE_VALID_SIZES = frozenset({
-    # 1K 档位
-    '1024x1024', '1024x1536', '1536x1024', '1024x1792', '1792x1024',
-    # 2K 档位
-    '2048x2048', '2048x1152', '1152x2048',
-    # 4K 档位（实验性）
-    '3840x2160', '2160x3840', '2880x2880',
-})
-
-# aspectRatio -> (1k 档, 2k 档, 4k 档) 的 OpenAI size 映射：
-#   - 方图（1:1）：1k=1024x1024, 2k=2048x2048, 4k=2880x2880
-#   - 竖图（3:4 / 9:16）：1k=1024x1536, 2k=1536x2048, 4k=2160x3840
-#   - 横图（4:3 / 16:9）：1k=1536x1024, 2k=2048x1536, 4k=3840x2160
-#   - 其他比例：根据实际像素计算
-#   - 未知 aspectRatio：回退正方形 1024x1024
+# 官方 API 并无固定 size 白名单；任意符合上述约束的宽 x 高均可用。
+# 以下是产品 UI 的 1K / 2K / 4K 档位映射：约 1MP / 4MP / 合法最大档，
+# 每个尺寸均严格保持用户选择的比例。4K 档的输出像素大于 2560x1440，属官方
+# 标记的实验性范围。
 _OPENAI_ASPECT_TO_SIZE = {
     '1:1':  ('1024x1024', '2048x2048', '2880x2880'),
-    '3:4':  ('1024x1536', '1536x2048', '2160x3840'),
-    '4:3':  ('1536x1024', '2048x1536', '3840x2160'),
-    '9:16': ('1024x1536', '1152x2048', '2160x3840'),
-    '16:9': ('1536x1024', '2048x1152', '3840x2160'),
-    '21:9': ('1344x576', '2016x864', '3808x1632'),
-    '1:4':  ('512x2048', '512x2048', '512x2048'),
-    '4:1':  ('2048x512', '2048x512', '2048x512'),
-    '1:8':  ('256x2048', '256x2048', '256x2048'),
-    '8:1':  ('2048x256', '2048x256', '2048x256'),
-    '2:3':  ('1024x1536', '1376x2064', '2336x3504'),
-    '3:2':  ('1536x1024', '2064x1376', '3504x2336'),
-    '4:5':  ('1024x1280', '1664x2080', '2560x3200'),
-    '5:4':  ('1280x1024', '2080x1664', '3200x2560'),
+    '3:4':  ('864x1152', '1728x2304', '2448x3264'),
+    '4:3':  ('1152x864', '2304x1728', '3264x2448'),
+    '2:3':  ('832x1248', '1664x2496', '2336x3504'),
+    '3:2':  ('1248x832', '2496x1664', '3504x2336'),
+    '4:5':  ('896x1120', '1792x2240', '2560x3200'),
+    '5:4':  ('1120x896', '2240x1792', '3200x2560'),
+    '9:16': ('720x1280', '1440x2560', '2160x3840'),
+    '16:9': ('1280x720', '2560x1440', '3840x2160'),
+    '21:9': ('1568x672', '3136x1344', '3808x1632'),
 }
 
 # resolution -> 档位下标（0=1k 档，1=2k 档，2=4k 档）
@@ -236,7 +241,8 @@ class UnifiedAPIRouter:
 
         try:
             response = requests.post(
-                url, headers=headers, json=payload, timeout=120, proxies=proxies
+                # 文本/反推请求不设客户端超时：部分上游模型首包较慢，由用户主动取消或上游自行结束。
+                url, headers=headers, json=payload, proxies=proxies
             )
             if response.status_code == 200:
                 return self._parse_chat_response(response.json())
@@ -357,20 +363,30 @@ class UnifiedAPIRouter:
         proxies   = None if use_proxy else {"http": None, "https": None, "all": None}
 
         url, request_body = self._build_image_request(api_url, model_entry, prompt, options)
-        # FluxPort 等中转站推荐（非强制）提交时带唯一幂等键，避免重复提交产生重复任务
+        # 每次「重新生成」必须是独立抽卡：幂等键只防同一次网络重试被重复创建，
+        # 而禁缓存头和请求 ID 用于阻止中转/CDN 按相同 prompt+参数复用上一轮图片。
+        # 这些都只作用于 HTTP 元数据，不向 prompt 拼随机字符，避免污染生成语义与历史配方。
+        request_id = f"icv-img-{uuid.uuid4().hex}"
         idempotency_key = (
             (options or {}).get('idempotencyKey')
-            or f"icv-img-{uuid.uuid4().hex}"
+            or request_id
         )
         headers = {
             'Authorization':   f'Bearer {api_key}',
             'Idempotency-Key': idempotency_key,
+            'X-Request-ID': request_id,
+            'X-ICV-Force-Fresh': '1',
+            'Cache-Control': 'no-cache, no-store, max-age=0',
+            'Pragma': 'no-cache',
         }
         # multipart 的 Content-Type（含 boundary）必须由 requests 生成；JSON 才显式声明。
         if 'files' not in request_body:
             headers['Content-Type'] = 'application/json'
 
-        print(f"[UnifiedAPI] 图片请求 | provider={provider['name']} | model={model_entry.id} | format={model_entry.api_format.value} | url={url}")
+        print(
+            f"[UnifiedAPI] 图片请求 | provider={provider['name']} | model={model_entry.id} | "
+            f"format={model_entry.api_format.value} | fresh_request={request_id[:16]} | url={url}"
+        )
 
         try:
             response = requests.post(
@@ -892,19 +908,41 @@ class UnifiedAPIRouter:
         """
         把 UI 的 resolution + aspectRatio 映射为 OpenAI size 字符串（宽x高）。
         映射规则：
-          - aspectRatio 优先决定方向（竖/横/方），resolution 决定长边档位
-          - 1k -> 1024 档；2k -> 1792 档；4k -> 2048/3072 档
-          - Auto / 未知 aspectRatio -> 正方形 1024x1024
+          - aspectRatio 优先，resolution 决定约 1MP / 4MP / 合法最大档
+          - 映射尺寸保持所选比例，并满足 gpt-image-2 的官方 size 约束
+          - Auto / 未知 aspectRatio -> 官方 `auto`，由模型选择尺寸
           - 未知 resolution -> 按 1k 处理
-        返回 OpenAI 合法 size（见 _OPENAI_ASPECT_TO_SIZE / _OPENAI_IMAGE_VALID_SIZES）。
+        返回 OpenAI 合法 size（见 _OPENAI_ASPECT_TO_SIZE）。
         """
         res = str(resolution or '1k').strip().lower()
         tier = _OPENAI_RESOLUTION_TIER.get(res, 0)
         ar = str(aspect_ratio or 'Auto').strip().lower()
         sizes = _OPENAI_ASPECT_TO_SIZE.get(ar)
         if sizes is None:
-            return '1024x1024'
+            return 'auto'
         return sizes[tier]
+
+    @staticmethod
+    def _is_valid_openai_image_size(size):
+        """校验 gpt-image-2 的官方 size 参数（或官方 auto）。"""
+        if not isinstance(size, str):
+            return False
+        normalized = size.strip().lower()
+        if normalized == 'auto':
+            return True
+        match = re.fullmatch(r'(\d+)x(\d+)', normalized)
+        if not match:
+            return False
+        width, height = (int(match.group(1)), int(match.group(2)))
+        long_edge, short_edge = max(width, height), min(width, height)
+        return (
+            long_edge <= 3840
+            and width % 16 == 0
+            and height % 16 == 0
+            and short_edge > 0
+            and long_edge <= short_edge * 3
+            and 655_360 <= width * height <= 8_294_400
+        )
 
     def _parse_data_url_image(self, data_url):
         """
@@ -926,30 +964,57 @@ class UnifiedAPIRouter:
 
     def _build_openai_image_payload(self, api_url, model_id, prompt, options):
         """构建 OpenAI 图片（gpt-image / dall-e 系）payload"""
-        # 显式传入的 size 优先（向后兼容）；非法/缺失时按 resolution+aspectRatio 映射
-        size = options.get('size')
-        if not isinstance(size, str) or size.strip().lower() not in _OPENAI_IMAGE_VALID_SIZES:
-            size = self._map_openai_image_size(
-                options.get('resolution', '1k'),
-                options.get('aspectRatio', 'Auto'),
-            )
-        n = options.get('count', 1)
-        # 仅 FluxPort 图片直连域支持并推荐 async / 任务资产协议；其它 OpenAI 兼容供应商
-        # 保持既有同步请求，避免给未知供应商额外字段造成 400。
+        model_lower = model_id.lower()
+        is_gpt_image_2 = 'gpt-image-2' in model_lower
         image_origin = resolve_image_api_base(api_url)
-        is_fluxport_media = (urlparse(image_origin).hostname or '').lower() == 'api.ai-media.vip'
+        image_host = (urlparse(image_origin).hostname or '').lower()
+        is_fluxport_media = image_host == 'api.ai-media.vip'
+        is_official_openai = image_host == 'api.openai.com'
 
         # 参考图必须走 OpenAI Images edits 的 multipart 协议；文档示例明确不接受
         # generations JSON 里的自定义 image 字段。无参考图时走 generations JSON。
+        reference_inputs = [
+            img for img in options.get('referenceImages', [])
+            if isinstance(img, str) and img.startswith('data:image')
+        ]
         ref_images = []
-        for img_data in options.get('referenceImages', []):
+        for img_data in reference_inputs:
             parsed = self._parse_data_url_image(img_data)
             if parsed is None:
                 print("[UnifiedAPI] OpenAI 图片参考图解析失败，已忽略该图（不阻断文生图）")
                 continue
             mime, data = parsed
             ref_images.append((mime, data))
-        model_lower = model_id.lower()
+
+        # GPT Image 2 的 size 是官方开放尺寸参数。只有直连官方端点才发送
+        # size=auto；当前 FluxPort 中转会将 auto 静默降级为 1024x1024，故改为显式
+        # 尺寸：优先参考图比例，无参考图则使用产品默认 3:4，始终保留用户所选分辨率档位。
+        size = options.get('size')
+        if is_gpt_image_2:
+            use_auto_size = isinstance(size, str) and size.strip().lower() == 'auto'
+            if not self._is_valid_openai_image_size(size) or (use_auto_size and not is_official_openai):
+                requested_aspect = str(options.get('aspectRatio', 'Auto') or 'Auto').strip()
+                if requested_aspect.lower() == 'auto' and not is_official_openai:
+                    inferred_aspect = self._infer_aspect_from_ref(reference_inputs[0]) if reference_inputs else None
+                    requested_aspect = inferred_aspect if inferred_aspect in _OPENAI_ASPECT_TO_SIZE else '3:4'
+                size = self._map_openai_image_size(
+                    options.get('resolution', '1k'),
+                    requested_aspect,
+                )
+            else:
+                size = size.strip().lower()
+        else:
+            if not self._is_valid_openai_image_size(size) or size.strip().lower() == 'auto':
+                size = self._map_openai_image_size(
+                    options.get('resolution', '1k'),
+                    options.get('aspectRatio', 'Auto'),
+                )
+                if size == 'auto':
+                    size = '1024x1024'
+            else:
+                size = size.strip().lower()
+        n = options.get('count', 1)
+        print(f"[UnifiedAPI] OpenAI 图片尺寸 | model={model_id} | host={image_host} | size={size}")
         # FluxPort 的 Grok 文档将文生图与编辑模型明确分开，提前给出可行动的错误，
         # 不把 quality 模型误送到 /images/edits 后再返回难懂的 4xx。
         if 'grok-imagine-image' in model_lower:
@@ -1357,7 +1422,7 @@ class UnifiedAPIRouter:
             content = message.get('content')
 
             if isinstance(content, str):
-                return {"success": True, "text": content}
+                return {"success": True, "text": _repair_utf8_mojibake(content)}
 
             if isinstance(content, list):
                 texts = [
@@ -1365,7 +1430,7 @@ class UnifiedAPIRouter:
                     for part in content
                     if isinstance(part, dict) and part.get('type') == 'text'
                 ]
-                return {"success": True, "text": '\n'.join(texts)}
+                return {"success": True, "text": _repair_utf8_mojibake('\n'.join(texts))}
 
             return {"success": False, "error": "API 返回格式错误"}
 

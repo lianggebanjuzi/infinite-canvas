@@ -14,6 +14,16 @@ function isFluxPortProvider(provider: BackendProvider): boolean {
   return urls.includes('api.uselg.top') || urls.includes('api.ai-media.vip');
 }
 
+const COMMON_FLUX_IMAGE_MODELS = new Set([
+  'gpt-image-2',
+  'gemini-3-pro-image-preview',
+  'gemini-3.1-flash-image-preview',
+]);
+
+function isCommonFluxChatModel(modelId: string): boolean {
+  return /^gpt-5\./i.test(modelId);
+}
+
 /** 拉取可用的绘图模型列表（三层遍历：enabled provider → enabled key → enabled drawing model；三段 id）。
  * 仅 FluxPort 的同名模型保留每个 Key 的独立选项；普通供应商仍折叠重复项。 */
 export async function fetchImageModels(): Promise<Array<{ id: string; name: string }>> {
@@ -28,14 +38,14 @@ export async function fetchImageModels(): Promise<Array<{ id: string; name: stri
       const fluxPortMode = isFluxPortProvider(p);
       (p.keys || []).forEach(k => {
         if (k.enabled === false) return;
-      // Skip models from text-generation keys (e.g., "text" key) - these models
-      // are for text generation (chat), not image generation, and should not
-      // appear in image node model selection
+      // 对话 Key 不应出现在图片节点模型选择中。旧配置可能仍保留曾被
+      // “拉取模型”写入的绘图条目，因此以 Key 名作为额外隔离保护。
       const keyName = (k.name || '').toLowerCase();
-      if (keyName.includes('text') || keyName.includes('文本')) return;
+      if (keyName.includes('text') || keyName.includes('文本') || keyName.includes('chat') || keyName.includes('对话')) return;
         const keyLabel = (k.name || 'key').trim();
         (k.models || [])
           .filter(m => m.enabled !== false && m.type === 'drawing')
+          .filter(m => !fluxPortMode || COMMON_FLUX_IMAGE_MODELS.has(m.id))
           .forEach(m => {
             const dedupeKey = `${p.id}:${m.id}`;
             if (!fluxPortMode && seen.has(dedupeKey)) return;
@@ -68,6 +78,7 @@ export async function fetchChatModels(): Promise<Array<{ id: string; name: strin
         const keyLabel = (k.name || 'key').trim();
         (k.models || [])
           .filter(m => m.enabled !== false && m.type === 'chat')
+          .filter(m => !fluxPortMode || isCommonFluxChatModel(m.id))
           .forEach(m => {
             const dedupeKey = `${p.id}:${m.id}`;
             if (!fluxPortMode && seen.has(dedupeKey)) return;

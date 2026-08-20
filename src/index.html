@@ -93,7 +93,7 @@
     </button>
   </div>
 
-  <!-- 画布 -->
+    <!-- 画布 -->
   <div class="canvas-wrap" id="canvas-wrap">
     <!-- 顶部悬浮操作条（仅单选出现） -->
     <div class="action-bar" id="action-bar">
@@ -136,6 +136,16 @@
     </div>
     <div class="selection-box" id="selection-box"></div>
 
+    <!-- 视口导航：节点分散时快速回到全部内容或当前创作点。 -->
+    <div class="canvas-nav" aria-label="画布视图">
+      <button class="canvas-nav-btn" id="btn-fit-canvas" title="适配全部节点到视口" aria-label="适配全部节点到视口">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M8 3H5a2 2 0 0 0-2 2v3M16 3h3a2 2 0 0 1 2 2v3M8 21H5a2 2 0 0 1-2-2v-3M16 21h3a2 2 0 0 1 2 2v-3"/></svg>
+      </button>
+      <button class="canvas-nav-btn" id="btn-focus-selected" title="聚焦当前选中节点" aria-label="聚焦当前选中节点">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="7"/><circle cx="12" cy="12" r="2"/></svg>
+      </button>
+    </div>
+
     <!-- 指令面板（贴卡片下沿，仅单选出现，空间不足自动翻到上方） -->
     <div class="cmd-panel" id="cmd-panel">
       <div class="cmd-context">
@@ -149,15 +159,14 @@
         </button>
       </div>
       <textarea class="cmd-input" id="cmd-input" placeholder="输入指令编辑这张图，如：把背景换成浅灰水泥墙，加一盆绿萝" spellcheck="false"></textarea>
-      <!-- 提示词库入口 -->
+      <!-- 提示词库：入口负责浏览，旁侧收藏只保存当前输入，避免两种操作抢同一视觉层级。 -->
       <div class="cmd-prompt-lib">
-        <button class="cmd-lib-btn" id="cmd-lib-btn" title="提示词库">
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H20v20H6.5a2.5 2.5 0 0 1 0-5H20"/></svg>
-          提示词库
+        <button class="cmd-lib-btn cmd-lib-browse-btn" id="cmd-lib-btn" title="打开提示词库">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H20v20H6.5a2.5 2.5 0 0 1 0-5H20"/><path d="M8 7h8M8 11h6"/></svg>
+          <span>提示词库</span>
         </button>
-        <button class="cmd-lib-btn cmd-lib-save-btn" id="cmd-lib-save" title="保存当前提示词到库">
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>
-          存入
+        <button class="cmd-lib-btn cmd-lib-save-btn" id="cmd-lib-save" title="收藏当前提示词" aria-label="收藏当前提示词">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20.5s-7-4.4-7-10.2A4.1 4.1 0 0 1 12 7.4a4.1 4.1 0 0 1 7 2.9c0 5.8-7 10.2-7 10.2Z"/></svg>
         </button>
       </div>
       <!-- text-gen 历史反推结果列表（仅选中文本反推节点时显示，JS 填充） -->
@@ -201,6 +210,9 @@
     <button class="icon-btn" title="设置" id="btn-settings">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-1-1.74l.15-.09a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg>
     </button>
+    <button class="icon-btn" title="任务面板" id="btn-task">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h16M4 12h16M4 18h10"/></svg>
+    </button>
     <button class="run-btn" id="btn-run-selected" title="运行选中节点（单选=运行当前卡）">
       <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 3l14 9-14 9V3Z"/></svg>
       <span>运行选中</span>
@@ -210,6 +222,9 @@
       <span>对比</span>
     </button>
   </div>
+
+  <!-- 底部任务面板（B-4：批次 + 逐 Job 状态/缩略图/失败/重试；运行中自动展开，结束保留摘要可收起） -->
+  <div class="task-panel" id="task-panel"></div>
 
   <!-- 空态引导（挂起：全新启动不再显示引导卡；代码保留便于恢复，恢复时取消注释并同步 main.ts 的 emptyState.init()） -->
   <!--
@@ -327,6 +342,18 @@
 
 <!-- 隐藏文件选择（追加参考图） -->
 <input type="file" id="file-input" accept="image/*" style="display:none;">
+
+<!-- 结果查看器抽屉（C-2：批次大图浏览/切换/失败/下载/复制/反推/再编辑/单项重试；从右侧滑出） -->
+<div class="result-viewer" id="result-viewer">
+  <div class="rv-head">
+    <h2>结果查看器</h2>
+    <span class="rv-count" id="rv-count"></span>
+    <button class="rv-close" id="rv-close" title="关闭">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
+    </button>
+  </div>
+  <div class="rv-body" id="rv-body"></div>
+</div>
 
 <!-- 提示 toast -->
 <div class="toast-hint" id="toast"></div>

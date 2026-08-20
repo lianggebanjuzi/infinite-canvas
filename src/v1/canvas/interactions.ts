@@ -7,9 +7,9 @@ import { selection } from '../state/selection';
 import { dirty } from '../state/dirty';
 import { flowHistory } from '../state/history';
 import { nodeRegistry } from '../nodes/node-registry';
-import { canvasView, CARD_W } from './canvas-view';
+import { canvasView, CARD_W, imageCardHeight } from './canvas-view';
 import { cardView, openImageModal, imageModalInfoFromNode } from './card-view';
-import { linkView } from './link-view';
+import { linkView, connectionDescription } from './link-view';
 import { runEngine } from '../engine/run-engine';
 import { showToast } from '../ui/toast';
 import { floatingPanels } from '../ui/floating-panels';
@@ -199,7 +199,7 @@ class Interactions {
   private _startResizeDrag(e: MouseEvent, cardEl: HTMLElement): void {
     const nodeId = cardEl.dataset.nodeId || '';
     const node = flowState.getNode(nodeId);
-    if (!node || node.type !== 'text-gen') return;
+    if (!node || (node.type !== 'text-gen' && node.type !== 'text-split')) return;
     this._lastNodeDragMoved = false;
     if (!selection.isSelected(nodeId)) selection.select(nodeId, false); // 与节点拖拽一致：操作卡片即选中
     // 用户手势：变更前入撤销栈（参照连线/新建惯例）
@@ -374,6 +374,17 @@ class Interactions {
 
   private _updateDroppable(e: MouseEvent): void {
     this._clearDroppable();
+    // C-5：拖线时高亮全部兼容入端口（canConnect 查表结果，A-3 端口契约）
+    const fromId = this.drag?.nodeId;
+    if (fromId) {
+      document.querySelectorAll('.port.in').forEach(port => {
+        const cardEl = (port as HTMLElement).closest('.pcard') as HTMLElement | null;
+        const toId = cardEl?.dataset.nodeId || '';
+        if (toId && toId !== fromId && flowState.canConnect(fromId, toId) === null) {
+          port.classList.add('compatible');
+        }
+      });
+    }
     const el = document.elementFromPoint(e.clientX, e.clientY) as HTMLElement | null;
     const inPort = el?.closest('.port.in') as HTMLElement | null;
     if (inPort) {
@@ -388,6 +399,7 @@ class Interactions {
       this._lastDroppable = null;
     }
     document.querySelectorAll('.port.dragging').forEach(p => p.classList.remove('dragging'));
+    document.querySelectorAll('.port.compatible').forEach(p => p.classList.remove('compatible'));
   }
 
   private _finishConnect(e: MouseEvent): void {
@@ -417,7 +429,7 @@ class Interactions {
         if (flowState.canConnect(fromId, toId) === null) flowHistory.record();
         const res = flowState.connect(fromId, toId);
         if (!res.ok) showToast(res.error || '连线失败', false);
-        else showToast('已创建连线');
+        else showToast(connectionDescription(fromId, toId)); // C-5：连线完成显示传输语义
       }
       return;
     }
@@ -446,8 +458,9 @@ class Interactions {
         // 文本候选：仅当 from 是图片节点（素材/自建）——图片→文本 反推输入（W1-1）
         return !!fromNode && fromNode.type === 'image-gen';
       }
+      if (d.type === 'text-split') return !!fromNode && fromNode.type === 'text-gen';
       // image-gen 候选：from 是文本（关键词）或图片（参考图）均可
-      return !!fromNode && (fromNode.type === 'image-gen' || fromNode.type === 'text-gen');
+      return !!fromNode && (fromNode.type === 'image-gen' || fromNode.type === 'text-gen' || fromNode.type === 'text-split');
     });
     if (candidates.length === 0) return;
 
@@ -490,6 +503,7 @@ class Interactions {
   private _fillDefaultModelFor(nodeId: string): void {
     const node = flowState.getNode(nodeId);
     if (!node) return;
+    if (node.type === 'text-split') return;
     const resolver = node.type === 'text-gen' ? resolveDefaultChatModel : resolveDefaultModel;
     void resolver().then(model => {
       const cur = flowState.getNode(nodeId);
@@ -645,7 +659,7 @@ class Interactions {
       }
 
       // 空白处：建素材节点（image-gen + isAsset:true，imageUrl=图本身；替代现状「refImages 生成节点」）
-      const h = CARD_W / r;
+      const h = imageCardHeight(r);
       flowHistory.record();
       const node = flowState.addNode('image-gen', world.x - CARD_W / 2, world.y - h / 2, {
         isAsset: true,
@@ -672,8 +686,8 @@ class Interactions {
 
   /** 素材节点落位：目标卡左侧（上游位置，x 相隔一卡宽 + 间距；y 与目标卡垂直居中），避免覆盖目标卡 */
   private _assetPositionNear(target: FlowNode, r: number): { x: number; y: number } {
-    const targetH = Math.round(CARD_W / (target.ratio > 0 ? target.ratio : 4 / 3));
-    const assetH = Math.round(CARD_W / (r > 0 ? r : 4 / 3));
+    const targetH = cardView.cardHeight(target);
+    const assetH = imageCardHeight(r);
     return {
       x: target.x - CARD_W - 48,
       y: target.y + Math.round((targetH - assetH) / 2),

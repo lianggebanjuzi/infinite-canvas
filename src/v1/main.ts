@@ -14,6 +14,7 @@ import './styles/app.css';
 import './nodes/image-gen';
 // 文本反推：chat 模型反推参考图提示词，输出文本（outputText）；同步调 chat_v2
 import './nodes/text-gen';
+import './nodes/text-split';
 
 import { flowState } from './state/flow-state';
 import { selection } from './state/selection';
@@ -32,10 +33,13 @@ import { comparePanel } from './ui/compare-panel';
 // import { emptyState } from './ui/empty-state';
 import { settingsPanel } from './ui/settings-panel';
 import { outpaintPanel } from './ui/outpaint-panel';
+import { taskPanel } from './ui/task-panel';
+import { resultViewer } from './ui/result-viewer';
 import { saveCoordinator } from './save-coordinator';
 import { closeGuard } from './close-guard';
 import { flowHistory } from './state/history';
 import { runEngine } from './engine/run-engine';
+import { batchStore } from './state/batch-store';
 import { assetStore } from './asset-store';
 import { resolveDefaultModel, resolveDefaultChatModel } from './api';
 
@@ -132,6 +136,7 @@ function bindKeyboard(): void {
       settingsPanel.close();
       outpaintPanel.close();
       comparePanel.close();
+      resultViewer.close(); // C-2：结果查看器抽屉
       assetDrawer.close(); // 资产库抽屉（可选，设计 §2 文件列表）
       document.getElementById('ctx-menu')?.classList.remove('show');
       document.getElementById('img-modal')?.classList.remove('show');
@@ -143,7 +148,7 @@ function bindKeyboard(): void {
 // 类型感知：text-gen 回填 chat 默认模型（icv_default_chat_model），其余回填绘图默认模型（icv_default_model）
 async function fillDefaultModels(): Promise<void> {
   const needsChat = flowState.nodes.some(n => n.type === 'text-gen' && !(n.params.model as string | undefined));
-  const needsDraw = flowState.nodes.some(n => n.type !== 'text-gen' && !(n.params.model as string | undefined));
+  const needsDraw = flowState.nodes.some(n => n.type === 'image-gen' && !(n.params.model as string | undefined));
 
   if (needsChat) {
     const chatModel = await resolveDefaultChatModel();
@@ -157,7 +162,7 @@ async function fillDefaultModels(): Promise<void> {
     const drawModel = await resolveDefaultModel();
     if (drawModel) {
       flowState.nodes
-        .filter(n => n.type !== 'text-gen' && !(n.params.model as string | undefined))
+        .filter(n => n.type === 'image-gen' && !(n.params.model as string | undefined))
         .forEach(n => flowState.updateNodeParams(n.id, { model: drawModel }));
     }
   }
@@ -337,6 +342,9 @@ async function init(): Promise<void> {
   settingsPanel.init();
   outpaintPanel.init();
   comparePanel.init();
+  // 批次 2：底部任务面板 + 右侧属性编辑器 + 结果查看器（编辑职责从 cmd-panel 迁入右侧栏）
+  taskPanel.init();
+  resultViewer.init();
 
   // 资产索引（采纳/锁定单一数据源；X1 三处订阅）
   assetStore.init();
@@ -355,6 +363,9 @@ async function init(): Promise<void> {
 
   // 初始渲染（空画布 → 空态引导）
   flowState.notify();
+
+  // B-7：启动时从节点结果重建已知批次（打开项目时由 persistence.restore 再次重建）
+  batchStore.rebuildFromNodes();
 
   // 等待 pywebview 后加载模型（填充默认模型，供模板/新节点使用）+ 初始化窗口最大化图标（W4）
   await waitForPywebview();

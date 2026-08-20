@@ -26,8 +26,9 @@ class HistoryPersist {
    * imageUrl 为本次产出图 URL（写 history.jsonl 行用；GenerationTrace 本身不存 imageUrl 字段）。
    * promptOverride：文本走线增量——本次实际使用的合成 prompt（composeImagePrompt 唯一入口产出；
    * 上游文本 + 自身 prompt）。传入时优先于 node.params.prompt 记录到 trace（W3-2：trace 含上游文本，线即真相可回溯）。
+   * batchId/jobId（B-6 追溯）：可选；传入时写入 trace（新 trace 带批次/任务编号；旧调用方不传 → 字段缺省，兼容旧数据）。
    */
-  buildImageTrace(node: FlowNode, refs: string[], outputType: GenerationTrace['outputType'], imageUrl?: string, promptOverride?: string): GenerationTrace {
+  buildImageTrace(node: FlowNode, refs: string[], outputType: GenerationTrace['outputType'], imageUrl?: string, promptOverride?: string, batchId?: string, jobId?: string): GenerationTrace {
     const p = (node.params || {}) as unknown as StyleTransferParams;
     void imageUrl; // 供调用方构造 HistoryEntry 时携带（见 run-engine appendTrace）
     return {
@@ -42,6 +43,8 @@ class HistoryPersist {
       createdAt: Date.now(),
       parentId: node.parentId ?? node.id,
       outputType,
+      ...(batchId ? { batchId } : {}),
+      ...(jobId ? { jobId } : {}),
     };
   }
 

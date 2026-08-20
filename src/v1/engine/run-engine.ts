@@ -1,16 +1,18 @@
 // src/v1/engine/run-engine.ts
-// 执行引擎：run(nodeId)/runSelected()/runAll() + 状态机转换 + 下游 stale + 批次并发
+// 执行引擎：run(nodeId)/runSelected()/runAll() + 状态机转换 + 下游 stale + 批次限流队列（T03）
 // 唯一生成入口：任何节点类型不得绕过引擎直连 backend（共享约定第 3 条）
 //
-// 双卡模型（3.4）：
-//   - 生成节点 run → runBatch：N=clamp(count,1,4)（启动时快照 params.count）并发 N 个单张请求（count=1）
-//   - 入口快照 getReferenceImages(nodeId) 分叉：
-//       空（文生图）→ 第 1 张（按 index=0，非完成顺序）写回源节点自身 imageUrl（旧图先入历史）；
-//                     第 2..N 张各建一个新 image-gen 产出节点（连右侧、parentId=源节点）；成功不清空 imageUrl。
-//       非空（图生图）→ 第 1 张同样写回源节点自身（旧图先入历史、新图覆盖 imageUrl；锁定保护沿用）；
-//                     第 2..N 张各建一个新 image-gen 产出节点（连右侧、parentId=源节点）；不再清空源节点 imageUrl。
-//   - 重跑先 removeChildren 清掉旧的「纯引擎产出」子节点（安全策略见 flow-state；手动改造的保留并标 stale）
-//   - 部分失败：有成功即 done + toast「成功 x/y」；全失败才 fail（旧图保留）
+// 批次模型（3.4 / B 批次改造）：
+//   - 生成节点 run → runBatch：N=clamp(count,1,4) 或文本拆分段数（启动时快照）
+//   - 经 batch-queue 限流执行（默认并发 2，可配 1~3）；删除 Promise.allSettled 全量并发
+//   - Batch = 执行态事实源（batch-store）；Job 成功回调（onComplete）单向写回节点结果
+//   - count=1 单图：第 1 张（也是唯一一张）写回源节点自身 imageUrl（旧图先入历史；锁定保护沿用）
+//   - count>1 与文本拆分：全部成功图写回 generatedImages（同一节点卡内浏览），首图兼作 imageUrl 预览；
+//     废除自动建子卡（createResultCard 保留供扩图/历史兼容入口使用）
+//   - 每 Job 独立 error；失败可逐条（retryJob）/全部（retryFailed）重试；成功图不因兄弟失败丢失
+//   - 重跑先 removeChildren 清掉旧的「纯引擎产出」子节点（安全策略见 flow-state；手动改造的保留并标 stale；
+//     用户拍板：历史子节点按现有安全策略处理，不额外删除）
+//   - 批次汇总：全成功 done / 有成功有失败 partial-failed / 全失败 fail / 取消 idle（旧图保留）
 //   - busy 锁粒度=整个批次（批次内并发、批次间串行）
 //
 // 文本走线 / 反推归位（增量）：
@@ -25,10 +27,12 @@ import { flowHistory } from '../state/history';
 import { nodeRegistry } from '../nodes/node-registry';
 import { Backend, fetchImageModels } from '../api';
 import { pollTask, PollResult } from './poller';
+import { batchStore } from '../state/batch-store';
+import { batchQueue, readConcurrency, BatchCompleteFn, BatchJobCompleteFn, JobRunOutcome, RunJobFn } from './batch-queue';
 import { historyDrawer } from '../ui/history-drawer';
 import { historyPersist } from '../history-persist';
 import { linkView } from '../canvas/link-view';
-import { CARD_W } from '../canvas/canvas-view';
+import { CARD_W, imageCardHeight } from '../canvas/canvas-view';
 import { showToast } from '../ui/toast';
 import { assetStore } from '../asset-store';
 
@@ -40,12 +44,12 @@ const ctx: FlowContext = {
   getImageModels: fetchImageModels,
 };
 
-/** 批次进度（不持久化；cmd-panel 在 run 状态实时展示） */
-interface BatchProgress {
-  total: number;
-  done: number;
-  failed: number;
-  lastError: string | null;
+/** 批次执行处理器（run-engine 侧注册；重试时复用同一批 runJob/onComplete，保证与原始批次同源） */
+interface BatchRunner {
+  nodeId: string;
+  runJob: RunJobFn;
+  onJobComplete: BatchJobCompleteFn;
+  onComplete: BatchCompleteFn;
 }
 
 interface ActiveRun {
@@ -119,17 +123,19 @@ class RunEngine {
   private busy = false;
   private activeRun: ActiveRun | null = null;
 
-  /** 批次瞬时进度（不持久化）：nodeId → {total,done,failed} */
-  private batchProgress = new Map<string, BatchProgress>();
-  /** 本批次新建的产出节点 id 集合（供 markUpstreamChangedExcept 跳过） */
+  /** 执行中批次处理器注册表（batchId → runJob/onComplete；供逐条/全部重试复用，新批次开始时清理同节点旧条目） */
+  private _batchRunners = new Map<string, BatchRunner>();
+  /** 本批次新建的产出节点 id 集合（供 markUpstreamChangedExcept 跳过；runBatch 不再建子卡，仅扩图/历史入口使用） */
   private _createdCardIds = new Set<string>();
   /** 本批次是否出现过「生成图未落盘到用户配置目录」（P3：批次结束统一 toast 一次，避免逐张刷屏） */
   private _sawNotSavedToDisk = false;
 
-  /** 读取批次进度（cmd-panel 选中 run 节点时展示「生成中 done/total」） */
+  /** 读取批次进度（cmd-panel 选中 run 节点时展示「生成中 done/total」）；从 batch-store 派生（共享约定 1，禁止双写） */
   getBatchProgress(nodeId: string): { total: number; done: number; failed: number } | undefined {
-    const p = this.batchProgress.get(nodeId);
-    return p ? { total: p.total, done: p.done, failed: p.failed } : undefined;
+    const batch = batchStore.getActiveBatch(nodeId) ?? batchStore.getLatestBatch(nodeId);
+    if (!batch) return undefined;
+    const s = batchStore.summarize(batch.id);
+    return { total: s.total, done: s.succeeded, failed: s.failed };
   }
 
   /**
@@ -170,7 +176,9 @@ class RunEngine {
     active.cancelled = true;
     this.activeRun = null;
     this.busy = false;
-    this.batchProgress.delete(nodeId);
+    // 取消批次：剩余 Job → cancelled；在途 Job 由队列 hooks.isCancelled 停止（B-2 取消语义）
+    const batch = batchStore.getActiveBatch(nodeId);
+    if (batch) batchQueue.cancelBatch(batch.id);
     linkView.setNodeFlowing(nodeId, false);
     if (active.historySuspended) {
       flowHistory.resume();
@@ -291,7 +299,7 @@ class RunEngine {
       flowState.nodes.forEach(n => {
         if (n.id === node.id) return;
         if (Math.abs(n.x - x) >= CARD_W / 2) return; // 只统计同列（x 相近）卡片
-        const nH = Math.round(CARD_W / (n.ratio > 0 ? n.ratio : 4 / 3));
+        const nH = imageCardHeight(n.ratio);
         y = Math.max(y, n.y + nH + RESULT_GAP_Y);
       });
       const layout: ResultLayout = { x, cursorY: y };
@@ -392,9 +400,7 @@ class RunEngine {
     } finally {
       if (!this._isActive(active)) return;
       linkView.setNodeFlowing(nodeId, false);
-      // 命令是临时的：执行后清空（成功/失败均清），避免下次空输入点发送经 cmd-panel 兜底
-      // （input.value || instruction）静默重跑旧命令；兜底逻辑本身保留，仅消费一次。
-      flowState.updateNodeParams(nodeId, { instruction: '' });
+      // 保留文本命令：无论成功还是失败，用户都可直接修改后重试。
     }
   }
 
@@ -404,6 +410,9 @@ class RunEngine {
    * 用于 runBatch 实际请求、生成 trace 记录、cmd-panel 最终 prompt 预览（W3-2/W3-4）。
    */
   composeImagePrompt(nodeId: string): string {
+    const splitPrompts = flowState.getUpstreamTextSplitPrompts(nodeId);
+    // 拆分模式以槽位文本为完整提示词，不叠加图片节点自身提示词。
+    if (splitPrompts.length > 0) return splitPrompts[0];
     const parts = flowState.getUpstreamTextPrompts(nodeId);
     const node = flowState.getNode(nodeId);
     const p = node ? (node.params as unknown as StyleTransferParams) : null;
@@ -413,8 +422,14 @@ class RunEngine {
   }
 
   /**
-   * 批次执行（生成节点专用）：并发 N 个单张请求，按入口参考图分叉为文生图/图生图。
+   * 批次执行（生成节点专用）：经 batch-queue 限流执行（默认并发 2，可配 1~3）。
    * 前置：canRun 已通过；busy 锁已持有。
+   * B 批次改造（T03）：
+   *   - 删除 Promise.allSettled 全量并发与瞬时 batchProgress；改为 batchStore.createBatch → batchQueue.submit；
+   *   - Batch = 执行态事实源；Job 成功回调（onComplete）单向写回节点结果（imageUrl/generatedImages/trace 带 batchId+jobId）；
+   *   - count=1 单图保持「第 1 张写回自身」；count>1 与文本拆分统一写回 generatedImages（废除自动建子卡；
+   *     历史子节点按现有安全策略处理，不额外删除）；
+   *   - 每 Job 独立 error（不再共享 lastError）；失败可逐条/全部重试（retryJob/retryFailed）。
    */
   private async runBatch(nodeId: string, active: ActiveRun): Promise<void> {
     const node = flowState.getNode(nodeId);
@@ -423,8 +438,10 @@ class RunEngine {
     // 1. 启动时快照参数与 options（buildOptions 只取一次、强制 count:1）
     const params = node.params as unknown as StyleTransferParams;
     // prompt 合成唯一入口：上游文本（连线序拼接）+ 自身 prompt（非空追加在后）（W3-2/Q5）
-    const prompt = this.composeImagePrompt(nodeId);
-    const total = Math.min(COUNT_MAX, Math.max(COUNT_MIN, Math.round(Number(params.count) || COUNT_MIN)));
+    const splitPrompts = flowState.getUpstreamTextSplitPrompts(nodeId);
+    const usesTextSplit = splitPrompts.length > 0;
+    const prompt = usesTextSplit ? splitPrompts[0] : this.composeImagePrompt(nodeId);
+    const total = usesTextSplit ? splitPrompts.length : Math.min(COUNT_MAX, Math.max(COUNT_MIN, Math.round(Number(params.count) || COUNT_MIN)));
     // R3：批次号 = 生成节点 id + 批次启动时刻（同批全部成功图共用；同节点重跑 → 时间戳不同 → 可区分）
     const batchId = `${nodeId}_${Date.now()}`;
     const def = nodeRegistry.get(node.type);
@@ -435,86 +452,107 @@ class RunEngine {
     //     isTxt2Img 仅用于 outputType 标记（'txt2img'/'img2img'）与 trace 参考图透传，不再决定回写/清空分支（Q1）。
     const refs = flowState.getReferenceImages(nodeId);
     const isTxt2Img = refs.length === 0;
+    if (!usesTextSplit && node.generatedImages?.length) {
+      // 退出拆分模式后恢复普通图片节点的单图/批次行为。
+      flowState.updateNode(nodeId, { generatedImages: [], activeGeneratedIndex: 0 });
+    }
 
     // 2. 重跑顶掉：置 run 之前先清掉上次的「纯引擎产出」子节点（安全策略见 flow-state；
-    //    手动改造的产出节点保留并标 stale；txt2img 无子节点时自然无操作）
+    //    手动改造/锁定的产出节点保留并标 stale；用户拍板：历史子节点按现有安全策略处理，不额外删除）
     flowState.removeChildren(nodeId);
 
     // 3. 置 run + 上游连线流光
     flowState.updateNode(nodeId, { status: 'run', error: null });
     linkView.setNodeFlowing(nodeId, true);
 
-    // 4. 批次进度（瞬时，不持久化）
-    const progress: BatchProgress = { total, done: 0, failed: 0, lastError: null };
-    this.batchProgress.set(nodeId, progress);
     this._createdCardIds.clear();
     this._sawNotSavedToDisk = false; // P3：批次级未落盘标记复位
-    flowState.notify(); // 面板立即显示「生成中 0/total」
+    // 新批次开始：同节点旧批次执行器失效（旧批次重试入口不再可用）
+    for (const [bid, runner] of this._batchRunners) {
+      if (runner.nodeId === nodeId) this._batchRunners.delete(bid);
+    }
+    flowState.notify(); // 面板立即显示「排队中 0/total」
 
-    // 5. 并发 N 个 worker（Promise.allSettled：互不阻塞，任一失败不影响兄弟）。
-    //    布局游标在批次开始时快照生成节点位置，之后只随已放置卡片累计，完成顺序不定也不重叠。
-    const layout: ResultLayout = { x: node.x + CARD_W + RESULT_GAP_X, cursorY: node.y };
-    const jobs = Array.from({ length: total }, (_, i) =>
-      this.runOneWorker(nodeId, prompt, options, layout, progress, isTxt2Img, i, refs, batchId, active));
-    await Promise.allSettled(jobs);
-    if (!this._isActive(active)) return;
+    // 4. 同步创建批次（jobs.length === total）+ 注册执行器 + 提交队列（限流执行，不再全量并发）
+    //    批次号由本函数预计算透传（避免 createBatch 内部再取 Date.now() 跨毫秒边界导致 submit 查不到批次）
+    const prompts = usesTextSplit ? splitPrompts : Array.from({ length: total }, () => prompt);
+    batchStore.createBatch({
+      id: batchId,
+      nodeId,
+      source: usesTextSplit ? 'text-split' : 'manual-count',
+      total,
+      concurrency: readConcurrency(total),
+      prompts,
+    });
+    const outputType: GenerationTrace['outputType'] = isTxt2Img ? 'txt2img' : 'img2img';
+    const runJob = this._makeRunJob(options);
+    // count=1 单图路径保持「第 1 张写回自身」；count>1 与文本拆分写回 generatedImages；
+    // 锁定保护仅对 manual-count 生效（与旧 runOneWorker 一致；text-split 旧 _applyTextSplitResults 本就不查锁）
+    const isSingleImage = !usesTextSplit && total === 1;
+    const onJobComplete = this._makeBatchJobComplete(nodeId, refs, outputType, isSingleImage, !usesTextSplit);
+    const onComplete: BatchCompleteFn = async () => { /* 成功结果已逐张写回；终态只由下方汇总收敛。 */ };
+    this._batchRunners.set(batchId, { nodeId, runJob, onJobComplete, onComplete });
+
+    const finished = await batchQueue.submit(batchId, runJob, onJobComplete, onComplete);
+    if (!this._isActive(active)) return; // 取消：cancel() 已置 idle；onComplete 对取消批次不写回
 
     linkView.setNodeFlowing(nodeId, false);
-    this.batchProgress.delete(nodeId);
 
-    // 6. 汇总：有成功 → done + 旧下游标 stale（新产出节点跳过）。
-    //    图生图/文生图统一回写自身（第 1 张在 worker 内写回；源节点 imageUrl 已为新图，不清空——W6-2）。
+    // 5. 汇总（从 batch-store 派生；共享约定 1：禁止双写）
     const after = flowState.getNode(nodeId);
     if (!after) return; // 批次期间生成节点被删除
-    if (progress.done > 0) {
-      flowState.updateNode(nodeId, { status: 'done', error: null, lastRunAt: Date.now() });
+    const s = batchStore.summarize(batchId);
+    if (finished?.status === 'cancelled') {
+      // 取消：恢复 idle（与旧 cancel 语义一致；已成功 Job 结果由 onComplete 保留在节点，不丢）
+      flowState.updateNode(nodeId, { status: 'idle', error: null });
+      return;
+    }
+    if (s.succeeded > 0) {
+      // 有成功 → done（全成功）/ partial-failed（有成功有失败）；旧下游标 stale（新产出节点跳过）
+      flowState.updateNode(nodeId, {
+        status: s.failed > 0 ? 'partial-failed' : 'done',
+        error: null,
+        lastRunAt: Date.now(),
+      });
       dirty.markUpstreamChangedExcept(nodeId, this._createdCardIds);
-      showToast(`成功 ${progress.done}/${total}`);
+      showToast(s.failed > 0 ? `成功 ${s.succeeded}/${s.total}，失败 ${s.failed}` : `成功 ${s.succeeded}/${s.total}`);
       // P3：本批次出现过未落盘（未配置图片保存路径）→ 统一提示一次，不阻断结果展示
       if (this._sawNotSavedToDisk) {
         showToast('图片保存路径未设置，生成图不会落盘到本地', false);
       }
     } else {
       // 全失败：保留旧图，节点 fail（toast 带具体原因，避免「没图却不知为何」）
-      flowState.updateNode(nodeId, { status: 'fail', error: progress.lastError || '生成失败' });
-      showToast(progress.lastError ? `生成失败：${progress.lastError}` : '生成失败', false);
+      const err = batchStore.firstError(batchId) || '生成失败';
+      flowState.updateNode(nodeId, { status: 'fail', error: err });
+      showToast(`生成失败：${err}`, false);
     }
   }
 
   /**
-   * 单个 worker：创建单张生成任务 → 轮询 → 成功按分支处理（第 1 张写回自身 / 第 2..N 张建新产出节点）；失败计数。
-   * Q1 统一回写口径：文生图/图生图一致——每批第 1 张（index=0）写回自身（旧图入历史、新图覆盖 imageUrl）；
-   *   当前图锁定 → 不写回、改建产出节点 + toast；第 2..N 张各建产出节点（一张卡只承载一张主图）。
+   * 单个 Job 执行器（run-engine 注入 batch-queue）：创建任务 → 轮询 → 解析展示图 → 返回结果。
+   * 不负责状态流转（队列 markJobStatus）；在 await 间隙通过 hooks.isCancelled 感知取消，防止取消后继续写结果。
+   * 与旧 runOneWorker 的区别：不建子卡、不写回节点（写回统一在批次终态 onComplete 做，保证按 index 有序）。
    */
-  private async runOneWorker(
-    genId: string,
-    prompt: string,
-    options: Record<string, unknown>,
-    layout: ResultLayout,
-    progress: BatchProgress,
-    isTxt2Img: boolean,
-    index: number,
-    refs: string[],
-    batchId: string, // R3：本批批次号，透传到该张成功图的 addImage / appendTrace
-    active: ActiveRun,
-  ): Promise<void> {
-    try {
-      if (!this._isActive(active)) return;
-      const created = await withTimeout(
-        Backend.generateImage(prompt, { ...options, count: COUNT_MIN }),
-        TASK_CREATE_TIMEOUT_MS,
-        '任务创建超时',
-      );
-      if (!this._isActive(active)) return;
-      if (!created || !created.task_id) {
-        throw new Error('任务创建失败，未返回 task_id');
-      }
-      const result = await pollTask(created.task_id);
-      if (!this._isActive(active)) return;
-      if (result.success) {
+  private _makeRunJob(options: Record<string, unknown>): RunJobFn {
+    return async (job, hooks): Promise<JobRunOutcome> => {
+      if (hooks.isCancelled()) return { success: false, error: '已取消' };
+      try {
+        const created = await withTimeout(
+          Backend.generateImage(job.prompt, { ...options, count: COUNT_MIN }),
+          TASK_CREATE_TIMEOUT_MS,
+          '任务创建超时',
+        );
+        if (hooks.isCancelled()) return { success: false, error: '已取消' };
+        if (!created || !created.task_id) {
+          throw new Error('任务创建失败，未返回 task_id');
+        }
+        hooks.onRunning(created.task_id);
+        const result = await pollTask(created.task_id);
+        if (hooks.isCancelled()) return { success: false, error: '已取消' };
+        if (!result.success) throw new Error(result.error || '生成失败');
         // 展示图解析：缩略图优先；为空且有 originalPath → loadLocalImage 按路径取图（治本：大图不进轮询响应）
-      const displayUrl = await this._resolveImageUrl(result);
-      if (!this._isActive(active)) return;
+        const displayUrl = await this._resolveImageUrl(result);
+        if (hooks.isCancelled()) return { success: false, error: '已取消' };
         if (!displayUrl) throw new Error(result.error || '生成成功但未返回图片数据');
         // P3：该张图未落盘到用户配置目录（tempfile 兜底）→ 标记，批次结束统一 toast
         if (result.savedToDisk === false) this._sawNotSavedToDisk = true;
@@ -522,45 +560,115 @@ class RunEngine {
         const origin: ImageOrigin | null = result.originalPath
           ? { path: result.originalPath, url: result.originalUrl }
           : null;
-        const outputType: GenerationTrace['outputType'] = isTxt2Img ? 'txt2img' : 'img2img';
-        if (index === 0) {
-          // 保护点 2：源节点当前 imageUrl（旧图）被锁定 → 不写回自身，改走新建产出节点（旧图保留，Q3）
-          const gen = flowState.getNode(genId);
-          const locked = !!gen && !!gen.imageUrl && assetStore.isLockedByImageUrl(gen.imageUrl);
-          if (locked) {
-            const card = await this.createResultCard(genId, displayUrl, layout, {}, {
-              outputType,
-              refs,
-              batchId,
-            }, origin, prompt, result.width, result.height, active);
-            this._createdCardIds.add(card.id);
-            progress.done += 1;
-          } else {
-            // 第 1 张（按 index=0，非完成顺序）写回源节点自身 imageUrl（文生图/图生图统一，Q1）
-            await this._writeBackToSelf(genId, displayUrl, origin, batchId, outputType, prompt, result.width, result.height, active);
-            progress.done += 1;
-          }
-        } else {
-          // 第 2..N 张：出一张建一张（不等兄弟），立即创建新 image-gen 产出节点并自动连线
-          const card = await this.createResultCard(genId, displayUrl, layout, {}, {
-            outputType,
-            refs,
-            batchId,
-          }, origin, prompt, result.width, result.height, active);
-          this._createdCardIds.add(card.id);
-          progress.done += 1;
-        }
-      } else {
-        throw new Error(result.error || '生成失败');
+        return {
+          success: true,
+          image: {
+            url: displayUrl,
+            originalPath: origin?.path,
+            originalUrl: origin?.url,
+            width: result.width,
+            height: result.height,
+          },
+        };
+      } catch (e) {
+        return { success: false, error: (e as Error).message || '生成失败' };
       }
-    } catch (e) {
-      if (!this._isActive(active)) return;
-      progress.failed += 1;
-      progress.lastError = (e as Error).message || '生成失败';
-    } finally {
-      if (!this._isActive(active)) return;
-      this._touchProgress(genId);
-    }
+    };
+  }
+
+  /**
+   * 单张完成写回回调：每个 Job 成功后立即更新节点，因此用户可在其它任务仍运行时浏览结果。
+   * - 保护点 2（Q3 不退化）：manual-count 模式下源节点当前 imageUrl（旧图）被锁定 → 全部成功图改走
+   *   createResultCard 新建产出节点（旧图保留；与旧 runOneWorker 行为一致）；
+   * - count=1 单图 → _writeBackToSelf；count>1 / 文本拆分 → 更新当前已完成的 generatedImages；
+   * - 取消批次不写回（与现状 cancel 语义一致）；Job 独立成功图不因兄弟失败丢失（B-3）。
+   */
+  private _makeBatchJobComplete(
+    nodeId: string,
+    refs: string[],
+    outputType: GenerationTrace['outputType'],
+    isSingleImage: boolean,
+    checkLock: boolean,
+  ): BatchJobCompleteFn {
+    let lockedLayout: ResultLayout | null = null;
+    return async (batch, job) => {
+      const node = flowState.getNode(nodeId);
+      if (!node) return;
+      if (batch.status === 'cancelled') return; // 取消不写回（与现状 cancel 语义一致；Job 结果仍保留在 batch-store）
+      if (job.status !== 'succeeded' || !job.image) return;
+      // 保护点 2：源节点当前 imageUrl（旧图）被锁定 → 不写回自身，全部改走新建产出节点（旧图保留，Q3）
+      if (checkLock && !!node.imageUrl && assetStore.isLockedByImageUrl(node.imageUrl)) {
+        lockedLayout ??= { x: node.x + CARD_W + RESULT_GAP_X, cursorY: node.y };
+        const im = job.image;
+        const origin: ImageOrigin | null = im.originalPath ? { path: im.originalPath, url: im.originalUrl } : null;
+        const card = await this.createResultCard(nodeId, im.url, lockedLayout, {}, {
+          outputType,
+          refs,
+          batchId: batch.id,
+          jobId: job.id,
+        }, origin, job.prompt, im.width, im.height);
+        this._createdCardIds.add(card.id);
+        return;
+      }
+      if (isSingleImage) {
+        const im = job.image;
+        const origin: ImageOrigin | null = im.originalPath ? { path: im.originalPath, url: im.originalUrl } : null;
+        await this._writeBackToSelf(nodeId, im.url, origin, batch.id, outputType, job.prompt, im.width, im.height, undefined, job.id);
+      } else {
+        await this._applyBatchJobResult(nodeId, batch, job, refs, outputType);
+      }
+    };
+  }
+
+  /** 批量单图即时写回：节点列表取当前全部成功 Job，但历史/流水只追加刚完成的一张，避免重复记录。 */
+  private async _applyBatchJobResult(
+    nodeId: string,
+    batch: GenerationBatch,
+    completedJob: GenerationJob,
+    refs: string[],
+    outputType: GenerationTrace['outputType'],
+  ): Promise<void> {
+    const node = flowState.getNode(nodeId);
+    if (!node || !completedJob.image) return;
+    const completedRatio = await loadImageRatio(completedJob.image.url);
+    // 图片尺寸加载期间其它 Job 仍可能完成；以存储中的最新成功集为准，不能把它们覆盖掉。
+    const liveBatch = batchStore.getBatch(batch.id);
+    const ordered = (liveBatch?.jobs ?? batch.jobs)
+      .filter(j => j.status === 'succeeded' && !!j.image)
+      .sort((a, b) => a.index - b.index);
+    if (ordered.length === 0) return;
+    const first = ordered[0];
+    const im = first.image!;
+    // 若较低 index 的图片已先到达，沿用它已写入的比例；不能误把当前 Job 的比例套到另一张预览图上。
+    const ratio = im.url === completedJob.image.url ? completedRatio : null;
+    flowState.setNodeImage(nodeId, im.url, ratio && ratio > 0 ? ratio : undefined, im.width, im.height);
+    node.imageOrigin = im.originalPath ? { path: im.originalPath, url: im.originalUrl } : null;
+    node.generatedImages = ordered.map(j => ({
+      url: j.image!.url,
+      prompt: j.prompt,
+      origin: j.image!.originalPath ? { path: j.image!.originalPath, url: j.image!.originalUrl } : null,
+      width: j.image!.width,
+      height: j.image!.height,
+    }));
+    node.activeGeneratedIndex = 0;
+    const trace = historyPersist.buildImageTrace(node, refs, outputType, im.url, first.prompt, batch.id, first.id);
+    if (im.width) trace.imageWidth = im.width;
+    if (im.height) trace.imageHeight = im.height;
+    node.trace = trace;
+    const p = node.params as unknown as StyleTransferParams;
+    const jIm = completedJob.image;
+    const rowTrace = historyPersist.buildImageTrace(node, refs, outputType, jIm.url, completedJob.prompt, batch.id, completedJob.id);
+    void historyPersist.appendTrace({
+      kind: 'image', nodeId: node.id, ...rowTrace, imageUrl: jIm.url, thumbnail: jIm.url,
+      originalPath: jIm.originalPath, originalUrl: jIm.originalUrl, batchId: batch.id, jobId: completedJob.id,
+    });
+    historyDrawer.addImage(jIm.url, {
+      nodeId: node.id, prompt: completedJob.prompt, model: p.model || '',
+      aspectRatio: p.aspectRatio || '4:3', resolution: p.resolution || '2k', count: batch.total,
+      outputType, thumbnail: jIm.url, originalPath: jIm.originalPath, originalUrl: jIm.originalUrl,
+      batchId: batch.id, width: jIm.width, height: jIm.height,
+    });
+    flowState.notify();
   }
 
   /**
@@ -572,6 +680,7 @@ class RunEngine {
    * batchId：R3 本批批次号——新图 addImage 与 appendTrace 均带（jsonl 行）；旧图 addImage 不带（旧图属上一次运行的批次）。
    * composedPrompt：本次实际使用的合成 prompt（上游文本 + 自身 prompt；trace 记录「线即真相」，W3-2）。
    * imageWidth/imageHeight：原图真实像素（后端 PIL im.size 透传；旧后端缺失为 undefined）。
+   * jobId：B-6 追溯——任务编号（count=1 批次 j0）；透传到新图 trace / jsonl 行 / 图库条目。
    * 新图入库（B3）：无论旧图是否存在，写回成功后都要把「新图」addImage 入历史图库（旧实现只入旧图，
    * 首次生成新图从不入库，导致图库缺生成图）。
    */
@@ -585,6 +694,7 @@ class RunEngine {
     imageWidth?: number,
     imageHeight?: number,
     active?: ActiveRun,
+    jobId?: string, // B-6 追溯：任务编号（count=1 批次 j0）
   ): Promise<void> {
     const node = flowState.getNode(genId);
     if (!node || (active && !this._isActive(active))) return;
@@ -606,9 +716,9 @@ class RunEngine {
     const ratio = await loadImageRatio(imageUrl);
     if (active && !this._isActive(active)) return;
     flowState.setNodeImage(genId, imageUrl, ratio && ratio > 0 ? ratio : undefined, imageWidth, imageHeight);
-    // 写回自身：source of truth = node.trace，并追加一条 kind:'image' 流水（带 batchId）
+    // 写回自身：source of truth = node.trace，并追加一条 kind:'image' 流水（带 batchId/jobId）
     node.imageOrigin = origin; // 原图引用（缩略图 + 原图路径）
-    const trace = historyPersist.buildImageTrace(node, [], outputType, imageUrl, composedPrompt);
+    const trace = historyPersist.buildImageTrace(node, [], outputType, imageUrl, composedPrompt, batchId, jobId);
     if (typeof imageWidth === 'number' && imageWidth > 0) trace.imageWidth = imageWidth;
     if (typeof imageHeight === 'number' && imageHeight > 0) trace.imageHeight = imageHeight;
     node.trace = trace;
@@ -621,6 +731,7 @@ class RunEngine {
       originalPath: origin?.path,
       originalUrl: origin?.url,
       ...(batchId ? { batchId } : {}),
+      ...(jobId ? { jobId } : {}),
     });
     // B3：新图本身也要入历史图库（带完整 meta：nodeId/prompt/model/aspectRatio/resolution/count/outputType/
     // thumbnail/originalPath/originalUrl/batchId/真实像素）——旧实现只入旧图，首次生成新图从不入库。
@@ -637,6 +748,7 @@ class RunEngine {
       originalPath: origin?.path,
       originalUrl: origin?.url,
       ...(batchId ? { batchId } : {}),
+      ...(jobId ? { jobId } : {}),
       width: imageWidth,
       height: imageHeight,
     });
@@ -656,7 +768,7 @@ class RunEngine {
     imageUrl: string,
     layout: ResultLayout,
     paramOverrides: Record<string, unknown> = {},
-    trace: { outputType: GenerationTrace['outputType']; refs: string[]; batchId?: string } = { outputType: 'img2img', refs: [] },
+    trace: { outputType: GenerationTrace['outputType']; refs: string[]; batchId?: string; jobId?: string } = { outputType: 'img2img', refs: [] },
     origin: ImageOrigin | null = null,
     composedPrompt?: string, // 本次实际使用的合成 prompt（上游文本 + 自身 prompt；trace/历史记录用，W3-2）
     imageWidth?: number,     // 原图真实像素宽（后端 PIL im.size 透传；旧后端缺失为 undefined）
@@ -668,7 +780,7 @@ class RunEngine {
     const ratio = await loadImageRatio(imageUrl);
     if (active && !this._isActive(active)) throw new Error('任务已暂停');
     const r = ratio && ratio > 0 ? ratio : 4 / 3;
-    const cardH = Math.round(CARD_W / r);
+    const cardH = imageCardHeight(r);
     const y = layout.cursorY;
     layout.cursorY = y + cardH + RESULT_GAP_Y;
 
@@ -698,7 +810,7 @@ class RunEngine {
     // 自动建卡连线：suppressStale 避免刚 done 的产出节点被立即打回 stale
     flowState.addEdge(genId, node.id, { suppressStale: true });
     // 生成档案：写 node.trace（source of truth）+ 追加一条 kind:'image' 流水（imageUrl 冗余：跨会话图库解析优先用行内 URL）
-    const nodeTrace = historyPersist.buildImageTrace(node, trace.refs, trace.outputType, imageUrl, composedPrompt);
+    const nodeTrace = historyPersist.buildImageTrace(node, trace.refs, trace.outputType, imageUrl, composedPrompt, trace.batchId, trace.jobId);
     if (typeof imageWidth === 'number' && imageWidth > 0) nodeTrace.imageWidth = imageWidth;
     if (typeof imageHeight === 'number' && imageHeight > 0) nodeTrace.imageHeight = imageHeight;
     node.trace = nodeTrace;
@@ -716,6 +828,7 @@ class RunEngine {
       originalPath: origin?.path,
       originalUrl: origin?.url,
       batchId: trace.batchId, // R3：同批全部成功图共用同一批次号
+      jobId: trace.jobId,     // B-6：任务编号（扩图/历史兼容入口）
       width: imageWidth,
       height: imageHeight,
     });
@@ -728,13 +841,89 @@ class RunEngine {
       originalPath: origin?.path,
       originalUrl: origin?.url,
       ...(trace.batchId ? { batchId: trace.batchId } : {}),
+      ...(trace.jobId ? { jobId: trace.jobId } : {}),
     });
     return node;
   }
 
-  /** 批次进度变更后通知（产出节点创建已触发 notify；失败无产出节点场景需手动触发，保证面板进度刷新） */
-  private _touchProgress(_nodeId: string): void {
-    flowState.notify();
+  /**
+   * 重试单个失败 Job（B-3）：复用原批次快照的 options/参考图/写回逻辑（_batchRunners），重新入队执行。
+   * busy 锁粒度 = 整个批次（重试也是整批串行）；成功图不因兄弟失败丢失。
+   */
+  async retryJob(nodeId: string, batchId: string, jobId: string): Promise<void> {
+    const node = flowState.getNode(nodeId);
+    if (!node) return;
+    if (node.status === 'run') { showToast('该节点正在生成中', false); return; }
+    if (this.busy) { showToast('已有任务在运行，请稍候', false); return; }
+    const runner = this._batchRunners.get(batchId);
+    if (!runner) { showToast('批次信息已失效，请重新运行', false); return; }
+    const job = batchStore.getJob(batchId, jobId);
+    if (!job || (job.status !== 'failed' && job.status !== 'cancelled')) return;
+
+    const active: ActiveRun = { nodeId, cancelled: false, historySuspended: true };
+    this.busy = true;
+    this.activeRun = active;
+    flowHistory.suspend();
+    try {
+      flowState.updateNode(nodeId, { status: 'run', error: null });
+      linkView.setNodeFlowing(nodeId, true);
+      const finished = await batchQueue.retryJob(batchId, jobId, runner.runJob, runner.onJobComplete, runner.onComplete);
+      linkView.setNodeFlowing(nodeId, false);
+      this._applyRetryOutcome(nodeId, batchId, finished);
+    } finally {
+      if (active.historySuspended) { flowHistory.resume(); active.historySuspended = false; }
+      if (this.activeRun === active) { this.activeRun = null; this.busy = false; }
+    }
+  }
+
+  /** 重试全部失败项（B-3）；重试本身也走队列（P2-3 顺带满足）。 */
+  async retryFailed(nodeId: string, batchId: string): Promise<void> {
+    const node = flowState.getNode(nodeId);
+    if (!node) return;
+    if (node.status === 'run') { showToast('该节点正在生成中', false); return; }
+    if (this.busy) { showToast('已有任务在运行，请稍候', false); return; }
+    const runner = this._batchRunners.get(batchId);
+    if (!runner) { showToast('批次信息已失效，请重新运行', false); return; }
+    const failed = (batchStore.getBatch(batchId)?.jobs.filter(j => j.status === 'failed') ?? []);
+    if (failed.length === 0) { showToast('没有可重试的失败项', false); return; }
+
+    const active: ActiveRun = { nodeId, cancelled: false, historySuspended: true };
+    this.busy = true;
+    this.activeRun = active;
+    flowHistory.suspend();
+    try {
+      flowState.updateNode(nodeId, { status: 'run', error: null });
+      linkView.setNodeFlowing(nodeId, true);
+      const finished = await batchQueue.retryFailed(batchId, runner.runJob, runner.onJobComplete, runner.onComplete);
+      linkView.setNodeFlowing(nodeId, false);
+      this._applyRetryOutcome(nodeId, batchId, finished);
+    } finally {
+      if (active.historySuspended) { flowHistory.resume(); active.historySuspended = false; }
+      if (this.activeRun === active) { this.activeRun = null; this.busy = false; }
+    }
+  }
+
+  /** 重试结束后把节点状态/错误收敛为批次派生终态（done / partial-failed / fail / idle） */
+  private _applyRetryOutcome(nodeId: string, batchId: string, finished: GenerationBatch | null): void {
+    const after = flowState.getNode(nodeId);
+    if (!after || !finished) return;
+    const s = batchStore.summarize(batchId);
+    if (finished.status === 'cancelled') {
+      flowState.updateNode(nodeId, { status: 'idle', error: null });
+      return;
+    }
+    if (s.succeeded > 0) {
+      flowState.updateNode(nodeId, {
+        status: s.failed > 0 ? 'partial-failed' : 'done',
+        error: null,
+        lastRunAt: Date.now(),
+      });
+      showToast(s.failed > 0 ? `成功 ${s.succeeded}/${s.total}，失败 ${s.failed}` : `成功 ${s.succeeded}/${s.total}`);
+    } else {
+      const err = batchStore.firstError(batchId) || '生成失败';
+      flowState.updateNode(nodeId, { status: 'fail', error: err });
+      showToast(`生成失败：${err}`, false);
+    }
   }
 
   /** A5：运行选中。单选=运行当前卡；多选=按拓扑序运行整组 */

@@ -34,7 +34,7 @@
 
 'use strict';
 
-const BASE = 'D:/Infinite Canvas/Infinite Canvas 2.0/.icv-qa/v1';
+const BASE = 'D:/tmp/icv-test/v1';
 
 // ───────────────────────── DOM/浏览器桩 ─────────────────────────
 function makeEl(over = {}) {
@@ -224,6 +224,7 @@ require(`${BASE}/nodes/image-gen.js`);
 require(`${BASE}/nodes/text-gen.js`);
 const { flowState } = require(`${BASE}/state/flow-state.js`);
 const { runEngine } = require(`${BASE}/engine/run-engine.js`);
+const { batchStore } = require(`${BASE}/state/batch-store.js`);
 const { dirty } = require(`${BASE}/state/dirty.js`);
 const { persistence } = require(`${BASE}/persistence.js`);
 const { historyPersist } = require(`${BASE}/history-persist.js`);
@@ -247,7 +248,8 @@ function reset() {
   historyAppendCalls.length = 0;
   runEngine.busy = false;
   runEngine._createdCardIds.clear();
-  runEngine.batchProgress.clear();
+  runEngine._batchRunners.clear();
+  batchStore.clear(); // T03：批次执行态清空（旧 runEngine.batchProgress 已删除，改从 batch-store 派生）
   chatV2Calls.length = 0;
   genCalls.length = 0;
   chatV2Result = { text: '绿植场景描述' };

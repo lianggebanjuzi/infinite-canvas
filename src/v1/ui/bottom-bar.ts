@@ -10,6 +10,7 @@ import { closeGuard } from '../close-guard';
 import { flowHistory } from '../state/history';
 import { settingsPanel } from './settings-panel';
 import { comparePanel } from './compare-panel';
+import { taskPanel } from './task-panel';
 import { showToast } from './toast';
 
 const THEME_KEY = 'infinite_canvas_theme';
@@ -31,6 +32,8 @@ class BottomBar {
     document.getElementById('btn-theme')?.addEventListener('click', () => this._toggleTheme());
     document.getElementById('btn-settings')?.addEventListener('click', () => settingsPanel.open());
     this.runBtn?.addEventListener('click', () => void runEngine.runSelected());
+    // 任务面板切换（B-4：运行中自动展开，结束可手动收起/展开摘要）
+    document.getElementById('btn-task')?.addEventListener('click', () => taskPanel.toggle());
 
     // 对比（C1）：n = 选中可对比数（image-gen 且 imageUrl 非空；文本不计入），n<2 时整钮禁用
     this.compareBtn?.addEventListener('click', () => {

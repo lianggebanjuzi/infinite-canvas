@@ -24,6 +24,25 @@ const MODEL_TYPE_OPTIONS: SelectOption[] = [
   { value: 'video', label: '视频' },
 ];
 
+/** FluxPort 的本地白名单：只允许用户明确分配常用模型，不再用 /models 覆盖分组。 */
+const COMMON_FLUX_MODELS: Array<SelectOption & { type: 'chat' | 'drawing' }> = [
+  { value: 'gpt-5.2', label: 'GPT-5.2（对话）', type: 'chat' },
+  { value: 'gpt-5.3-codex-spark', label: 'GPT-5.3 Codex Spark（对话）', type: 'chat' },
+  { value: 'gpt-5.4', label: 'GPT-5.4（对话）', type: 'chat' },
+  { value: 'gpt-5.4-2026-03-05', label: 'GPT-5.4 2026-03-05（对话）', type: 'chat' },
+  { value: 'gpt-5.4-mini', label: 'GPT-5.4 Mini（对话）', type: 'chat' },
+  { value: 'gpt-5.5', label: 'GPT-5.5（对话）', type: 'chat' },
+  { value: 'gpt-5.6', label: 'GPT-5.6（对话）', type: 'chat' },
+  { value: 'gpt-5.6-luna', label: 'GPT-5.6 Luna（对话）', type: 'chat' },
+  { value: 'gpt-5.6-sol', label: 'GPT-5.6 Sol（对话）', type: 'chat' },
+  { value: 'gpt-5.6-terra', label: 'GPT-5.6 Terra（对话）', type: 'chat' },
+  { value: 'gpt-image-2', label: 'GPT Image 2（图像）', type: 'drawing' },
+  { value: 'gemini-3-pro-image-preview', label: 'Nano Banana Pro（图像）', type: 'drawing' },
+  { value: 'gemini-3.1-flash-image-preview', label: 'Nano Banana 2（图像）', type: 'drawing' },
+];
+
+const COMMON_FLUX_MODEL_IDS = new Set(COMMON_FLUX_MODELS.map(model => model.value));
+
 /** 仅 FluxPort 的 Key 对应不同账号组；其它供应商保持共享模型组的简洁配置。 */
 function isFluxPortProvider(provider: BackendProvider): boolean {
   const urls = [provider.api_url, provider.text_api_url]
@@ -35,8 +54,8 @@ function isFluxPortProvider(provider: BackendProvider): boolean {
 
 /** key 卡片回调上下文（由 _renderEditor 注入；key 卡片仅凭据：名称/api_key/启停/删除/测试连接） */
 interface KeyCardCtx {
-  /** 当前编辑中的对话 URL（文本对话 URL 实时值优先，空则图片/视频 URL 实时值） */
-  getUrl(): string;
+  /** 当前编辑中的通道 URL（对话 URL 为空时回退图片 URL） */
+  getUrl(kind: 'chat' | 'drawing'): string;
   /** keys 数组变更回调（更新本地副本 + this.providers + 顶部默认模型下拉） */
   onKeysChange(next: BackendProviderKey[]): void;
   /** 重新渲染 key 卡片列表（增删 key 后调用） */
@@ -416,10 +435,10 @@ class SettingsPanel {
     shortField.appendChild(shortInput);
     card.appendChild(shortField);
 
-    // ── API 地址（provider 级） ──
+    // ── 图片模型 URL（provider 级） ──
     const urlField = document.createElement('div');
     urlField.className = 'settings-field';
-    urlField.innerHTML = '<span class="settings-label">API 地址</span>';
+    urlField.innerHTML = `<span class="settings-label">${fluxPortMode ? '图片模型 URL' : 'API 地址'}</span>`;
     const urlBody = document.createElement('div');
     urlBody.className = 'settings-field-body';
     const urlRow = document.createElement('div');
@@ -451,7 +470,7 @@ class SettingsPanel {
     // ── 文本对话 URL（provider 级，可选：文本模型走此 URL；留空共用上方图片/视频 URL） ──
     const textUrlField = document.createElement('div');
     textUrlField.className = 'settings-field';
-    textUrlField.innerHTML = '<span class="settings-label">文本对话 URL（可选）</span>';
+    textUrlField.innerHTML = `<span class="settings-label">${fluxPortMode ? '对话模型 URL（可选）' : '文本对话 URL（可选）'}</span>`;
     const textUrlBody = document.createElement('div');
     textUrlBody.className = 'settings-field-body';
     const textUrlRow = document.createElement('div');
@@ -508,7 +527,7 @@ class SettingsPanel {
     modelHead.className = 'model-section-head';
     const modelLabel = document.createElement('span');
     modelLabel.className = 'settings-label';
-    modelLabel.textContent = fluxPortMode ? '模型管理（FluxPort 分组 Key）' : '模型管理';
+    modelLabel.textContent = fluxPortMode ? '模型管理（对话 / 图像独立配置）' : '模型管理';
     modelHead.appendChild(modelLabel);
     if (!fluxPortMode) {
       const fetchBtn = document.createElement('button');
@@ -522,7 +541,7 @@ class SettingsPanel {
     const modelHint = document.createElement('div');
     modelHint.className = 'settings-hint';
     modelHint.textContent = fluxPortMode
-      ? '请手动添加文本、图像或视频模型并指定所属密钥。文本模型走“文本对话 URL”；图像和视频模型走上方 API 地址。文本 URL 留空时自动共用上方地址。'
+      ? '对话和图像请使用不同的 Key：对话模型走“文本对话 URL”，图像模型走上方“图片模型 URL”。仅可选择常用模型；不会再用 /models 的全量结果覆盖分组。'
       : '模型组由供应商共享；可手动维护，或用“拉取模型”更新。文本 URL 留空时自动共用上方 API 地址。';
     modelSection.appendChild(modelHint);
 
@@ -547,6 +566,12 @@ class SettingsPanel {
       placeholder: '类型',
     });
     modelTypeSelect.element.style.flex = '0 0 88px';
+    const commonModelSelect = createSelect({
+      options: COMMON_FLUX_MODELS,
+      value: COMMON_FLUX_MODELS[0].value,
+      placeholder: '选择常用模型',
+    });
+    commonModelSelect.element.style.flex = '1 1 220px';
     const modelKeySelect = createSelect({
       options: [],
       placeholder: '所属密钥',
@@ -557,9 +582,13 @@ class SettingsPanel {
     maddBtn.className = 'mini-btn';
     maddBtn.textContent = '手动添加';
     maddBtn.addEventListener('click', () => void addModel());
-    addRow.appendChild(midInput);
-    addRow.appendChild(mnameInput);
-    addRow.appendChild(modelTypeSelect.element);
+    if (fluxPortMode) {
+      addRow.appendChild(commonModelSelect.element);
+    } else {
+      addRow.appendChild(midInput);
+      addRow.appendChild(mnameInput);
+      addRow.appendChild(modelTypeSelect.element);
+    }
     if (fluxPortMode) addRow.appendChild(modelKeySelect.element);
     addRow.appendChild(maddBtn);
     modelSection.appendChild(addRow);
@@ -587,7 +616,7 @@ class SettingsPanel {
     keysHead.className = 'keys-section-head';
     const keysLabel = document.createElement('span');
     keysLabel.className = 'settings-label';
-    keysLabel.textContent = fluxPortMode ? '密钥管理（每个密钥组独立保存可用模型）' : '密钥管理（共用模型组）';
+    keysLabel.textContent = fluxPortMode ? '密钥管理（对话 Key 与图像 Key 分开填写）' : '密钥管理（共用模型组）';
     const addKeyBtn = document.createElement('button');
     addKeyBtn.className = 'mini-btn';
     addKeyBtn.textContent = '添加密钥';
@@ -637,13 +666,34 @@ class SettingsPanel {
         keysWrap.appendChild(empty);
         return;
       }
-      keys.forEach(k => keysWrap.appendChild(this._renderKeyCard(p, k, {
-        getUrl: () => textApiUrlInput.value.trim() || urlInput.value.trim(),
-        onKeysChange: syncKeys,
-        onRenderKeys: renderKeys,
-        onRenderModels: renderModelRows,
-        fluxPortMode: fluxPortMode,
-      })));
+      const appendKeys = (title: string, group: BackendProviderKey[]): void => {
+        if (group.length === 0) return;
+        if (fluxPortMode) {
+          const heading = document.createElement('div');
+          heading.className = 'key-group-heading';
+          heading.textContent = title;
+          keysWrap.appendChild(heading);
+        }
+        group.forEach(k => keysWrap.appendChild(this._renderKeyCard(p, k, {
+          getUrl: kind => kind === 'chat'
+            ? (textApiUrlInput.value.trim() || urlInput.value.trim())
+            : urlInput.value.trim(),
+          onKeysChange: syncKeys,
+          onRenderKeys: renderKeys,
+          onRenderModels: renderModelRows,
+          fluxPortMode: fluxPortMode,
+        })));
+      };
+      if (fluxPortMode) {
+        const imageKeys = keys.filter(k => (k.models || []).some(model => model.type === 'drawing'));
+        const chatKeys = keys.filter(k => (k.models || []).some(model => model.type === 'chat') && !imageKeys.includes(k));
+        const unassigned = keys.filter(k => !imageKeys.includes(k) && !chatKeys.includes(k));
+        appendKeys('图像 Key', imageKeys);
+        appendKeys('对话 Key', chatKeys);
+        appendKeys('未分配 Key', unassigned);
+        return;
+      }
+      appendKeys('密钥', keys);
     };
 
     const saveFields = async (): Promise<void> => {
@@ -668,15 +718,27 @@ class SettingsPanel {
       if (fluxPortMode) {
         const entries = keys
           .filter(k => k.enabled !== false)
-          .flatMap(k => (k.models || []).map(model => ({ key: k, model })));
+          .flatMap(k => (k.models || [])
+            .filter(model => COMMON_FLUX_MODEL_IDS.has(model.id))
+            .map(model => ({ key: k, model })));
         if (entries.length === 0) {
           const empty = document.createElement('div');
           empty.className = 'model-empty';
-          empty.textContent = '暂无模型，请手动添加';
+          empty.textContent = '暂无常用模型，请选择模型并分配给对应的 Key';
           modelList.appendChild(empty);
           return;
         }
-        entries.forEach(({ key, model }) => modelList.appendChild(buildModelRow(model, key)));
+        const appendGroup = (title: string, type: 'chat' | 'drawing'): void => {
+          const group = entries.filter(({ model }) => model.type === type);
+          if (group.length === 0) return;
+          const heading = document.createElement('div');
+          heading.className = 'model-group-heading';
+          heading.textContent = title;
+          modelList.appendChild(heading);
+          group.forEach(({ key, model }) => modelList.appendChild(buildModelRow(model, key)));
+        };
+        appendGroup('对话模型', 'chat');
+        appendGroup('图像模型', 'drawing');
         return;
       }
       if (providerModels.length === 0) {
@@ -802,12 +864,15 @@ class SettingsPanel {
     };
 
     const addModel = (): void => {
-      const mid = midInput.value.trim();
+      const common = fluxPortMode
+        ? COMMON_FLUX_MODELS.find(model => model.value === commonModelSelect.getValue())
+        : undefined;
+      const mid = common?.value || midInput.value.trim();
       if (!mid) { showToast('请输入模型 ID', false); return; }
-      const mtype = modelTypeSelect.getValue() || 'drawing';
+      const mtype = common?.type || modelTypeSelect.getValue() || 'drawing';
       const newModel: BackendModel = {
         id: mid,
-        name: mnameInput.value.trim() || mid,
+        name: common?.label.replace(/（.*$/, '') || mnameInput.value.trim() || mid,
         type: mtype,
         enabled: true,
       };
@@ -901,6 +966,8 @@ class SettingsPanel {
     const keyId = k.id;
     let keyVisible = false;
     const { fluxPortMode } = ctx;
+    const isChatOnlyKey = (k.models || []).some(model => model.type === 'chat')
+      && !(k.models || []).some(model => model.type === 'drawing');
 
     // ── 头部：key 名输入 + 启停 + 删除 ──
     const head = document.createElement('div');
@@ -934,7 +1001,7 @@ class SettingsPanel {
     // ── 密钥字段（key 级） ──
     const keyField = document.createElement('div');
     keyField.className = 'settings-field';
-    keyField.innerHTML = '<span class="settings-label">API 密钥</span>';
+    keyField.innerHTML = `<span class="settings-label">${fluxPortMode ? (isChatOnlyKey ? '对话 API 密钥' : '图像 API 密钥') : 'API 密钥'}</span>`;
     const keyBody = document.createElement('div');
     keyBody.className = 'settings-field-body inline';
     const keyInput = document.createElement('input');
@@ -960,17 +1027,9 @@ class SettingsPanel {
     testBtn.textContent = '测试连接';
     testBtn.addEventListener('click', () => void testConnection());
 
-    // FluxPort 模式下给每个 Key 单独"拉取模型"按钮
-    const fetchKeyModelsBtn = document.createElement('button');
-    fetchKeyModelsBtn.className = 'mini-btn';
-    fetchKeyModelsBtn.textContent = '拉取模型';
-    fetchKeyModelsBtn.style.display = fluxPortMode ? '' : 'none';
-    fetchKeyModelsBtn.addEventListener('click', () => void fetchKeyModels());
-
     keyBody.appendChild(keyInput);
     keyBody.appendChild(eyeBtn);
     keyBody.appendChild(testBtn);
-    if (fluxPortMode) keyBody.appendChild(fetchKeyModelsBtn);
     keyField.appendChild(keyBody);
     card.appendChild(keyField);
 
@@ -992,7 +1051,7 @@ class SettingsPanel {
     };
 
     const testConnection = async (): Promise<void> => {
-      const url = ctx.getUrl();
+      const url = ctx.getUrl(isChatOnlyKey ? 'chat' : 'drawing');
       const key = keyInput.value;
       if (!url) { showToast('请先填写 API 地址', false); return; }
       if (!key) { showToast('请先填写 API 密钥', false); return; }
@@ -1002,43 +1061,6 @@ class SettingsPanel {
         else showToast(res.message || '连接失败', false);
       } catch (e) {
         showToast('测试失败：' + (e as Error).message, false);
-      }
-    };
-
-    /** FluxPort 模式：用该 Key 自己的 API Key 拉取模型列表，只保存到这个 Key 下面 */
-    const fetchKeyModels = async (): Promise<void> => {
-      const url = ctx.getUrl();
-      const key = keyInput.value;
-      if (!url) { showToast('请先填写 API 地址', false); return; }
-      if (!key) { showToast('请先填写 API 密钥', false); return; }
-      try {
-        fetchKeyModelsBtn.disabled = true;
-        fetchKeyModelsBtn.textContent = '拉取中...';
-        const res = await Backend.fetchModels(url, key);
-        if (res.status !== 'success' || !res.models) {
-          showToast(res.message || '拉取模型失败', false);
-          return;
-        }
-        const models = res.models.map(m => ({
-          id: m.id,
-          name: m.name || m.id,
-          type: m.type === 'video' ? 'video' : (m.type === 'chat' ? 'chat' : 'drawing'),
-          enabled: m.enabled !== false,
-        }));
-        const saveRes = await Backend.updateKey(providerId, keyId, { models });
-        if (saveRes.status === 'success' && saveRes.keys) {
-          ctx.onKeysChange(saveRes.keys);
-          ctx.onRenderKeys();
-          ctx.onRenderModels();
-          showToast(`已拉取 ${models.length} 个模型`);
-        } else {
-          showToast(saveRes.message || '保存失败', false);
-        }
-      } catch (e) {
-        showToast('拉取模型失败：' + (e as Error).message, false);
-      } finally {
-        fetchKeyModelsBtn.disabled = false;
-        fetchKeyModelsBtn.textContent = '拉取模型';
       }
     };
 

@@ -3,15 +3,37 @@
 // 与架构文档「四、数据结构与接口」保持一致
 
 /** 统一「生成节点」：多图参考（0~N）→ 生成 N 张新图（每张一个可编辑 image-gen 产出节点；文生图第 1 张写回自身），注册式扩展 */
-type NodeType = 'image-gen' | 'text-gen';
+type NodeType = 'image-gen' | 'text-gen' | 'text-split';
 
-/** 节点状态机五态 */
-type NodeStatus = 'idle' | 'run' | 'done' | 'stale' | 'fail';
+/**
+ * 节点状态机七态（B-5：由五态扩展，新增 queued / partial-failed）。
+ * 持久化只存五态（idle/run/done/stale/fail）：queued→idle、partial-failed→done 由 persistence.collect 归一（共享约定 6）。
+ * 七态派生唯一出口 = BatchStore.nodeStatus(nodeId)（无批次时回退节点自身终态）。
+ */
+type NodeStatus = 'idle' | 'queued' | 'run' | 'done' | 'partial-failed' | 'fail' | 'stale';
+
+/** 端口数据类型（A-3 端口类型契约；五类型，见 docs/重构-增量架构设计 §3.3） */
+type PortType = 'Image' | 'ImageList' | 'Text' | 'TextList' | 'GenerationConfig';
 
 /** text-gen 参数：命令（临时，发送后清空）+ 文本模型 */
 interface TextGenParams {
   instruction?: string;  // 命令；新建为空、用户自填、发送后清空（仅作命令暂存）
   model: string;         // "provider_id:key_id:model_id"（chat 模型；旧两段值仍由后端兼容）
+}
+
+/** 文本拆分节点参数：文档被拆成可独立编辑的提示词槽位。 */
+interface TextSplitParams {
+  delimiter: string;
+  segments: string[];
+}
+
+/** 文本拆分驱动生成时，图片节点卡内保留的每一张结果。 */
+interface GeneratedImageItem {
+  url: string;
+  prompt: string;
+  origin?: ImageOrigin | null;
+  width?: number;
+  height?: number;
 }
 
 /** 节点级文本历史条目（text-gen 专属；不存图片信息，见架构决策） */
@@ -39,7 +61,56 @@ interface GenerationTrace {
   outputType: 'txt2img' | 'img2img' | 'outpaint';
   imageWidth?: number;       // 原图真实像素宽（PIL im.size；旧 trace 缺失 → 展示回退 params）
   imageHeight?: number;      // 原图真实像素高
+  batchId?: string;          // B-6 追溯：所属批次（R3 同格式 `${nodeId}_${Date.now()}`；旧 trace 缺失 → 读侧回退单图）
+  jobId?: string;            // B-6 追溯：任务编号（`${batchId}_j${index}`；可反查「来自第几条拆分文本」= index+1）
 }
+
+/**
+ * 单个生成任务状态机（B-1/B-2）：一条提示词的一次完整执行（含重试）。
+ */
+type JobStatus = 'queued' | 'creating' | 'running' | 'succeeded' | 'failed' | 'cancelled';
+
+/** 批次状态机（B-1/B-2） */
+type BatchStatus = 'queued' | 'running' | 'completed' | 'partial-failed' | 'failed' | 'cancelled';
+
+/** 单个生成任务：一条提示词的一次完整执行（含重试）。 */
+interface GenerationJob {
+  id: string;              // uid('job') 风格；追溯用，写回 trace.jobId（实际格式 `${batchId}_j${index}`）
+  batchId: string;         // 所属批次
+  index: number;           // 0-based；面板显示 #(index+1)，拆分模式对应拆分槽位序号
+  prompt: string;          // 该任务实际使用的提示词（拆分槽位原文 / 合成 prompt）
+  status: JobStatus;       // 独立状态机
+  remoteTaskId?: string;   // 远端任务 id（轮询用；creating 成功后写）
+  image?: {                // 成功图（仅 succeeded 时有；含缩略/原图引用/真实像素）
+    url: string;
+    originalPath?: string;
+    originalUrl?: string;
+    width?: number;
+    height?: number;
+  } | null;
+  error?: string | null;   // 独立错误（B-3：禁止共享 lastError）
+  attempts: number;        // 已尝试次数（重试 +1；首次 = 1）
+  createdAt: number;       // Job 创建时间（= 批次创建时刻）
+  startedAt?: number;      // 进入 running 时刻
+  finishedAt?: number;     // 进入终态时刻
+}
+
+/** 一次批量生成：先同步创建（total=N + N 个 queued Job）再入队执行。 */
+interface GenerationBatch {
+  id: string;              // 沿用 R3 格式：`${nodeId}_${Date.now()}`（与 history.jsonl 旧行兼容）
+  nodeId: string;          // 所属图片生成节点
+  source: 'manual-count' | 'text-split';  // 驱动来源
+  total: number;           // 恒等于 jobs.length（B-1 验收：任意时刻 jobs.length === total）
+  concurrency: number;     // 创建时快照并发上限（展示用）
+  status: BatchStatus;
+  jobs: GenerationJob[];
+  createdAt: number;
+  finishedAt?: number;
+  // ── B-7 刷新恢复标记（仅 rebuildFromNodes 产生；正常批次缺省） ──
+  restored?: boolean;      // true = 刷新后从节点结果重建
+  unknownCount?: number;   // 刷新前进行中/未知任务数（UI 显示「另有 N 个任务状态未知」）
+}
+
 
 
 /** 原图引用（图片性能优化：卡片主视觉=缩略图，查看大图按需经 load_local_image 取原图） */
@@ -65,6 +136,8 @@ interface FlowNode {
   imageWidth?: number;       // 原图真实像素宽（生成/回写时透传；旧节点/旧数据缺失 → 展示回退 params）
   imageHeight?: number;      // 原图真实像素高
   outputText: string | null; // 新增：text-gen 输出文本；其余类型恒 null
+  generatedImages?: GeneratedImageItem[]; // 仅 text-split 上游驱动的 image-gen 使用，按拆分槽位顺序保存
+  activeGeneratedIndex?: number; // 卡内当前浏览的批量结果下标
   textHistory: TextGenHistoryItem[]; // 新增：节点级文本历史；非 text-gen 恒 []
   refImages: string[];       // 用户主动挂载的参考图（默认 []；上游可作参考图的图由 getReferenceImages 派生）
   error: string | null;      // fail 原因（红点 hover/点击展示）
@@ -185,6 +258,7 @@ type HistoryEntry =
       parentId?: string | null;
       outputType: 'txt2img' | 'img2img' | 'outpaint';
       batchId?: string;        // R3：一次生成的批次号（count=N 共用一个；text 分支不加）；旧行缺失 → 读侧按单图回退展示
+      jobId?: string;          // B-6 追溯：与 batchId 并列，写 history.jsonl 行（旧行缺失 → 读侧回退，不报错）
       imageWidth?: number;     // 原图真实像素宽（PIL im.size；旧行缺失 → 展示回退 params）
       imageHeight?: number;    // 原图真实像素高
     }

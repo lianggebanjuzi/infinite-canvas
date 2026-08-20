@@ -4,6 +4,7 @@
 
 import { flowState } from './state/flow-state';
 import { flowHistory } from './state/history';
+import { batchStore } from './state/batch-store';
 import { Backend } from './api';
 import { TEXT_HISTORY_LIMIT } from './nodes/text-gen';
 import { showToast } from './ui/toast';
@@ -158,6 +159,8 @@ class Persistence {
       canvas: { ...flowState.canvas },
       nodes: flowState.nodes.map(n => ({
         ...n,
+        // 共享约定 6：七态持久化归一为五态（queued→idle、partial-failed→done；run/done/stale/fail 原样）
+        status: n.status === 'queued' ? 'idle' : (n.status === 'partial-failed' ? 'done' : n.status),
         params: { ...(n.params || {}) },
         refImages: [...(n.refImages || [])],
         textHistory: [...(n.textHistory || [])],
@@ -208,6 +211,8 @@ class Persistence {
       createdAt: typeof p.createdAt === 'number' ? p.createdAt : Date.now(),
       updatedAt: typeof p.updatedAt === 'number' ? p.updatedAt : Date.now(),
     });
+    // B-7：换项目后从节点结果（imageUrl/generatedImages/trace）重建已知批次（.icproj 版本不动）
+    batchStore.rebuildFromNodes();
     return true;
   }
 

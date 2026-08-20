@@ -30,7 +30,11 @@ const def: NodeDefinition = {
     const hasOwnPrompt = !!(p.prompt && p.prompt.trim());
     const hasUpstreamText = ctx.getUpstreams(node.id)
       .some(u => u.type === 'text-gen' && typeof u.outputText === 'string' && u.outputText.trim().length > 0);
-    if (!hasOwnPrompt && !hasUpstreamText) return '请输入提示词';
+  // 与实际执行时保持一致：文本拆分节点可能由上游文本动态生成槽位，
+  // 此时不能只检查它保存的手动 segments。
+  const hasSplitText = ctx.getUpstreams(node.id)
+    .some(u => u.type === 'text-split' && flowState.getTextSplitSegments(u.id).length > 0);
+    if (!hasOwnPrompt && !hasUpstreamText && !hasSplitText) return '请输入提示词';
     if (!p.model) return '请先选择绘图模型';
     return true; // 参考图 0~N 可选
   },

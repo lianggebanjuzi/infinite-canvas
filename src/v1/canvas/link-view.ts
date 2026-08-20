@@ -11,8 +11,30 @@ import { cardView } from './card-view';
 import { showToast } from '../ui/toast';
 import { applyLinkFlowing } from '../ui/status-visuals';
 import { resolveDefaultModel } from '../api';
+import { outputTypesOf, PORT_TYPES } from '../nodes/port-types';
 
 const NS = 'http://www.w3.org/2000/svg';
+
+/**
+ * C-5 连线传输语义描述（连线完成后 toast / 选中连线信息展示）：
+ * 按「起点类型 → 终点类型」给出人话说明；未知组合回退端口类型明细。
+ */
+export function connectionDescription(fromId: string, toId: string): string {
+  const from = flowState.getNode(fromId);
+  const to = flowState.getNode(toId);
+  if (!from || !to) return '已创建连线';
+  const outs = outputTypesOf(from);
+  const ins = PORT_TYPES[to.type]?.inputs ?? [];
+  if (from.type === 'text-split' && to.type === 'image-gen') {
+    const n = flowState.getTextSplitSegments(from.id).length;
+    return n > 0 ? `将按 ${n} 条提示词批量生成` : '批量生成（暂无提示词）';
+  }
+  if (from.type === 'text-gen' && to.type === 'image-gen') return '上游文本将作为提示词';
+  if (from.type === 'text-gen' && to.type === 'text-split') return '按分隔符自动拆分';
+  if (to.type === 'text-gen' && from.type === 'image-gen') return '可反推提示词';
+  if (from.type === 'image-gen' && to.type === 'image-gen') return '作为参考图';
+  return `${outs.join('/')} → ${ins.join('/')}`;
+}
 
 class LinkView {
   private svg: SVGSVGElement | null = null;
@@ -22,11 +44,50 @@ class LinkView {
   private dels = new Map<string, HTMLElement>();
   private flowing = new Set<string>();
   private tempPath: SVGPathElement | null = null;
+  /** C-5 选中连线 id（选中态 + 中点传输信息浮标） */
+  private selectedEdgeId: string | null = null;
+  private linkInfoEl: HTMLElement | null = null;
 
   init(canvasEl: HTMLElement): void {
     this.canvasEl = canvasEl;
     this.svg = canvasEl.querySelector('#link-layer') as SVGSVGElement | null;
     this._ensureDefs();
+    // 点画布空白（非连线）取消连线选中
+    canvasEl.addEventListener('mousedown', (e: MouseEvent) => {
+      if (!(e.target as Element).closest('.link-path')) this.selectEdge(null);
+    });
+  }
+
+  /** C-5：选中/取消选中一条连线（选中显示传输类型与来源摘要） */
+  selectEdge(edgeId: string | null): void {
+    this.selectedEdgeId = edgeId;
+    this.paths.forEach((p, id) => p.classList.toggle('selected', id === edgeId));
+    this._renderLinkInfo();
+  }
+
+  private _renderLinkInfo(): void {
+    if (!this.canvasEl) return;
+    if (!this.linkInfoEl) {
+      this.linkInfoEl = document.createElement('div');
+      this.linkInfoEl.className = 'link-info';
+      this.canvasEl.appendChild(this.linkInfoEl);
+    }
+    const edge = this.selectedEdgeId ? flowState.edges.find(e => e.id === this.selectedEdgeId) : null;
+    if (!edge) { this.linkInfoEl.classList.remove('show'); return; }
+    const a = flowState.getNode(edge.from);
+    const b = flowState.getNode(edge.to);
+    if (!a || !b) { this.linkInfoEl.classList.remove('show'); return; }
+    const x1 = a.x + (a.w ?? CARD_W);
+    const y1 = a.y + (a.h ?? cardView.cardHeight(a)) / 2;
+    const x2 = b.x;
+    const y2 = b.y + (b.h ?? cardView.cardHeight(b)) / 2;
+    const midX = (x1 + x2) / 2;
+    const midY = (y1 + y2) / 2;
+    this.linkInfoEl.style.left = midX + 'px';
+    this.linkInfoEl.style.top = midY + 'px';
+    const label = `${a.title || a.type} → ${b.title || b.type}`;
+    this.linkInfoEl.innerHTML = `<b>${escapeHtml(label)}</b><span>${escapeHtml(connectionDescription(edge.from, edge.to))}</span>`;
+    this.linkInfoEl.classList.add('show');
   }
 
   private _ensureDefs(): void {
@@ -74,6 +135,12 @@ class LinkView {
       this.svg.appendChild(path);
       this.paths.set(edge.id, path);
 
+      // C-5：点击连线选中（显示传输类型与来源摘要）；再次点击取消
+      path.addEventListener('click', (e: MouseEvent) => {
+        e.stopPropagation();
+        this.selectEdge(this.selectedEdgeId === edge.id ? null : edge.id);
+      });
+
       // hover 连线 → 中点 + 号与删除按钮出现
       const plus = this._buildPlus(edge);
       const del = this._buildDelete(edge);
@@ -89,6 +156,7 @@ class LinkView {
     }
     path.setAttribute('d', d);
     applyLinkFlowing(path, this.flowing.has(edge.id));
+    path.classList.toggle('selected', this.selectedEdgeId === edge.id);
 
     const plus = this.pluses.get(edge.id);
     const del = this.dels.get(edge.id);
@@ -197,6 +265,16 @@ class LinkView {
       this.tempPath = null;
     }
   }
+}
+
+/** HTML 转义（连线信息浮标展示节点名/语义，防注入） */
+function escapeHtml(text: string): string {
+  return String(text)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 }
 
 export const linkView = new LinkView();

@@ -5,22 +5,23 @@ import { flowState } from '../state/flow-state';
 import { selection } from '../state/selection';
 import { flowHistory } from '../state/history';
 import { dirty } from '../state/dirty';
-import { CARD_W } from './canvas-view';
+import { batchStore } from '../state/batch-store';
+import { CARD_W, IMAGE_CARD_MAX_H, TEXT_CARD_MAX_H, imageCardHeight } from './canvas-view';
 import { interactions } from './interactions';
 import { applyCardStatus } from '../ui/status-visuals';
 import { showToast } from '../ui/toast';
+import { resultViewer } from '../ui/result-viewer';
 import { assetStore } from '../asset-store';
 import { Backend } from '../api';
 
 const ICON_EXPAND = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></svg>';
-const ICON_CHECK = '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>';
-const ICON_LOCK = '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>';
+const ICON_ADD_ASSET = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12M6 9h12"/><path d="M5 15v4a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-4"/></svg>';
 
 class CardView {
   private container: HTMLElement | null = null;
   private els = new Map<string, HTMLElement>();
   /** 内容指纹缓存：主图/缩略行/标题/状态/文本/角标态/素材态/空态文案/尺寸标注变化时才重建 img.innerHTML（避免高频调用反复重建大图 DOM） */
-  private _contentFingerprint = new Map<string, { mainSrc: string; refStrip: string; title: string; status: string; text: string; assetState: string; isAsset: string; emptyHint: string; sizeLabel: string }>();
+  private _contentFingerprint = new Map<string, { mainSrc: string; refStrip: string; title: string; status: string; text: string; assetState: string; isAsset: string; emptyHint: string; sizeLabel: string; splitState: string; galleryState: string }>();
   /** 当前处于就地编辑态的 text-gen 节点 id（编辑中跳过 img.innerHTML 重建，避免打字被重建打断） */
   private _editingNodeId: string | null = null;
 
@@ -29,8 +30,13 @@ class CardView {
   }
 
   cardHeight(node: FlowNode): number {
-    const ratio = node.ratio > 0 ? node.ratio : 4 / 3;
-    return Math.round(CARD_W / ratio);
+    if (node.h) return node.h;
+    if (node.type === 'text-split') {
+      // A-2：拆分卡高度随段数增长但封顶 TEXT_CARD_MAX_H（520），槽位区内部滚动（.split-body overflow-y:auto）
+      const segments = flowState.getTextSplitSegments(node.id);
+      return Math.min(TEXT_CARD_MAX_H, Math.max(280, 126 + Math.max(1, segments.length) * 76));
+    }
+    return imageCardHeight(node.ratio);
   }
 
   getEl(id: string): HTMLElement | undefined {
@@ -67,15 +73,20 @@ class CardView {
     el.id = `node-${node.id}`;
     el.dataset.nodeId = node.id;
     const isTextGen = node.type === 'text-gen';
+    const isTextSplit = node.type === 'text-split';
     if (isTextGen) el.classList.add('textgen');
+    if (isTextSplit) el.classList.add('textsplit');
     el.innerHTML = `
       <div class="pcard-img"></div>
-      <div class="pcard-tag"><span class="dot"></span><span class="tag-text"></span></div>
-      ${isTextGen ? '' : `<button class="pcard-act" title="查看大图">${ICON_EXPAND}</button>`}
-      ${isTextGen ? '' : '<div class="port in"></div>'}
+      <div class="pcard-tag"><span class="dot"></span><span class="tag-text"></span><span class="tag-status"></span></div>
+      ${isTextGen || isTextSplit ? '' : `<div class="pcard-actions">
+        <button class="pcard-act" title="查看大图">${ICON_EXPAND}</button>
+        <button class="pcard-act asset-add" title="添加到资产库">${ICON_ADD_ASSET}</button>
+      </div>`}
+      ${isTextGen || isTextSplit ? '' : '<div class="port in"></div>'}
       <div class="port out"></div>
       <div class="pcard-error"></div>
-      ${isTextGen ? '<div class="pcard-resize" title="拖拽调整大小"></div>' : ''}
+      ${isTextGen || isTextSplit ? '<div class="pcard-resize" title="拖拽调整大小"></div>' : ''}
     `;
 
     // 文本反推卡：单击只负责选中/拖动，双击文本区才进入就地编辑（所见即所得；空态同样适用）。
@@ -92,36 +103,118 @@ class CardView {
       this._enterTextEdit(node.id);
     });
 
-    // 采纳/锁定角标点击（X1 画布角标入口：变更前 record 入撤销栈）
+    // 图片节点的资产库入口：与查看大图共用右上角悬浮操作区。
     el.addEventListener('click', (e: MouseEvent) => {
       const target = e.target as Element;
-      const badge = target.closest('.pcard-badge') as HTMLElement | null;
-      if (badge) this._handleBadgeClick(node.id, badge);
+      const button = target.closest('.pcard-act.asset-add') as HTMLButtonElement | null;
+      if (!button) return;
+      e.preventDefault();
+      e.stopPropagation();
+      this._addToAssetLibrary(node.id);
     });
+    this._bindGalleryEvents(el, node.id);
+    if (isTextSplit) this._bindTextSplitEvents(el, node.id);
     return el;
   }
 
-  /** 画布角标点击：采纳/锁定切换（唯一写入口 = AssetStore；X1 三处同步） */
-  private _handleBadgeClick(nodeId: string, badge: HTMLElement): void {
+  private _bindGalleryEvents(el: HTMLElement, nodeId: string): void {
+    el.addEventListener('click', (e: MouseEvent) => {
+      const button = (e.target as Element).closest('.image-gallery-nav') as HTMLElement | null;
+      if (!button) return;
+      e.preventDefault(); e.stopPropagation();
+      const node = flowState.getNode(nodeId);
+      const images = node?.generatedImages || [];
+      if (!node || images.length === 0) return;
+      const next = Math.min(images.length - 1, Math.max(0, (node.activeGeneratedIndex || 0) + Number(button.dataset.dir || 0)));
+      const item = images[next];
+      flowState.updateNode(nodeId, { activeGeneratedIndex: next, imageUrl: item.url, imageOrigin: item.origin || null,
+        imageWidth: item.width, imageHeight: item.height });
+    });
+  }
+
+  /** 拆分卡全部在卡内编辑，避免挤占图片节点的指令面板。 */
+  private _bindTextSplitEvents(el: HTMLElement, nodeId: string): void {
+    const save = (patch: Partial<TextSplitParams>): void => {
+      const node = flowState.getNode(nodeId);
+      if (!node) return;
+      flowState.updateNodeParams(nodeId, { ...patch });
+      dirty.markUpstreamChanged(nodeId);
+    };
+    el.addEventListener('mousedown', (e: MouseEvent) => {
+      if ((e.target as Element).closest('.split-control, .split-input, .split-delimiter, .gallery-nav')) e.stopPropagation();
+    });
+    el.addEventListener('focusin', (e: FocusEvent) => {
+      const target = e.target as HTMLElement;
+      if (target.matches('.split-input, .split-delimiter') && !target.dataset.historyRecorded) {
+        flowHistory.record();
+        target.dataset.historyRecorded = '1';
+      }
+    });
+    el.addEventListener('focusout', (e: FocusEvent) => {
+      const target = e.target as HTMLElement;
+      if (target.matches('.split-input, .split-delimiter')) delete target.dataset.historyRecorded;
+    });
+    el.addEventListener('input', (e: Event) => {
+      const target = e.target as HTMLInputElement | HTMLTextAreaElement;
+      const node = flowState.getNode(nodeId);
+      if (!node) return;
+      if (target.classList.contains('split-input') && flowState.getUpstreams(nodeId).some(n => n.type === 'text-gen')) return;
+      const p = node.params as unknown as TextSplitParams;
+      const delimiter = target.classList.contains('split-delimiter') ? target.value : (p.delimiter || '');
+      const rawSegments = Array.isArray(p.segments) ? [...p.segments] : [''];
+      if (target.classList.contains('split-input')) {
+        const index = Number(target.dataset.index || 0);
+        rawSegments[index] = target.value;
+      }
+      // 任意输入中出现拆分符都立即拆成槽位；split() 天然不会把分隔符带入结果。
+      const hasDelimiter = !!delimiter && rawSegments.some(text => String(text).includes(delimiter));
+      const segments = hasDelimiter
+        ? rawSegments.flatMap(text => String(text).split(delimiter).map(s => s.trim())).filter(s => s !== '')
+        : rawSegments;
+      // 普通输入不重建 DOM，避免每敲一个字就丢失 textarea 焦点；真正触发拆分时再刷新槽位。
+      el.dataset.splitRebuild = hasDelimiter ? '1' : '';
+      save({ delimiter, segments: segments.length ? segments : [''] });
+    });
+    el.addEventListener('click', (e: MouseEvent) => {
+      const target = e.target as Element;
+      const button = target.closest('.split-control, .gallery-nav') as HTMLElement | null;
+      if (!button) return;
+      e.preventDefault(); e.stopPropagation();
+      const node = flowState.getNode(nodeId);
+      if (!node) return;
+      if (button.classList.contains('gallery-nav')) {
+        const images = node.generatedImages || [];
+        const dir = Number(button.dataset.dir || 0);
+        const index = Math.min(images.length - 1, Math.max(0, (node.activeGeneratedIndex || 0) + dir));
+        flowState.updateNode(nodeId, { activeGeneratedIndex: index, imageUrl: images[index]?.url || node.imageUrl });
+        return;
+      }
+      if (flowState.getUpstreams(nodeId).some(n => n.type === 'text-gen')) {
+        showToast('拆分框由上游文本自动决定；可修改拆分符', false);
+        return;
+      }
+      flowHistory.record();
+      const p = node.params as unknown as TextSplitParams;
+      const segments = Array.isArray(p.segments) ? [...p.segments] : [''];
+      const act = button.dataset.action;
+      if (act === 'add') segments.push('');
+      else if (act === 'remove' && segments.length > 1) segments.pop();
+      else if (act === 'clear') { flowState.updateNodeParams(nodeId, { segments: [''] }); dirty.markUpstreamChanged(nodeId); return; }
+      flowState.updateNodeParams(nodeId, { segments });
+      dirty.markUpstreamChanged(nodeId);
+    });
+  }
+
+  /** 将当前图片保存到资产库；画布节点不再提供采纳/锁定切换入口。 */
+  private _addToAssetLibrary(nodeId: string): void {
     const node = flowState.getNode(nodeId);
     if (!node || !node.imageUrl) return;
     const url = node.imageUrl;
+    if (assetStore.isAdoptedByImageUrl(url)) return;
     flowHistory.record(); // 用户手势入口：变更前入撤销栈（X3）
-    if (badge.classList.contains('adopt')) {
-      if (assetStore.isAdoptedByImageUrl(url)) {
-        assetStore.unadoptByUrl(url);
-        showToast('已取消采纳');
-      } else {
-        // 采纳：展示图 URL + 原图引用一并写入资产记录（查看大图按需加载用）；
-        // R2：传 metaFromNode(node)（trace 优先 / params 兜底）→ 配方随记录落盘 assets.json（修复跨项目复现空白）
-        assetStore.adoptByUrl(url, node.id, assetStore.metaFromNode(node), node.imageOrigin?.path);
-        showToast('已采纳（自动锁定）');
-      }
-    } else {
-      const next = !assetStore.isLockedByImageUrl(url);
-      assetStore.setLockedByUrl(url, node.id, next, node.imageOrigin?.path);
-      showToast(next ? '已锁定' : '已解锁');
-    }
+    // AssetStore 保持既有资产持久化和去重语义；此处只暴露“添加到资产库”的用户动作。
+    assetStore.adoptByUrl(url, node.id, assetStore.metaFromNode(node), node.imageOrigin?.path);
+    showToast('已添加到资产库');
   }
 
   private updateCard(el: HTMLElement, node: FlowNode): void {
@@ -134,15 +227,21 @@ class CardView {
     // 文本反推卡：主视觉为文本（outputText），无图。
     const ownRefs = Array.isArray(node.refImages) ? node.refImages : [];
     const isTextGen = node.type === 'text-gen';
+    const isTextSplit = node.type === 'text-split';
     const isAsset = flowState.isAssetNode(node); // 素材态：整卡显图 + 角标「素材」（判分支 #9）
-    const mainSrc = isTextGen
+    const isTallImage = !isTextGen && !isTextSplit && CARD_W / (node.ratio > 0 ? node.ratio : 4 / 3) > IMAGE_CARD_MAX_H;
+    // C-3 统一批次展示：count>1 与文本拆分驱动的成功图都写在 generatedImages，卡内统一浏览
+    const galleryImages = (node.generatedImages || []);
+    const galleryIndex = Math.min(Math.max(0, node.activeGeneratedIndex || 0), Math.max(0, galleryImages.length - 1));
+    const galleryImage = galleryImages[galleryIndex];
+    const mainSrc = (isTextGen || isTextSplit)
       ? ''
-      : (node.imageUrl || (ownRefs.length > 0 ? ownRefs[0] : ''));
+      : (galleryImage?.url || node.imageUrl || (ownRefs.length > 0 ? ownRefs[0] : ''));
 
     const img = el.querySelector('.pcard-img') as HTMLElement;
     if (img) {
       // 高度：text-gen 支持 h 覆盖（缩放）；image-gen 维持按图比例（CARD_W / ratio）
-      img.style.height = (isTextGen ? (node.h ?? this.cardHeight(node)) : this.cardHeight(node)) + 'px';
+      img.style.height = ((isTextGen || isTextSplit) ? (node.h ?? this.cardHeight(node)) : this.cardHeight(node)) + 'px';
     }
 
     // 内容指纹：仅当主图/缩略行/标题/状态/文本/角标态变化时才重建 img.innerHTML 与标签文本。
@@ -151,18 +250,18 @@ class CardView {
     const refStrip = this._refStrip(node);
     const title = node.title || '节点';
     const text = node.outputText || '';
-    // 角标态（X1）：采纳/锁定读 AssetStore 单一数据源；纳入指纹保证 adopt/lock 任一变更都触发重建。
-    // 括号显式组合：'al'（已采纳+已锁定）/ 'a' / 'l' / '' 四种态都可达（QA O1）。
+    // 资产库状态纳入指纹，添加后立即重建按钮状态。
     const adopted = !!mainSrc && assetStore.isAdoptedByImageUrl(mainSrc);
-    const locked = !!mainSrc && assetStore.isLockedByImageUrl(mainSrc);
-    const assetState = (adopted ? 'a' : '') + (locked ? 'l' : '');
+    const assetState = adopted ? 'added' : '';
     // P1（W2-5）：文本节点空态引导——有图片上游（可反推）时给轻量提示
     const emptyHint = isTextGen && flowState.getReferenceImages(node.id).length > 0
       ? '已连接上游图，可反推'
       : '双击输入文本';
     // 分辨率/比例标注（B2：真实像素优先，无则回退 params；纳入指纹，像素/配方变化时重建）
     const sizeLabel = this._sizeLabel(node);
-    const fp = { mainSrc, refStrip, title, status: node.status, text, assetState, isAsset: isAsset ? '1' : '0', emptyHint, sizeLabel };
+    const splitState = isTextSplit ? JSON.stringify({ params: node.params, segments: flowState.getTextSplitSegments(node.id) }) : '';
+    const galleryState = JSON.stringify({ images: node.generatedImages || [], index: node.activeGeneratedIndex || 0 });
+    const fp = { mainSrc, refStrip, title, status: node.status, text, assetState, isAsset: isAsset ? '1' : '0', emptyHint, sizeLabel, splitState, galleryState };
     const prev = this._contentFingerprint.get(node.id);
     const changed = !prev
       || prev.mainSrc !== fp.mainSrc
@@ -173,36 +272,44 @@ class CardView {
       || prev.assetState !== fp.assetState
       || prev.isAsset !== fp.isAsset
       || prev.emptyHint !== fp.emptyHint
-      || prev.sizeLabel !== fp.sizeLabel;
+      || prev.sizeLabel !== fp.sizeLabel
+      || prev.splitState !== fp.splitState
+      || prev.galleryState !== fp.galleryState;
     if (changed) {
       this._contentFingerprint.set(node.id, fp);
       // 就地编辑中跳过重建（避免状态等变化把 textarea 打没）；退出编辑态后由保存/取消路径强制重建
-      if (img && this._editingNodeId !== node.id) {
+      const activeEl = document.activeElement as HTMLElement | null;
+      const splitTyping = isTextSplit && !!activeEl && el.contains(activeEl)
+        && activeEl.matches('.split-input, .split-delimiter') && el.dataset.splitRebuild !== '1';
+      if (img && this._editingNodeId !== node.id && !splitTyping) {
+        if (isTextSplit) delete el.dataset.splitRebuild;
         // 底部叠加参考图缩略行（本节点 refImages ∪ 上游可作参考图的图，动态增删，叠加不改变卡片尺寸）
-        const badgesHtml = isTextGen || !mainSrc ? '' : `
-          <div class="pcard-badges">
-            <button class="pcard-badge adopt${adopted ? ' on' : ''}" title="${adopted ? '取消采纳' : '采纳（自动锁定）'}">${ICON_CHECK}</button>
-            <button class="pcard-badge lock${locked ? ' on' : ''}" title="${locked ? '取消锁定' : '锁定'}">${ICON_LOCK}</button>
-          </div>`;
         // 分辨率/比例标注条（仅图片卡有图且可算文案时显示；指针穿透，不遮挡操作）
         const sizeHtml = !isTextGen && mainSrc && sizeLabel
           ? `<div class="pcard-size"><span>${escapeHtml(sizeLabel)}</span></div>`
           : '';
-        if (isTextGen) {
+        if (isTextSplit) {
+          img.innerHTML = this._textSplitContent(node);
+        } else if (isTextGen) {
           // 文本为主视觉：白底文本区（内部滚动），有结果显示 outputText，空态显示占位文案（有图片上游 → 反推引导）
           img.innerHTML = text
             ? `<div class="pcard-text">${escapeHtml(text)}</div><div class="scan"></div>${refStrip}`
             : `<div class="pcard-text empty"><span class="pcard-text-empty">${emptyHint}</span></div><div class="scan"></div>${refStrip}`;
         } else if (mainSrc) {
-          // 素材节点：整卡显图 + 角标「素材」+ pcard-asset class（判分支 #9）
-          const assetBadgeHtml = isAsset ? '<span class="pcard-asset-badge">素材</span>' : '';
-          img.innerHTML = `<div class="ph" style="background-image:url('${escapeUrl(mainSrc)}')"></div><div class="scan"></div>${refStrip}${badgesHtml}${assetBadgeHtml}${sizeHtml}`;
+          // 素材节点保留整卡显图和边框区分；类型由左上角标题胶囊呈现，无需重复角标。
+          // C-3：批次卡显示「第 x/N 张」+ 批次摘要（成功 x/y，仅部分失败时提示）+ 上下切换
+          const gallerySummary = this._gallerySummary(node);
+          const imageGallery = galleryImages.length > 1 ? `<div class="image-gallery-controls"><button class="image-gallery-nav" data-dir="-1" ${galleryIndex === 0 ? 'disabled' : ''}>↑</button><span class="image-gallery-count">${galleryIndex + 1} / ${galleryImages.length}${gallerySummary ? `<b class="image-gallery-summary">${gallerySummary}</b>` : ''}</span><button class="image-gallery-nav" data-dir="1" ${galleryIndex >= galleryImages.length - 1 ? 'disabled' : ''}>↓</button></div>` : '';
+          img.innerHTML = `<div class="ph" style="background-image:url('${escapeUrl(mainSrc)}')"></div><div class="scan"></div>${refStrip}${sizeHtml}${imageGallery}`;
         } else {
           img.innerHTML = `<div class="ph"><div class="ph-empty">${emptyContent()}</div></div><div class="scan"></div>${refStrip}`;
         }
       }
       const tag = el.querySelector('.tag-text') as HTMLElement | null;
       if (tag) tag.textContent = title;
+      // C-4：七态徽标文字（未运行不显示，保持卡片干净）
+      const tagStatus = el.querySelector('.tag-status') as HTMLElement | null;
+      if (tagStatus) tagStatus.textContent = this._statusText(node);
     }
 
     // 状态视觉 + 红点原因（hover title）
@@ -220,20 +327,53 @@ class CardView {
       errEl.textContent = node.status === 'fail' && node.error ? node.error : '';
     }
 
-    el.classList.toggle('empty', !mainSrc && !isTextGen);
+    el.classList.toggle('empty', !mainSrc && !isTextGen && !isTextSplit);
     el.classList.toggle('selected', selection.isSelected(node.id));
-    el.classList.toggle('pcard-asset', isAsset); // 素材态：边框/角标视觉（判分支 #9）
+    el.classList.toggle('pcard-asset', isAsset); // 素材态：细边框视觉（判分支 #9）
+    el.classList.toggle('pcard-tall-image', isTallImage);
 
-    // 查看大图（按需加载原图：有 imageOrigin.path 时桥接取原图，失败回退缩略图；携带真实像素 + 信息栏）
+    const assetAdd = el.querySelector('.pcard-act.asset-add') as HTMLButtonElement | null;
+    if (assetAdd) {
+      assetAdd.disabled = !mainSrc || adopted;
+      assetAdd.title = adopted ? '已添加到资产库' : '添加到资产库';
+      assetAdd.classList.toggle('added', adopted);
+    }
+
+    // 查看大图（C-3：批次节点打开结果查看器；单图走原图按需加载 modal）
     const act = el.querySelector('.pcard-act') as HTMLButtonElement | null;
     if (act) {
       act.onclick = (e: MouseEvent) => {
         e.stopPropagation();
         if (mainSrc) {
-          void openImageModal(mainSrc, node.imageOrigin, { width: node.imageWidth, height: node.imageHeight }, imageModalInfoFromNode(node));
+          if ((node.generatedImages?.length || 0) > 1) {
+            resultViewer.open(node.id, node.activeGeneratedIndex || 0);
+          } else {
+            void openImageModal(mainSrc, node.imageOrigin, { width: node.imageWidth, height: node.imageHeight }, imageModalInfoFromNode(node));
+          }
         }
       };
     }
+  }
+
+  private _textSplitContent(node: FlowNode): string {
+    const p = node.params as unknown as TextSplitParams;
+    const hasTextUpstream = flowState.getUpstreams(node.id).some(n => n.type === 'text-gen');
+    const derived = flowState.getTextSplitSegments(node.id);
+    const segments = derived.length ? derived : [''];
+    const images = node.generatedImages || [];
+    const index = Math.min(Math.max(0, node.activeGeneratedIndex || 0), Math.max(0, images.length - 1));
+    const active = images[index];
+    const slots = segments.map((text, i) => `
+      <div class="split-slot"><span>槽 ${i + 1}</span><textarea class="split-input" data-index="${i}" placeholder="输入文本…" ${hasTextUpstream ? 'readonly' : ''}>${escapeHtml(text)}</textarea></div>`).join('');
+    const gallery = active ? `<div class="split-gallery">
+      <div class="split-gallery-img" style="background-image:url('${escapeUrl(active.url)}')"></div>
+      <div class="split-gallery-bar"><button class="gallery-nav" data-dir="-1" ${index === 0 ? 'disabled' : ''}>↑</button><span>${index + 1} / ${images.length}</span><button class="gallery-nav" data-dir="1" ${index >= images.length - 1 ? 'disabled' : ''}>↓</button></div>
+    </div>` : '';
+    return `<div class="split-body">
+      <div class="split-toolbar"><button class="split-control" data-action="add" title="增加拆分框">＋</button><button class="split-control" data-action="remove" title="减少拆分框">－</button><button class="split-control" data-action="clear" title="一键清空">清空</button></div>
+      <label class="split-label">拆分符<input class="split-delimiter" value="${escapeHtml(p.delimiter || '')}" placeholder="例如 ########"></label>
+      ${hasTextUpstream ? '<div class="split-source-hint">已使用上游文本自动拆分</div>' : ''}<div class="split-slots">${slots}</div>${gallery}
+    </div>`;
   }
 
   /**
@@ -333,12 +473,38 @@ class CardView {
   }
 
   /**
+   * 批次摘要（C-3）：卡内批量浏览时显示「成功 x/y」（仅部分失败/失败时提示，避免常驻噪音）。
+   * 数据源 = batch-store（执行态事实源）；restored 重建批次无 summarize 噪音（无失败）。
+   */
+  private _gallerySummary(node: FlowNode): string {
+    const batchId = node.trace?.batchId;
+    if (!batchId) return '';
+    const batch = batchStore.getBatch(batchId);
+    if (!batch || batch.restored === true) return '';
+    const s = batchStore.summarize(batchId);
+    return s.failed > 0 ? `成功 ${s.succeeded}/${s.total}` : '';
+  }
+
+  /** C-4 七态徽标文字（未运行返回空 → 不显示） */
+  private _statusText(node: FlowNode): string {
+    switch (node.status) {
+      case 'queued': return '排队中';
+      case 'run': return '运行中';
+      case 'done': return '已完成';
+      case 'partial-failed': return '部分失败';
+      case 'fail': return '失败';
+      case 'stale': return '待重跑';
+      default: return '';
+    }
+  }
+
+  /**
    * 卡片分辨率/比例标注文案：有真实像素（node.imageWidth/imageHeight）→ "1536×2048 · 3:4"；
    * 无真实像素回退 params resolution+aspectRatio → "2K · 3:4"；均无 → ''（不显示）。
    * 素材节点（无生成配方）与文本卡不显示。
    */
   private _sizeLabel(node: FlowNode): string {
-    if (node.type === 'text-gen' || flowState.isAssetNode(node)) return '';
+    if (node.type === 'text-gen' || node.type === 'text-split' || flowState.isAssetNode(node)) return '';
     const w = typeof node.imageWidth === 'number' && node.imageWidth > 0 ? node.imageWidth : 0;
     const h = typeof node.imageHeight === 'number' && node.imageHeight > 0 ? node.imageHeight : 0;
     const p = (node.params || {}) as unknown as StyleTransferParams;

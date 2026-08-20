@@ -3,6 +3,7 @@
 
 import { uid } from '../../utils/uid';
 import { nodeRegistry } from '../nodes/node-registry';
+import { canConnectByPort } from '../nodes/port-types';
 import { TEXT_HISTORY_LIMIT } from '../nodes/text-gen';
 import { showToast } from '../ui/toast';
 import { assetStore } from '../asset-store';
@@ -188,6 +189,36 @@ export class FlowState {
   }
 
   /**
+   * 文本拆分节点的有效槽位：若存在文本上游，实时用其 outputText 和拆分符派生；
+   * 无上游时回退节点内手动维护的槽位。这样上游文本更新后，拆分框数量会同步变化。
+   */
+  getTextSplitSegments(id: string): string[] {
+    const node = this.getNode(id);
+    if (!node || node.type !== 'text-split') return [];
+    const p = node.params as unknown as TextSplitParams;
+    const upstreamTexts = this.getEdgesTo(id)
+      .map(e => this.getNode(e.from))
+      .filter((n): n is FlowNode => !!n && n.type === 'text-gen' && typeof n.outputText === 'string' && n.outputText.trim().length > 0)
+      .map(n => (n.outputText || '').trim());
+    if (upstreamTexts.length > 0) {
+      const source = upstreamTexts.join('\n');
+      const delimiter = p.delimiter || '';
+      return delimiter
+        ? source.split(delimiter).map(text => text.trim()).filter(Boolean)
+        : (source.trim() ? [source.trim()] : []);
+    }
+    return Array.isArray(p.segments) ? p.segments.map(text => String(text || '').trim()).filter(Boolean) : [];
+  }
+
+  /** 直接相连的文本拆分槽位。拆分符在写入槽位时已剔除，空槽位不参与出图。 */
+  getUpstreamTextSplitPrompts(id: string): string[] {
+    return this.getEdgesTo(id)
+      .map(e => this.getNode(e.from))
+      .filter((n): n is FlowNode => !!n && n.type === 'text-split')
+      .flatMap(n => this.getTextSplitSegments(n.id));
+  }
+
+  /**
    * 节点级文本历史写入唯一入口（run-engine 与 cmd-panel 回填共用）：
    * 最新在前（unshift）；与头条 trim 后相同则忽略；超 TEXT_HISTORY_LIMIT 裁尾；notify 触发。
    */
@@ -280,6 +311,7 @@ export class FlowState {
       x,
       y,
       ratio: def.defaultRatio,
+      ...(type === 'text-split' ? { w: 440 } : {}),
       status: 'idle',
       title: def.defaultTitle,
       params: { ...def.defaultParams },
@@ -345,8 +377,11 @@ export class FlowState {
 
   /**
    * 校验连线是否可建：返回 null=可建，否则为拒绝原因（手动连线 P0；唯一连线校验入口）。
-   * 文本走线组合（W1-1）：图片（素材/自建）→ 文本 允许（反推输入）；文本→文本、任何→素材 拒绝；
-   * 文本→图片、图片→图片 保留；防环/防重/防自连不变。
+   * A-3 端口类型契约：内部改为「基础校验 → 现状特例（不退化）→ canConnectByPort 查表 → 防环」。
+   * 七组现状行为核对（架构 §3.3）：
+   *   text-gen→text-split ✓ / text-split→image-gen ✓ / text-gen→image-gen ✓ /
+   *   image-gen→text-gen ✓ / image-gen→image-gen ✓ / text-gen→text-gen ✗（保留特例）/
+   *   text-split→text-gen ✗ / 任何→素材 ✗（基础校验）。
    */
   canConnect(from: string, to: string): string | null {
     const fromNode = this.getNode(from);
@@ -356,11 +391,13 @@ export class FlowState {
     if (this.edges.some(e => e.from === from && e.to === to)) return '已有相同连线';
     // 素材节点是链首数据：不接收任何上游（素材→自建图参考图 / 素材→文本反推源 均只作 from）
     if (this.isAssetNode(toNode)) return '素材节点不能作为输入';
-    // 文本节点可作连线接收端（图片→文本 反推输入）；但 文本→文本 链式处理不做（W1-1）
-    if (toNode.type === 'text-gen') {
-      if (fromNode.type === 'text-gen') return '暂不支持文本连文本';
-      // from 是 image-gen（素材/自建图）→ 允许（反推输入）
-    }
+    // 现状特例优先（A-3 不退化）：文本连文本拒绝、文本拆分出口限定（与查表结果一致，保留原文案）
+    if (toNode.type === 'text-gen' && fromNode.type === 'text-gen') return '暂不支持文本连文本';
+    if (fromNode.type === 'text-split' && toNode.type !== 'image-gen') return '文本拆分只能连接图片生成节点';
+    if (toNode.type === 'text-split' && fromNode.type !== 'text-gen') return '文本拆分节点只能接收文本节点';
+    // 端口类型查表（A-3 轻量版）：输出类型 ⊆ 输入类型（多态输出用数组表达）
+    const portReason = canConnectByPort(fromNode, toNode);
+    if (portReason) return portReason;
     if (this._wouldCycle(from, to)) return '不能形成循环';
     return null;
   }
@@ -464,6 +501,8 @@ export class FlowState {
       params: { ...(n.params || {}) },
       imageUrl: n.imageUrl ?? null,
       outputText: typeof n.outputText === 'string' ? n.outputText : null,
+      generatedImages: Array.isArray(n.generatedImages) ? n.generatedImages.map(item => ({ ...item, origin: item.origin ? { ...item.origin } : item.origin })) : [],
+      activeGeneratedIndex: typeof n.activeGeneratedIndex === 'number' ? n.activeGeneratedIndex : 0,
       textHistory: Array.isArray(n.textHistory)
         ? n.textHistory.map(h => ({
             text: String(h?.text ?? '').trim(),
@@ -518,6 +557,7 @@ export class FlowState {
       params: { ...(n.params || {}) },
       refImages: [...(n.refImages || [])],
       textHistory: Array.isArray(n.textHistory) ? n.textHistory.map(h => ({ ...h })) : [],
+      generatedImages: Array.isArray(n.generatedImages) ? n.generatedImages.map(item => ({ ...item, origin: item.origin ? { ...item.origin } : item.origin })) : [],
       trace: n.trace ? { ...n.trace, refImageHashes: [...(n.trace.refImageHashes || [])] } : null,
     };
   }

@@ -16,7 +16,7 @@ import { showToast } from './toast';
 import { floatingPanels } from './floating-panels';
 import { getSupportedAspectRatios, getModelCapabilities } from '../nodes/model-config';
 
-const DEFAULT_RATIO_OPTIONS = ['1:1', '3:4', '4:3', '9:16', '16:9', '21:9', '2:3', '3:2', '4:5', '5:4', '1:4', '4:1', '1:8', '8:1', 'Auto'];
+const DEFAULT_RATIO_OPTIONS = ['1:1', '3:4', '4:3', '9:16', '16:9', '21:9', '2:3', '3:2', '4:5', '5:4', 'Auto'];
 
 /**
  * 根据当前选中的模型ID动态计算支持的比例选项
@@ -72,6 +72,7 @@ class CmdPanel {
   init(): void {
     this.el = document.getElementById('cmd-panel');
     if (!this.el) return;
+    // 保持贴卡直接编辑：提示词、模型、参数与参考图均由当前节点的悬浮面板直接操作。
 
     this.ctxName = document.getElementById('ctx-name') as HTMLElement;
     this.ctxHint = document.getElementById('ctx-hint') as HTMLElement;
@@ -147,6 +148,11 @@ class CmdPanel {
     });
     document.getElementById('chip-count')?.addEventListener('click', (e: MouseEvent) => {
       e.stopPropagation();
+      const node = selection.single();
+      if (node && flowState.getUpstreams(node.id).some(n => n.type === 'text-split')) {
+        showToast('已按文本拆分段数生成，无需选择张数', false);
+        return;
+      }
       this._showChipMenu(e.currentTarget as HTMLElement, COUNT_OPTIONS.map(v => ({ id: String(v), name: `${v}张` })), 'count');
     });
 
@@ -181,20 +187,21 @@ class CmdPanel {
     return [];
   }
 
-  private _saveCurrentPromptToLibrary(): void {
+  private _saveCurrentPromptToLibrary(): boolean {
     const text = this.input.value.trim();
     if (!text) {
-      showToast('提示词不能为空');
-      return;
+      showToast('先输入提示词，再收藏到库中', false);
+      return false;
     }
     const lib = this._getLibrary();
     if (lib.includes(text)) {
-      showToast('已在提示词库中');
-      return;
+      showToast('这条提示词已在库中', false);
+      return false;
     }
     lib.unshift(text);
     this._saveLibrary(lib);
-    showToast('已保存到提示词库');
+    showToast('已收藏到提示词库');
+    return true;
   }
 
   private _saveLibrary(list: string[]): void {
@@ -212,30 +219,37 @@ class CmdPanel {
 
   private _showLibPopup(): void {
     if (!this.el) return;
-    const lib = this._getLibrary();
-
-    const saveBtnHtml = lib.length === 0 || lib.includes(this.input.value.trim())
-      ? ''
-      : `<button class="cmd-lib-save-btn" id="cmd-lib-save" style="position: absolute; right: 8px; top: 8px; background: var(--accent); color: var(--on-accent); border: none; border-radius: 4px; padding: 4px 8px; font-size: 12px; cursor: pointer;">💾 保存</button>`;
+    let library = this._getLibrary();
 
     const popup = document.createElement('div');
     popup.className = 'prompt-lib-popup';
     this.libPopup = popup;
 
+    const head = document.createElement('div');
+    head.className = 'prompt-lib-head';
+    head.innerHTML = `
+      <div><span class="prompt-lib-kicker">创作素材</span><strong>提示词库</strong><span class="prompt-lib-count"></span></div>
+      <button type="button" class="prompt-lib-close" title="关闭提示词库" aria-label="关闭提示词库">×</button>`;
+    popup.appendChild(head);
+
     // 搜索框
     const searchWrap = document.createElement('div');
     searchWrap.className = 'prompt-lib-search';
+    searchWrap.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="6"/><path d="m20 20-4-4"/></svg>';
     const searchInput = document.createElement('input');
-    searchInput.placeholder = '搜索提示词…';
+    searchInput.placeholder = '搜索已收藏的提示词';
     searchInput.type = 'text';
     searchWrap.appendChild(searchInput);
     popup.appendChild(searchWrap);
 
-    // 保存按钮区
     const saveWrap = document.createElement('div');
-    saveWrap.className = 'prompt-lib-save-wrapper';
-    saveWrap.innerHTML = saveBtnHtml;
-    popup.insertBefore(saveWrap, popup.firstChild);
+    saveWrap.className = 'prompt-lib-save-wrap';
+    const saveCurrent = document.createElement('button');
+    saveCurrent.type = 'button';
+    saveCurrent.className = 'prompt-lib-save-current';
+    saveCurrent.innerHTML = '<span>＋</span> 收藏当前提示词';
+    saveWrap.appendChild(saveCurrent);
+    popup.appendChild(saveWrap);
 
     // 列表
     const list = document.createElement('div');
@@ -244,18 +258,21 @@ class CmdPanel {
 
     const renderList = (filter = '') => {
       list.innerHTML = '';
-      const items = filter ? lib.filter(p => p.toLowerCase().includes(filter.toLowerCase())) : lib;
+      const items = filter ? library.filter(p => p.toLowerCase().includes(filter.toLowerCase())) : library;
+      const count = head.querySelector('.prompt-lib-count') as HTMLElement;
+      count.textContent = library.length ? `${library.length} 条` : '空';
+      saveCurrent.disabled = !this.input.value.trim() || library.includes(this.input.value.trim());
       if (items.length === 0) {
         const empty = document.createElement('div');
         empty.className = 'prompt-lib-empty';
-        empty.textContent = '无匹配提示词';
+        empty.innerHTML = filter ? '没有找到匹配的提示词' : '还没有收藏提示词<br><span>把常用创作描述留在这里，随时复用。</span>';
         list.appendChild(empty);
         return;
       }
       items.forEach(prompt => {
         const item = document.createElement('div');
         item.className = 'prompt-lib-item';
-        item.textContent = prompt;
+        item.innerHTML = `<span class="prompt-lib-item-index">${library.indexOf(prompt) + 1}</span><span class="prompt-lib-item-text">${escapeHtml(prompt)}</span>`;
         item.title = prompt;
         item.addEventListener('click', () => {
           this.input.value = prompt;
@@ -269,6 +286,16 @@ class CmdPanel {
 
     renderList();
     searchInput.addEventListener('input', () => renderList(searchInput.value));
+    saveCurrent.addEventListener('click', () => {
+      if (this._saveCurrentPromptToLibrary()) {
+        library = this._getLibrary();
+        renderList(searchInput.value);
+      }
+    });
+    head.querySelector('.prompt-lib-close')?.addEventListener('click', () => {
+      popup.remove();
+      this.libPopup = null;
+    });
 
     // 关闭处理
     const closeHandler = (e: MouseEvent) => {
@@ -285,9 +312,10 @@ class CmdPanel {
     const btn = document.getElementById('cmd-lib-btn');
     if (btn) {
       const rect = btn.getBoundingClientRect();
-      popup.style.left = rect.left + 'px';
+      const width = Math.min(360, window.innerWidth - 32);
+      popup.style.left = Math.max(16, Math.min(rect.left, window.innerWidth - width - 16)) + 'px';
       popup.style.bottom = (window.innerHeight - rect.top + 4) + 'px';
-      popup.style.width = rect.width + 'px';
+      popup.style.width = width + 'px';
     } else {
       popup.style.left = '50%';
       popup.style.bottom = '100px';
@@ -306,14 +334,14 @@ class CmdPanel {
       return;
     }
     if (node.type === 'text-gen') {
-      // 命令是临时的：从输入框读命令执行；输入框被 sync 清空时退回节点已暂存的 command（params.instruction），
-      // 避免「输命令→点模型 chip（sync 清空输入框）→点发送」丢命令。执行后仍清空命令框（卡片只显示结果）。
+      // 命令始终暂存在节点参数中，失焦、成功或失败均不清空，方便修改后重试。
       const command = this.input.value.trim() || ((node.params as unknown as TextGenParams).instruction || '').trim();
       flowState.updateNodeParams(node.id, { instruction: command });
       void runEngine.run(node.id);
-      this.input.value = '';
     } else {
-      const prompt = this.input.value.trim();
+      // 输入框已下线（编辑职责在属性编辑器）：发送时回退节点 params.prompt，避免误清空
+      const p = node.params as unknown as StyleTransferParams;
+      const prompt = this.input.value.trim() || (typeof p.prompt === 'string' ? p.prompt : '');
       flowState.updateNodeParams(node.id, { prompt });
       void runEngine.run(node.id);
     }
@@ -409,7 +437,7 @@ class CmdPanel {
     }
 
     // 素材节点：仅展示图、不可输入指令——隐藏面板（含默认模型回填跳过，W5-2）
-    if (flowState.isAssetNode(node)) {
+    if (flowState.isAssetNode(node) || node.type === 'text-split') {
       this.el.classList.remove('show', 'pos-above', 'textgen', 'reverse');
       return;
     }
@@ -435,7 +463,9 @@ class CmdPanel {
     // text-gen 面板：隐藏绘图参数 chips（比例/分辨率/张数）与参考图区，模型 chip 切到文本模型；
     // image-gen 面板：绘图参数 chips 全显示（反推模式 UI 已删除，W2-2）
     const isTextGen = node.type === 'text-gen';
+    const isTextSplitDriven = !isTextGen && flowState.getUpstreams(node.id).some(n => n.type === 'text-split');
     this.el.classList.toggle('textgen', isTextGen);
+    this.el.classList.toggle('textsplit-driven', isTextSplitDriven);
     this.el.classList.remove('reverse');
 
     // chip/发送钮 title 文案随节点类型切换（文本处理 / 图片生成）
@@ -458,10 +488,15 @@ class CmdPanel {
       node.status === 'run' ? this._runHint(node.id) :
       node.status === 'fail' ? (isTextGen ? '· 处理失败' : '· 生成失败') : '';
 
-    // 输入框（用户未聚焦时回填）：text-gen 命令是临时的，保持干净不回填；image-gen 回填 prompt
-    if (document.activeElement !== this.input) {
+    // 输入框（用户未聚焦时回填）：文本命令与图片提示词均从节点参数恢复，避免点出输入框后内容消失。
+    this.input.disabled = isTextSplitDriven;
+    if (isTextSplitDriven) {
+      this.input.value = '';
+      this.input.placeholder = '提示词由上游文本拆分节点提供';
+    } else if (document.activeElement !== this.input) {
       if (isTextGen) {
-        this.input.value = '';
+        const p = node.params as unknown as TextGenParams;
+        this.input.value = p.instruction || '';
       } else {
         const p = node.params as unknown as StyleTransferParams;
         this.input.value = p.prompt || '';
@@ -630,7 +665,7 @@ class CmdPanel {
     this.chipModelLabel.textContent = modelName;
     this.chipRatioLabel.textContent = p.aspectRatio || '4:3';
     this.chipResLabel.textContent = (p.resolution || '2k').toUpperCase();
-    this.chipCountLabel.textContent = `${p.count ?? 1}张`;
+    this.chipCountLabel.textContent = flowState.getUpstreams(node.id).some(n => n.type === 'text-split') ? '按拆分段数' : `${p.count ?? 1}张`;
   }
 
   /** 智能避让定位（原型 syncBars 逻辑） */

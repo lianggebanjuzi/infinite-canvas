@@ -36,6 +36,7 @@ interface HistoryItem {
   originalPath?: string;    // 原图本地绝对路径（查看大图按需加载用）
   originalUrl?: string;     // file:// 引用（备用）
   batchId?: string;         // R3：一次生成的批次号（同批共用一个；旧行缺失 → batch 视图按单图回退）
+  jobId?: string;           // B-6 追溯：任务编号（与 batchId 并列；旧行缺失 → 读侧回退，不报错）
   width?: number;           // 原图真实像素宽（PIL im.size；旧行缺失 → 展示回退 resolution+aspectRatio）
   height?: number;          // 原图真实像素高
   text?: string; // 文本记录：无图，展示 outputText 片段
@@ -57,6 +58,7 @@ export interface HistoryImageMeta {
   originalPath?: string;    // 原图本地绝对路径
   originalUrl?: string;     // file:// 引用（备用）
   batchId?: string;         // R3：批次号（同批全部成功图共用）
+  jobId?: string;           // B-6 追溯：任务编号（与 batchId 并列；旧数据缺失 → 读侧回退）
   width?: number;           // 原图真实像素宽
   height?: number;          // 原图真实像素高
 }
@@ -133,6 +135,7 @@ class HistoryDrawer {
       originalPath: meta.originalPath,
       originalUrl: meta.originalUrl,
       batchId: meta.batchId,
+      jobId: meta.jobId,
       width: meta.width,
       height: meta.height,
     });
@@ -170,6 +173,7 @@ class HistoryDrawer {
           originalPath: typeof e.originalPath === 'string' ? e.originalPath : undefined,
           originalUrl: typeof e.originalUrl === 'string' ? e.originalUrl : undefined,
           batchId: typeof e.batchId === 'string' ? e.batchId : undefined, // R3：旧行缺失 → undefined 按单图回退
+          jobId: typeof e.jobId === 'string' ? e.jobId : undefined,       // B-6：旧行缺失 → undefined 回退
           width: typeof e.imageWidth === 'number' && e.imageWidth > 0 ? e.imageWidth : undefined,
           height: typeof e.imageHeight === 'number' && e.imageHeight > 0 ? e.imageHeight : undefined,
         });

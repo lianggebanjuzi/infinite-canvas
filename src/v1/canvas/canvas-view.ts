@@ -2,11 +2,25 @@
 // 画布容器：缩放/平移/点阵背景/坐标换算（改造自 src/core/canvas.ts，去 Minimap 依赖）
 
 import { flowState } from '../state/flow-state';
+import { selection } from '../state/selection';
 import { cardView } from './card-view';
 import { linkView } from './link-view';
+import { showToast } from '../ui/toast';
 
 /** 卡片固定宽度（原型 CARD_W=260） */
 export const CARD_W = 260;
+/** 超长图片在画布中的最大卡片高度；完整原图仍可通过查看大图打开。 */
+export const IMAGE_CARD_MAX_H = 520;
+/** 文本卡最大高度（A-2：长文本不撑高画布，内容区内滚；用户拍板保持 520 上限，不采纳 PRD 180） */
+export const TEXT_CARD_MAX_H = 520;
+/** 批次卡/多图卡最大高度（A-2：多图不撑高画布；用户拍板保持 520 上限，不采纳 PRD 260） */
+export const BATCH_CARD_MAX_H = 520;
+
+/** 图片卡统一高度：保持原比例，但限制超长图，避免单个素材撑满画布。 */
+export function imageCardHeight(ratio: number, width = CARD_W): number {
+  const safeRatio = ratio > 0 ? ratio : 4 / 3;
+  return Math.min(IMAGE_CARD_MAX_H, Math.round(width / safeRatio));
+}
 
 /** 点阵间距（px）：与 app.css .canvas-wrap background-size 同步，缩放时按 scale 联动 */
 const DOT_SPACING = 28;
@@ -28,6 +42,8 @@ class CanvasView {
     linkView.init(this.canvasEl);
     this.applyView();
     this._bindEvents();
+    document.getElementById('btn-fit-canvas')?.addEventListener('click', () => this.fitAll());
+    document.getElementById('btn-focus-selected')?.addEventListener('click', () => this.focusSelected());
 
     // 状态变更 → 重渲染
     flowState.subscribe(() => {
@@ -71,9 +87,9 @@ class CanvasView {
     // 滚轮缩放（以鼠标为锚点）
     this.wrap.addEventListener('wheel', (e: WheelEvent) => {
       const target = e.target as Element;
-      if (target.closest('.cmd-input') || target.closest('.project-name') || target.closest('.settings-input')) {
-        return; // 输入框内允许原生滚动
-      }
+      // 卡片内容的阅读/编辑优先于画布缩放：文本、拆分槽位、结果栏及所有可滚动面板
+      // 都保留原生滚动。只有真正落在画布空白处时才缩放。
+      if (target.closest('.pcard-text, .pcard-text-editor, .split-body, .split-input, .property-editor, .task-panel, .result-viewer, .cmd-input, .project-name, .settings-input, textarea, input')) return;
       e.preventDefault();
       const delta = e.deltaY > 0 ? 0.92 : 1.08;
       const ns = Math.min(2, Math.max(0.3, this.view.scale * delta));
@@ -104,6 +120,52 @@ class CanvasView {
 
   endPan(): void {
     this._endPan();
+  }
+
+  /** 将所有节点（含卡片实际高度）缩放并居中到可视范围。 */
+  fitAll(): void {
+    if (!this.wrap || flowState.nodes.length === 0) {
+      showToast('画布中还没有节点', false);
+      return;
+    }
+    const bounds = flowState.nodes.reduce((acc, node) => {
+      const width = node.w ?? CARD_W;
+      const height = node.h ?? cardView.cardHeight(node);
+      acc.minX = Math.min(acc.minX, node.x);
+      acc.minY = Math.min(acc.minY, node.y);
+      acc.maxX = Math.max(acc.maxX, node.x + width);
+      acc.maxY = Math.max(acc.maxY, node.y + height);
+      return acc;
+    }, { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity });
+    const rect = this.wrap.getBoundingClientRect();
+    const padding = 96;
+    const width = Math.max(1, bounds.maxX - bounds.minX);
+    const height = Math.max(1, bounds.maxY - bounds.minY);
+    const scale = Math.min(1.35, Math.max(0.3, Math.min((rect.width - padding * 2) / width, (rect.height - padding * 2) / height)));
+    this._centerWorldPoint((bounds.minX + bounds.maxX) / 2, (bounds.minY + bounds.maxY) / 2, scale);
+  }
+
+  /** 将单选节点置于画布中心，保留当前缩放级别。 */
+  focusSelected(): void {
+    const node = selection.single();
+    if (!node) {
+      showToast('请先选中一个节点', false);
+      return;
+    }
+    const width = node.w ?? CARD_W;
+    const height = node.h ?? cardView.cardHeight(node);
+    this._centerWorldPoint(node.x + width / 2, node.y + height / 2, this.view.scale);
+  }
+
+  private _centerWorldPoint(x: number, y: number, scale: number): void {
+    if (!this.wrap) return;
+    const rect = this.wrap.getBoundingClientRect();
+    this.view.scale = scale;
+    this.view.panX = rect.width / 2 - x * scale;
+    this.view.panY = rect.height / 2 - y * scale;
+    flowState.updatedAt = Date.now();
+    flowState.dirty = true;
+    flowState.notify();
   }
 
   private _startPan(mx: number, my: number): void {
