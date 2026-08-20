@@ -24,6 +24,8 @@ class CardView {
   private _contentFingerprint = new Map<string, { mainSrc: string; refStrip: string; title: string; status: string; text: string; assetState: string; isAsset: string; emptyHint: string; sizeLabel: string; splitState: string; galleryState: string }>();
   /** 当前处于就地编辑态的 text-gen 节点 id（编辑中跳过 img.innerHTML 重建，避免打字被重建打断） */
   private _editingNodeId: string | null = null;
+  /** 处于「展开扇形排列」态的节点 id（会话内瞬态，不持久化；节点删除时随 renderAll 清理） */
+  private _expandedFans = new Set<string>();
 
   init(): void {
     this.container = document.getElementById('canvas');
@@ -53,6 +55,7 @@ class CardView {
         el.remove();
         this.els.delete(id);
         this._contentFingerprint.delete(id);
+        this._expandedFans.delete(id);
       }
     });
 
@@ -120,12 +123,35 @@ class CardView {
 
   private _bindGalleryEvents(el: HTMLElement, nodeId: string): void {
     el.addEventListener('click', (e: MouseEvent) => {
-      // 「展开 N」：打开结果查看器浏览整批（叠放 deck 的入口，与右上角查看大图同路径）
+      // 「展开 N / 收起」：切换卡片右侧的扇形缩略图排列（就地展开，不再弹结果查看器）
       const expandBtn = (e.target as Element).closest('.pcard-expand') as HTMLElement | null;
       if (expandBtn) {
         e.preventDefault(); e.stopPropagation();
         const node = flowState.getNode(nodeId);
-        if (node) resultViewer.open(nodeId, node.activeGeneratedIndex || 0);
+        if (!node) return;
+        if (this._expandedFans.has(nodeId)) this._expandedFans.delete(nodeId);
+        else this._expandedFans.add(nodeId);
+        this._contentFingerprint.delete(nodeId); // 扇形态不在指纹里，强制重建
+        const cardEl = this.els.get(nodeId);
+        if (cardEl) this.updateCard(cardEl, node);
+        return;
+      }
+      // 扇形缩略图：点击设为封面并收起
+      const thumb = (e.target as Element).closest('.fan-thumb') as HTMLElement | null;
+      if (thumb) {
+        e.preventDefault(); e.stopPropagation();
+        const node = flowState.getNode(nodeId);
+        const images = node?.generatedImages || [];
+        const index = Math.min(Math.max(0, Number(thumb.dataset.index || 0)), Math.max(0, images.length - 1));
+        const item = images[index];
+        this._expandedFans.delete(nodeId);
+        this._contentFingerprint.delete(nodeId);
+        if (node && item) {
+          flowState.updateNode(nodeId, { activeGeneratedIndex: index, imageUrl: item.url, imageOrigin: item.origin || null,
+            imageWidth: item.width, imageHeight: item.height });
+        }
+        const cardEl = this.els.get(nodeId);
+        if (cardEl && node) this.updateCard(cardEl, node);
         return;
       }
       const button = (e.target as Element).closest('.image-gallery-nav') as HTMLElement | null;
@@ -292,10 +318,16 @@ class CardView {
         && activeEl.matches('.split-input, .split-delimiter') && el.dataset.splitRebuild !== '1';
       if (img && this._editingNodeId !== node.id && !splitTyping) {
         if (isTextSplit) delete el.dataset.splitRebuild;
-        // 多张结果图的叠放 deck：主图右侧露出后续 1~2 张的层叠边（.pcard 无 overflow 裁剪，层在 .pcard-img 之下）
-        const showDeck = !isTextGen && !isTextSplit && !!mainSrc && galleryImages.length > 1;
+        // 多张结果图两种形态：折叠 = 叠放 deck（主图右缘露后续 1~2 张层叠边）；展开 = 右侧扇形一排缩略图。
+        // 容器都是 .pcard-stack（在 .pcard-img 之下、.pcard 无 overflow 裁剪，扇形排用 pointer-events:auto 恢复交互）。
+        const fanOpen = !isTextGen && !isTextSplit && !!mainSrc && galleryImages.length > 1 && this._expandedFans.has(node.id);
+        const showDeck = !isTextGen && !isTextSplit && !!mainSrc && galleryImages.length > 1 && !fanOpen;
         const stackEl = el.querySelector('.pcard-stack') as HTMLElement | null;
-        if (stackEl) stackEl.innerHTML = showDeck ? this._deckLayersHtml(galleryImages, galleryIndex) : '';
+        if (stackEl) {
+          stackEl.innerHTML = fanOpen
+            ? this._fanStripHtml(galleryImages, galleryIndex, node.ratio)
+            : (showDeck ? this._deckLayersHtml(galleryImages, galleryIndex) : '');
+        }
         // 底部叠加参考图缩略行（本节点 refImages ∪ 上游可作参考图的图，动态增删，叠加不改变卡片尺寸）
         // 分辨率/比例标注条（仅图片卡有图且可算文案时显示；指针穿透，不遮挡操作）
         const sizeHtml = !isTextGen && mainSrc && sizeLabel
@@ -313,7 +345,9 @@ class CardView {
           // C-3：批次卡显示「第 x/N 张」+ 批次摘要（成功 x/y，仅部分失败时提示）+ 上下切换
           const gallerySummary = this._gallerySummary(node);
           const imageGallery = galleryImages.length > 1 ? `<div class="image-gallery-controls"><button class="image-gallery-nav" data-dir="-1" ${galleryIndex === 0 ? 'disabled' : ''}>↑</button><span class="image-gallery-count">${galleryIndex + 1} / ${galleryImages.length}${gallerySummary ? `<b class="image-gallery-summary">${gallerySummary}</b>` : ''}</span><button class="image-gallery-nav" data-dir="1" ${galleryIndex >= galleryImages.length - 1 ? 'disabled' : ''}>↓</button></div>` : '';
-          const expandChip = showDeck ? `<button class="pcard-expand" type="button" title="展开查看全部 ${galleryImages.length} 张">展开 ${galleryImages.length}</button>` : '';
+          const expandChip = (showDeck || fanOpen)
+            ? `<button class="pcard-expand" type="button" title="${fanOpen ? '收起排列' : `向右展开全部 ${galleryImages.length} 张`}">${fanOpen ? '收起' : `展开 ${galleryImages.length}`}</button>`
+            : '';
           img.innerHTML = `<div class="ph" style="background-image:url('${escapeUrl(mainSrc)}')"></div><div class="scan"></div>${refStrip}${sizeHtml}${imageGallery}${expandChip}`;
         } else {
           img.innerHTML = `<div class="ph"><div class="ph-empty">${emptyContent()}</div></div><div class="scan"></div>${refStrip}`;
@@ -345,8 +379,11 @@ class CardView {
     el.classList.toggle('selected', selection.isSelected(node.id));
     el.classList.toggle('pcard-asset', isAsset); // 素材态：细边框视觉（判分支 #9）
     el.classList.toggle('pcard-tall-image', isTallImage);
-    // 叠放 deck 态：尺寸标注让位「展开 N」按钮（CSS 里 .has-deck .pcard-size 上移）
-    el.classList.toggle('has-deck', !isTextGen && !isTextSplit && !!mainSrc && galleryImages.length > 1);
+    // 叠放/扇形态：尺寸标注让位「展开 N / 收起」按钮（CSS 里 .has-deck .pcard-size 上移）；
+    // .has-fan 抬升卡片层级，扇形排浮于邻近卡片之上
+    const batchUi = !isTextGen && !isTextSplit && !!mainSrc && galleryImages.length > 1;
+    el.classList.toggle('has-deck', batchUi);
+    el.classList.toggle('has-fan', batchUi && this._expandedFans.has(node.id));
 
     const assetAdd = el.querySelector('.pcard-act.asset-add') as HTMLButtonElement | null;
     if (assetAdd) {
@@ -497,6 +534,18 @@ class CardView {
     const l1 = images[(index + 1) % len];
     const l2 = len > 2 ? images[(index + 2) % len] : null;
     return `${l2 ? `<div class="stack-layer s2" style="background-image:url('${escapeUrl(l2.url)}')"></div>` : ''}<div class="stack-layer s1" style="background-image:url('${escapeUrl(l1.url)}')"></div>`;
+  }
+
+  /**
+   * 展开态扇形排列：卡片右侧水平一排全部缩略图（错峰入场动画；当前封面 accent 描边）。
+   * 点缩略图 = 设为封面并收起（事件见 _bindGalleryEvents）。ratio = 卡片宽高比，缩略图保持同比例。
+   */
+  private _fanStripHtml(images: GeneratedImageItem[], activeIndex: number, ratio: number): string {
+    const r = ratio > 0 ? ratio : 4 / 3;
+    const thumbs = images.map((img, i) =>
+      `<div class="fan-thumb${i === activeIndex ? ' active' : ''}" data-index="${i}" title="第 ${i + 1} 张 · 点击设为封面" style="background-image:url('${escapeUrl(img.url)}');aspect-ratio:${r};animation-delay:${i * 45}ms"></div>`
+    ).join('');
+    return `<div class="pcard-fan">${thumbs}</div>`;
   }
 
   /**

@@ -364,11 +364,32 @@ button:focus-visible, input[type="range"]:focus-visible, [tabindex]:focus-visibl
   position:absolute; border-radius: var(--r-lg);
   background-size:cover; background-position:center; background-repeat:no-repeat;
   border:2px solid var(--bg-app); box-shadow: var(--shadow-node);
+  transition: transform .28s ease;
 }
 .pcard-stack .stack-layer.s1 { top:6px; bottom:6px; left:9px; right:-9px; transform: rotate(1.1deg); filter: brightness(.96); }
 .pcard-stack .stack-layer.s2 { top:12px; bottom:12px; left:18px; right:-18px; transform: rotate(2.2deg); filter: brightness(.92); }
+/* hover 微展开：背层外扩 + 转角加大，提示"下面还有图" */
+.pcard:hover .pcard-stack .stack-layer.s1 { transform: rotate(2deg) translate(4px, -2px); }
+.pcard:hover .pcard-stack .stack-layer.s2 { transform: rotate(3.8deg) translate(9px, -4px); }
 
-/* 「展开 N」按钮：批次卡右下角，点击打开结果查看器；风格沿用卡片悬浮 chip（pcard-tag/pcard-act 同款） */
+/* 展开态扇形排列：卡片右侧水平一排缩略图（复用 .pcard-stack 容器，自身恢复交互；卡片抬层级浮于邻近卡片之上） */
+.pcard.has-fan { z-index: 15; }
+.pcard-fan {
+  position:absolute; left:calc(100% + 12px); top:50%; transform:translateY(-50%);
+  display:flex; align-items:center; gap:10px; pointer-events:auto;
+}
+.fan-thumb {
+  width:118px; flex:0 0 auto; border-radius: var(--r-md);
+  background-size:cover; background-position:center; background-repeat:no-repeat;
+  border:2px solid var(--bg-panel); box-shadow: var(--shadow-bar);
+  cursor:pointer; transition: transform .18s ease, box-shadow .18s ease, border-color .18s ease;
+  animation: fanIn .26s cubic-bezier(.2,.9,.3,1.15) backwards;
+}
+.fan-thumb:hover { transform: translateY(-5px) scale(1.045); box-shadow: 0 10px 26px rgba(60,54,46,.2); }
+.fan-thumb.active { border-color: var(--accent); }
+@keyframes fanIn { from { opacity:0; transform: translateX(-16px) scale(.9); } to { opacity:1; transform:none; } }
+
+/* 「展开 N / 收起」按钮：批次卡右下角，点击在卡片右侧就地展开缩略图排列；风格沿用卡片悬浮 chip（pcard-tag/pcard-act 同款） */
 .pcard-expand {
   position:absolute; right:6px; bottom:6px; z-index:5;
   display:inline-flex; align-items:center; gap:4px;
@@ -378,7 +399,7 @@ button:focus-visible, input[type="range"]:focus-visible, [tabindex]:focus-visibl
   box-shadow: 0 1px 4px rgba(60,50,40,.12);
 }
 .pcard-expand:hover { background:#FFFDFA; }
-/* 尺寸标注让位：有「展开 N」按钮时上移到按钮之上 */
+/* 尺寸标注让位：有「展开 N / 收起」按钮时上移到按钮之上 */
 .pcard.has-deck .pcard-size { bottom:30px; }
 /* 失败横幅独占底部时隐藏展开按钮（与缩略行/尺寸标注同口径） */
 .pcard[data-status="fail"] .pcard-expand { display:none; }
