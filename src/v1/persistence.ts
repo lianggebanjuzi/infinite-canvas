@@ -51,11 +51,35 @@ function normalizeImageOrigin(raw: unknown): ImageOrigin | null {
   return { path, url };
 }
 
+/** 批量结果图归一：只保留 url 为字符串的合法条目（此前 migrateNode 未透传，重开项目批量画廊丢失） */
+function normalizeGeneratedImages(raw: unknown): GeneratedImageItem[] {
+  if (!Array.isArray(raw)) return [];
+  const items: GeneratedImageItem[] = [];
+  raw.forEach(g => {
+    if (!g || typeof g !== 'object') return;
+    const item = g as { url?: unknown; prompt?: unknown; origin?: unknown; width?: unknown; height?: unknown };
+    if (typeof item.url !== 'string' || !item.url) return;
+    items.push({
+      url: item.url,
+      prompt: typeof item.prompt === 'string' ? item.prompt : '',
+      origin: normalizeImageOrigin(item.origin),
+      ...(typeof item.width === 'number' && item.width > 0 ? { width: item.width } : {}),
+      ...(typeof item.height === 'number' && item.height > 0 ? { height: item.height } : {}),
+    });
+  });
+  return items;
+}
+
+/** 批量浏览下标归一：非数字/负数 → 0 */
+function normalizeActiveGeneratedIndex(raw: unknown): number {
+  return typeof raw === 'number' && raw >= 0 ? Math.floor(raw) : 0;
+}
+
 function migrateNode(raw: unknown): FlowNode | null {
   if (!raw || typeof raw !== 'object') return null;
   const r = raw as Record<string, unknown>;
   const t = r.type as string;
-  if (t !== 'image-gen' && t !== 'image-result' && t !== 'text-gen') return null;
+  if (t !== 'image-gen' && t !== 'image-result' && t !== 'text-gen' && t !== 'text-split') return null;
   if (typeof r.id !== 'string') return null;
 
   const rawParams = r.params && typeof r.params === 'object'
@@ -78,6 +102,8 @@ function migrateNode(raw: unknown): FlowNode | null {
       imageUrl: typeof r.imageUrl === 'string' ? r.imageUrl : null,
       imageOrigin: normalizeImageOrigin(r.imageOrigin),
       outputText: null,
+      generatedImages: normalizeGeneratedImages(r.generatedImages),
+      activeGeneratedIndex: normalizeActiveGeneratedIndex(r.activeGeneratedIndex),
       textHistory: [],
       refImages: [],
       error: typeof r.error === 'string' ? r.error : null,
@@ -118,6 +144,33 @@ function migrateNode(raw: unknown): FlowNode | null {
     };
   }
 
+  // 文本拆分：此前未收录会被静默丢弃（节点+连线一并消失）；拆分符/槽位随项目保留，卡内画廊字段同 image-gen 透传
+  if (t === 'text-split') {
+    return {
+      id: r.id,
+      type: 'text-split',
+      x: typeof r.x === 'number' ? r.x : 0,
+      y: typeof r.y === 'number' ? r.y : 0,
+      ratio: typeof r.ratio === 'number' && r.ratio > 0 ? r.ratio : 0.72,
+      status: (['idle', 'run', 'done', 'stale', 'fail'] as NodeStatus[]).includes(r.status as NodeStatus) ? r.status as NodeStatus : 'idle',
+      title: typeof r.title === 'string' ? r.title : '文本拆分',
+      params: { delimiter: '########', segments: ['', ''], ...rawParams },
+      imageUrl: null,
+      imageOrigin: null,
+      outputText: null,
+      generatedImages: normalizeGeneratedImages(r.generatedImages),
+      activeGeneratedIndex: normalizeActiveGeneratedIndex(r.activeGeneratedIndex),
+      textHistory: [],
+      refImages: [],
+      error: typeof r.error === 'string' ? r.error : null,
+      lastRunAt: typeof r.lastRunAt === 'number' ? r.lastRunAt : null,
+      parentId: null,
+      trace: null,
+      ...(typeof r.w === 'number' && r.w > 0 ? { w: r.w } : {}),
+      ...(typeof r.h === 'number' && r.h > 0 ? { h: r.h } : {}),
+    };
+  }
+
   const node: FlowNode = {
     id: r.id,
     type: 'image-gen',
@@ -129,7 +182,11 @@ function migrateNode(raw: unknown): FlowNode | null {
     params: { prompt: '', model: '', aspectRatio: '3:4', resolution: '2k', count: 1, ...rawParams },
     imageUrl: typeof r.imageUrl === 'string' ? r.imageUrl : null,
     imageOrigin: normalizeImageOrigin(r.imageOrigin),
+    ...(typeof r.imageWidth === 'number' && r.imageWidth > 0 ? { imageWidth: r.imageWidth } : {}), // 真实像素透传（尺寸标注不回退 params）
+    ...(typeof r.imageHeight === 'number' && r.imageHeight > 0 ? { imageHeight: r.imageHeight } : {}),
     outputText: null,
+    generatedImages: normalizeGeneratedImages(r.generatedImages),
+    activeGeneratedIndex: normalizeActiveGeneratedIndex(r.activeGeneratedIndex),
     textHistory: [],
     refImages: [],
     error: typeof r.error === 'string' ? r.error : null,
