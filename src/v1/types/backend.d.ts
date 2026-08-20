@@ -8,6 +8,14 @@ interface BackendProviderKey {
   api_key: string;
   enabled: boolean;
   models: BackendModel[];
+  /** 旧版按能力连接配置，仅用于迁移兼容。 */
+  channels?: Partial<Record<'chat' | 'drawing' | 'video', BackendProviderChannel>>;
+}
+
+interface BackendProviderChannel {
+  enabled: boolean;
+  api_url: string;
+  api_key: string;
 }
 
 /** 供应商配置（对应 provider_api.load_providers 返回项） */
@@ -19,6 +27,8 @@ interface BackendProvider {
   enabled: boolean;
   api_url?: string;
   text_api_url?: string;  // 可选：文本对话 URL（留空则与 api_url 共用；对话/拉模型/测连接优先走此 URL）
+  /** 图像 / 文本 / 视频三类模型的默认 API Key。 */
+  global_keys?: Partial<Record<'chat' | 'drawing' | 'video', string>>;
   use_proxy?: boolean;
   keys?: BackendProviderKey[];   // 新结构（load_providers 归一化后必有）
   api_key?: string;              // legacy：读兼容，新代码不写
@@ -31,6 +41,8 @@ interface BackendModel {
   name: string;
   type?: string;
   enabled?: boolean;
+  /** 可选：该模型专用 API Key，优先级高于同类全局 Key。 */
+  api_key?: string;
 }
 
 /** 供应商列表响应 */

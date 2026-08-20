@@ -15,6 +15,7 @@ __pycache__/
 /providers_data.json
 /settings.json
 /prompts_library.json
+/assets.json
 *.icproj
 
 # Editor and assistant state

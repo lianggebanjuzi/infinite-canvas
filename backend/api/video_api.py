@@ -131,11 +131,12 @@ class VideoAPI:
         if not provider:
             raise AppError(503, "没有可用的视频模型，请先在设置中配置")
 
-        if not (provider.get('api_url') or '').strip() or not (key.get('api_key') or '').strip():
-            raise AppError(503, f"供应商「{provider.get('name', '')}」尚未填写 API 地址或密钥，请到设置中补充后再生成")
+        connection = self.unified._get_connection(provider, key, model_entry.type, model_entry.id)
+        if not connection:
+            raise AppError(503, f"供应商「{provider.get('name', '')}」的视频生成未启用或尚未填写 URL / API Key，请到设置中补充后再生成")
 
-        api_url   = provider['api_url'].rstrip('/')
-        api_key   = key['api_key']
+        api_url   = connection['api_url'].rstrip('/')
+        api_key   = connection['api_key']
         use_proxy = provider.get('use_proxy', False)
         proxies   = None if use_proxy else {"http": None, "https": None, "all": None}
 

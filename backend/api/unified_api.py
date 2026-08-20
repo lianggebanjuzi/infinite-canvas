@@ -220,13 +220,12 @@ class UnifiedAPIRouter:
         if not provider:
             raise AppError(503, "没有可用的对话模型，请先在设置中配置")
 
-        # 文本对话 URL（text_api_url）优先，留空则回退共用 api_url（图片/视频 URL）；
-        # 校验按「任一 URL 非空」放行：只填 text_api_url 也能对话，图片/视频仍强制走 api_url。
-        if not ((provider.get('text_api_url') or '').strip() or (provider.get('api_url') or '').strip()) or not (key.get('api_key') or '').strip():
-            raise AppError(503, f"供应商「{provider.get('name', '')}」尚未填写 API 地址或密钥，请到设置中补充")
+        connection = self._get_connection(provider, key, ModelType.CHAT, model_entry.id)
+        if not connection:
+            raise AppError(503, f"供应商「{provider.get('name', '')}」的文本对话未启用或尚未填写 URL / API Key，请到设置中补充")
 
-        api_url   = ((provider.get('text_api_url') or '').strip() or provider['api_url']).rstrip('/')
-        api_key   = key['api_key']
+        api_url   = connection['api_url'].rstrip('/')
+        api_key   = connection['api_key']
         use_proxy = provider.get('use_proxy', False)
         proxies   = None if use_proxy else {"http": None, "https": None, "all": None}
 
@@ -354,11 +353,12 @@ class UnifiedAPIRouter:
         if not provider:
             raise AppError(503, "没有可用的图片模型，请先在设置中配置")
 
-        if not (provider.get('api_url') or '').strip() or not (key.get('api_key') or '').strip():
-            raise AppError(503, f"供应商「{provider.get('name', '')}」尚未填写 API 地址或密钥，请到设置中补充后再生成")
+        connection = self._get_connection(provider, key, ModelType.DRAWING, model_entry.id)
+        if not connection:
+            raise AppError(503, f"供应商「{provider.get('name', '')}」的图像生成未启用或尚未填写 URL / API Key，请到设置中补充后再生成")
 
-        api_url   = provider['api_url'].rstrip('/')
-        api_key   = key['api_key']
+        api_url   = connection['api_url'].rstrip('/')
+        api_key   = connection['api_key']
         use_proxy = provider.get('use_proxy', False)
         proxies   = None if use_proxy else {"http": None, "https": None, "all": None}
 
@@ -718,12 +718,8 @@ class UnifiedAPIRouter:
         for p in providers:
             if not p.get('enabled'):
                 continue
-            if not (p.get('api_url') or '').strip():
-                continue
             for key in p.get('keys') or []:
                 if not key.get('enabled', True):
-                    continue
-                if not (key.get('api_key') or '').strip():
                     continue
                 for m in key.get('models', []):
                     if not m.get('enabled', True):
@@ -747,6 +743,8 @@ class UnifiedAPIRouter:
                         is_match = (m_type == 'drawing' or (not m_type and not self._is_chat_model(m['id'])))
                     if not is_match:
                         continue
+                    if not self._get_connection(p, key, model_type, m['id']):
+                        continue
                     return p, key, ModelEntry(
                         id=m['id'], name=m.get('name', m['id']),
                         type=model_type,
@@ -754,6 +752,21 @@ class UnifiedAPIRouter:
                         enabled=m.get('enabled', True)
                     )
         return None, None, None
+
+    def _get_connection(self, provider, key, model_type, model_id=''):
+        """返回原 URL 及模型专用 Key（优先）或同类型全局 Key。"""
+        kind = model_type.value
+        # URL 保持原设置：文本优先 text_api_url，图像/视频走 api_url。
+        api_url = (
+            provider.get('text_api_url') or provider.get('api_url') or ''
+            if model_type == ModelType.CHAT else provider.get('api_url') or ''
+        ).strip()
+        model = next((m for m in key.get('models', []) if m.get('id') == model_id), {})
+        global_keys = provider.get('global_keys') or {}
+        api_key = str(
+            model.get('api_key') or global_keys.get(kind) or key.get('api_key') or ''
+        ).strip()
+        return {'api_url': api_url, 'api_key': api_key} if api_url and api_key else None
 
     def _is_chat_model(self, model_id):
         m_type, _ = self._detect_model_type(model_id)

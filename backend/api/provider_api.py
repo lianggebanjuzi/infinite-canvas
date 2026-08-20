@@ -50,6 +50,11 @@ class ProviderAPI:
                 'api_key': '',
                 'enabled': True,
                 'models':  [],
+                'channels': {
+                    'chat': {'enabled': False, 'api_url': '', 'api_key': ''},
+                    'drawing': {'enabled': False, 'api_url': '', 'api_key': ''},
+                    'video': {'enabled': False, 'api_url': '', 'api_key': ''},
+                },
             }]
 
     def _next_key_name(self, provider, used_names=None):
@@ -64,7 +69,7 @@ class ProviderAPI:
         return f"key{n}"
 
     def _normalize_keys(self, provider):
-        """补全 provider 内 keys 数组的字段（id/name/api_key/enabled/models）"""
+        """补全 provider 内 keys 数组的字段，并把旧共享连接迁移为按能力连接。"""
         keys = provider.get('keys')
         if not isinstance(keys, list):
             keys = []
@@ -84,6 +89,28 @@ class ProviderAPI:
                 k['enabled'] = True
             if 'models' not in k or not isinstance(k.get('models'), list):
                 k['models'] = []
+            # 旧配置的 URL 在 provider、Key 在 key 上。读到旧数据时把它们复制到
+            # 三种能力中，保证升级后不需要用户重新填写，也不改变原有请求路由。
+            channels = k.get('channels')
+            if not isinstance(channels, dict):
+                channels = {}
+                k['channels'] = channels
+            legacy_urls = {
+                'chat': (provider.get('text_api_url') or provider.get('api_url') or '').strip(),
+                'drawing': (provider.get('api_url') or '').strip(),
+                'video': (provider.get('api_url') or '').strip(),
+            }
+            for kind, legacy_url in legacy_urls.items():
+                value = channels.get(kind)
+                if not isinstance(value, dict):
+                    value = {}
+                    channels[kind] = value
+                if 'enabled' not in value:
+                    value['enabled'] = True
+                if 'api_url' not in value:
+                    value['api_url'] = legacy_url
+                if 'api_key' not in value:
+                    value['api_key'] = k.get('api_key') or ''
 
     def _normalize_provider(self, provider):
         """把单个 provider 归一化为 keys 结构（读时迁移，内存始终新结构）"""
@@ -99,6 +126,25 @@ class ProviderAPI:
                 'models':  provider.get('models') or [],
             }]
         self._normalize_keys(provider)
+        # 新结构：三类模型各有一个全局 Key。此前版本的 channels 只用于把
+        # 已填的 Key 无感带到对应全局项，URL 继续沿用 provider 原字段。
+        global_keys = provider.get('global_keys')
+        if not isinstance(global_keys, dict):
+            global_keys = {}
+            provider['global_keys'] = global_keys
+        for kind in ('chat', 'drawing', 'video'):
+            if kind in global_keys:
+                continue
+            migrated = ''
+            for key in provider.get('keys') or []:
+                channel = (key.get('channels') or {}).get(kind)
+                if isinstance(channel, dict) and channel.get('api_key'):
+                    migrated = channel['api_key']
+                    break
+                if key.get('api_key'):
+                    migrated = key['api_key']
+                    break
+            global_keys[kind] = migrated
 
     def _apply_provider_updates(self, provider, updates):
         """合并 updates 到 provider；顶层 api_key/models 兼容落到 keys[0]（不产生顶层冗余）"""
@@ -169,14 +215,20 @@ class ProviderAPI:
                 'type':       provider_type,
                 'enabled':    True,
                 'api_url':    '',
+                'global_keys': {'chat': '', 'drawing': '', 'video': ''},
                 'use_proxy':  False,
                 'keys':       [{
                     'id':      f"key_{uuid.uuid4().hex[:8]}",
                     'name':    'key1',
                     'api_key': '',
                     'enabled': True,
-                    'models':  [],
-                }],
+                'models':  [],
+                'channels': {
+                    'chat': {'enabled': False, 'api_url': '', 'api_key': ''},
+                    'drawing': {'enabled': False, 'api_url': '', 'api_key': ''},
+                    'video': {'enabled': False, 'api_url': '', 'api_key': ''},
+                },
+            }],
             }
 
             providers.append(new_provider)
@@ -249,6 +301,11 @@ class ProviderAPI:
                 'api_key': '',
                 'enabled': True,
                 'models':  [],
+                'channels': {
+                    'chat': {'enabled': False, 'api_url': '', 'api_key': ''},
+                    'drawing': {'enabled': False, 'api_url': '', 'api_key': ''},
+                    'video': {'enabled': False, 'api_url': '', 'api_key': ''},
+                },
             }
             target['keys'].append(new_key)
 

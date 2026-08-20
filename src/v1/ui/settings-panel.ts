@@ -2,7 +2,7 @@
 // 设置/供应商面板（温馨园艺风，A7）
 // 完整供应商管理：列表 / 添加 / 编辑（url·provider 字段 + Key 级模型组 + Key 列表）/ 默认绘图模型 / 自定义下拉与确认弹窗
 // 模型可用性属于 Key。页面可以汇总展示，但绝不能把一把 Key 的模型复制给另一把 Key。
-// Key 卡片仅凭据（名称/api_key/启停/删除/测试连接），Key 级改动即时持久化；「保存」按钮只管 provider 级字段
+// URL 保持供应商级配置；图像/文本/视频可配置全局 Key，模型也可单独覆盖 Key。
 
 import { Backend } from '../api';
 import { showToast } from './toast';
@@ -24,25 +24,6 @@ const MODEL_TYPE_OPTIONS: SelectOption[] = [
   { value: 'video', label: '视频' },
 ];
 
-/** FluxPort 的本地白名单：只允许用户明确分配常用模型，不再用 /models 覆盖分组。 */
-const COMMON_FLUX_MODELS: Array<SelectOption & { type: 'chat' | 'drawing' }> = [
-  { value: 'gpt-5.2', label: 'GPT-5.2（对话）', type: 'chat' },
-  { value: 'gpt-5.3-codex-spark', label: 'GPT-5.3 Codex Spark（对话）', type: 'chat' },
-  { value: 'gpt-5.4', label: 'GPT-5.4（对话）', type: 'chat' },
-  { value: 'gpt-5.4-2026-03-05', label: 'GPT-5.4 2026-03-05（对话）', type: 'chat' },
-  { value: 'gpt-5.4-mini', label: 'GPT-5.4 Mini（对话）', type: 'chat' },
-  { value: 'gpt-5.5', label: 'GPT-5.5（对话）', type: 'chat' },
-  { value: 'gpt-5.6', label: 'GPT-5.6（对话）', type: 'chat' },
-  { value: 'gpt-5.6-luna', label: 'GPT-5.6 Luna（对话）', type: 'chat' },
-  { value: 'gpt-5.6-sol', label: 'GPT-5.6 Sol（对话）', type: 'chat' },
-  { value: 'gpt-5.6-terra', label: 'GPT-5.6 Terra（对话）', type: 'chat' },
-  { value: 'gpt-image-2', label: 'GPT Image 2（图像）', type: 'drawing' },
-  { value: 'gemini-3-pro-image-preview', label: 'Nano Banana Pro（图像）', type: 'drawing' },
-  { value: 'gemini-3.1-flash-image-preview', label: 'Nano Banana 2（图像）', type: 'drawing' },
-];
-
-const COMMON_FLUX_MODEL_IDS = new Set(COMMON_FLUX_MODELS.map(model => model.value));
-
 /** 仅 FluxPort 的 Key 对应不同账号组；其它供应商保持共享模型组的简洁配置。 */
 function isFluxPortProvider(provider: BackendProvider): boolean {
   const urls = [provider.api_url, provider.text_api_url]
@@ -50,20 +31,6 @@ function isFluxPortProvider(provider: BackendProvider): boolean {
     .join(' ')
     .toLowerCase();
   return urls.includes('api.uselg.top') || urls.includes('api.ai-media.vip');
-}
-
-/** key 卡片回调上下文（由 _renderEditor 注入；key 卡片仅凭据：名称/api_key/启停/删除/测试连接） */
-interface KeyCardCtx {
-  /** 当前编辑中的通道 URL（对话 URL 为空时回退图片 URL） */
-  getUrl(kind: 'chat' | 'drawing'): string;
-  /** keys 数组变更回调（更新本地副本 + this.providers + 顶部默认模型下拉） */
-  onKeysChange(next: BackendProviderKey[]): void;
-  /** 重新渲染 key 卡片列表（增删 key 后调用） */
-  onRenderKeys(): void;
-  /** 重新渲染模型列表（Key 级模型变更后调用） */
-  onRenderModels(): void;
-  /** 是否为 FluxPort 供应商（用于判断每个 Key 是否独立拉取模型） */
-  fluxPortMode: boolean;
 }
 
 class SettingsPanel {
@@ -279,7 +246,9 @@ class SettingsPanel {
       (p.keys || []).forEach(k => {
         if (k.enabled === false) return;
         (k.models || []).forEach(m => {
-          if (m.enabled === false || m.type !== 'drawing') return;
+          const apiKey = m.api_key || p.global_keys?.drawing || k.api_key;
+          const ready = Boolean(p.api_url?.trim()) && Boolean(apiKey?.trim());
+          if (!ready || m.enabled === false || m.type !== 'drawing') return;
           const dedupeKey = `${p.id}:${m.id}`;
           if (seen.has(dedupeKey)) return; // 跨 key 重名去重：保留第一个 enabled key 条目
           seen.add(dedupeKey);
@@ -384,7 +353,7 @@ class SettingsPanel {
     return card;
   }
 
-  /** 供应商编辑详情区（provider 级字段 + Key 级模型组 + 凭据列表；key 级改动即时持久化） */
+  /** 供应商编辑详情区（URL、全局 Key 与 Key 级模型组）。 */
   private _renderEditor(p: BackendProvider): HTMLElement {
     const card = document.createElement('div');
     card.className = 'provider-card provider-editor';
@@ -409,6 +378,11 @@ class SettingsPanel {
     const fluxPortMode = isFluxPortProvider(p);
     let proxyOn = p.use_proxy === true;
     const providerId = p.id;
+    const globalKeys: Record<'chat' | 'drawing' | 'video', string> = {
+      chat: p.global_keys?.chat || '',
+      drawing: p.global_keys?.drawing || '',
+      video: p.global_keys?.video || '',
+    };
 
     // ── 头部 ──
     const head = document.createElement('div');
@@ -435,69 +409,59 @@ class SettingsPanel {
     shortField.appendChild(shortInput);
     card.appendChild(shortField);
 
-    // ── 图片模型 URL（provider 级） ──
-    const urlField = document.createElement('div');
-    urlField.className = 'settings-field';
-    urlField.innerHTML = `<span class="settings-label">${fluxPortMode ? '图片模型 URL' : 'API 地址'}</span>`;
-    const urlBody = document.createElement('div');
-    urlBody.className = 'settings-field-body';
-    const urlRow = document.createElement('div');
-    urlRow.className = 'settings-field-row';
-    const urlInput = document.createElement('input');
-    urlInput.className = 'settings-input';
-    urlInput.value = p.api_url || '';
-    urlInput.placeholder = 'https://api.example.com/v1';
-    urlInput.spellcheck = false;
-    const copyBtn = document.createElement('button');
-    copyBtn.className = 'mini-btn';
-    copyBtn.textContent = '复制';
-    copyBtn.title = '复制 API 地址';
-    copyBtn.addEventListener('click', () => {
-      const v = urlInput.value.trim();
-      if (!v) { showToast('暂无内容可复制', false); return; }
-      void copyText(v).then(ok => showToast(ok ? '已复制' : '复制失败', ok));
-    });
-    urlRow.appendChild(urlInput);
-    urlRow.appendChild(copyBtn);
-    const urlHint = document.createElement('div');
-    urlHint.className = 'settings-hint';
-    urlHint.textContent = '以 /v1 结尾会被自动识别，也可省略（如 https://api.bltcy.ai）';
-    urlBody.appendChild(urlRow);
-    urlBody.appendChild(urlHint);
-    urlField.appendChild(urlBody);
-    card.appendChild(urlField);
+    // ── URL（保持原有供应商级配置） ──
+    const makeUrlField = (label: string, value: string, placeholder: string): HTMLInputElement => {
+      const field = document.createElement('div');
+      field.className = 'settings-field';
+      field.innerHTML = `<span class="settings-label">${label}</span>`;
+      const input = document.createElement('input');
+      input.className = 'settings-input';
+      input.value = value;
+      input.placeholder = placeholder;
+      input.spellcheck = false;
+      field.appendChild(input);
+      card.appendChild(field);
+      return input;
+    };
+    const urlInput = makeUrlField('API 地址', p.api_url || '', 'https://api.example.com/v1');
+    const textApiUrlInput = makeUrlField('文本对话 URL', p.text_api_url || '', '留空则与 API 地址共用');
 
-    // ── 文本对话 URL（provider 级，可选：文本模型走此 URL；留空共用上方图片/视频 URL） ──
-    const textUrlField = document.createElement('div');
-    textUrlField.className = 'settings-field';
-    textUrlField.innerHTML = `<span class="settings-label">${fluxPortMode ? '对话模型 URL（可选）' : '文本对话 URL（可选）'}</span>`;
-    const textUrlBody = document.createElement('div');
-    textUrlBody.className = 'settings-field-body';
-    const textUrlRow = document.createElement('div');
-    textUrlRow.className = 'settings-field-row';
-    const textApiUrlInput = document.createElement('input');
-    textApiUrlInput.className = 'settings-input';
-    textApiUrlInput.value = p.text_api_url || '';
-    textApiUrlInput.placeholder = '留空则与图片/视频 URL 共用';
-    textApiUrlInput.spellcheck = false;
-    const textUrlCopyBtn = document.createElement('button');
-    textUrlCopyBtn.className = 'mini-btn';
-    textUrlCopyBtn.textContent = '复制';
-    textUrlCopyBtn.title = '复制文本对话 URL';
-    textUrlCopyBtn.addEventListener('click', () => {
-      const v = textApiUrlInput.value.trim();
-      if (!v) { showToast('暂无内容可复制', false); return; }
-      void copyText(v).then(ok => showToast(ok ? '已复制' : '复制失败', ok));
+    // ── 分类型全局 Key（模型未填写单独 Key 时使用） ──
+    const globalLabels: Array<{ kind: 'chat' | 'drawing' | 'video'; label: string }> = [
+      { kind: 'drawing', label: '图像全局 Key' },
+      { kind: 'chat', label: '对话全局 Key' },
+      { kind: 'video', label: '视频全局 Key' },
+    ];
+    globalLabels.forEach(({ kind, label }) => {
+      const field = document.createElement('div');
+      field.className = 'settings-field';
+      field.innerHTML = `<span class="settings-label">${label}</span>`;
+      const body = document.createElement('div');
+      body.className = 'settings-field-body inline';
+      const input = document.createElement('input');
+      input.className = 'settings-input';
+      input.type = 'password';
+      input.value = globalKeys[kind];
+      input.placeholder = '未填写时使用模型单独 Key 或备用 Key';
+      input.spellcheck = false;
+      input.addEventListener('change', () => {
+        globalKeys[kind] = input.value;
+        void persistGlobalKeys();
+      });
+      let visible = false;
+      const eye = document.createElement('button');
+      eye.className = 'mini-btn';
+      eye.textContent = '显示';
+      eye.addEventListener('click', () => {
+        visible = !visible;
+        input.type = visible ? 'text' : 'password';
+        eye.textContent = visible ? '隐藏' : '显示';
+      });
+      body.appendChild(input);
+      body.appendChild(eye);
+      field.appendChild(body);
+      card.appendChild(field);
     });
-    textUrlRow.appendChild(textApiUrlInput);
-    textUrlRow.appendChild(textUrlCopyBtn);
-    const textUrlHint = document.createElement('div');
-    textUrlHint.className = 'settings-hint';
-    textUrlHint.textContent = '文本模型走此 URL（如 https://api.uselg.top/v1）；留空共用上方图片/视频 URL。';
-    textUrlBody.appendChild(textUrlRow);
-    textUrlBody.appendChild(textUrlHint);
-    textUrlField.appendChild(textUrlBody);
-    card.appendChild(textUrlField);
 
     // ── 使用代理（provider 级） ──
     const proxyField = document.createElement('div');
@@ -541,8 +505,8 @@ class SettingsPanel {
     const modelHint = document.createElement('div');
     modelHint.className = 'settings-hint';
     modelHint.textContent = fluxPortMode
-      ? '对话和图像请使用不同的 Key：对话模型走“文本对话 URL”，图像模型走上方“图片模型 URL”。仅可选择常用模型；不会再用 /models 的全量结果覆盖分组。'
-      : '模型组由供应商共享；可手动维护，或用“拉取模型”更新。文本 URL 留空时自动共用上方 API 地址。';
+      ? 'URL 与全局 Key 在上方统一配置；模型可单独填写覆盖 Key；仅可选择常用模型。'
+      : '模型可手动添加。未填写模型单独 Key 时，按图像、对话、视频使用上方对应全局 Key。';
     modelSection.appendChild(modelHint);
 
     const modelList = document.createElement('div');
@@ -566,71 +530,18 @@ class SettingsPanel {
       placeholder: '类型',
     });
     modelTypeSelect.element.style.flex = '0 0 88px';
-    const commonModelSelect = createSelect({
-      options: COMMON_FLUX_MODELS,
-      value: COMMON_FLUX_MODELS[0].value,
-      placeholder: '选择常用模型',
-    });
-    commonModelSelect.element.style.flex = '1 1 220px';
-    const modelKeySelect = createSelect({
-      options: [],
-      placeholder: '所属密钥',
-    });
-    modelKeySelect.element.style.flex = '0 0 126px';
-    modelKeySelect.element.title = '选择要添加模型的密钥组';
     const maddBtn = document.createElement('button');
     maddBtn.className = 'mini-btn';
     maddBtn.textContent = '手动添加';
     maddBtn.addEventListener('click', () => void addModel());
-    if (fluxPortMode) {
-      addRow.appendChild(commonModelSelect.element);
-    } else {
-      addRow.appendChild(midInput);
-      addRow.appendChild(mnameInput);
-      addRow.appendChild(modelTypeSelect.element);
-    }
-    if (fluxPortMode) addRow.appendChild(modelKeySelect.element);
+    addRow.appendChild(midInput);
+    addRow.appendChild(mnameInput);
+    addRow.appendChild(modelTypeSelect.element);
     addRow.appendChild(maddBtn);
     modelSection.appendChild(addRow);
     card.appendChild(modelSection);
 
-    const refreshModelKeyOptions = (): void => {
-      const selected = modelKeySelect.getValue();
-      const enabledKeys = keys.filter(k => k.enabled !== false);
-      if (enabledKeys.length === 0) {
-        modelKeySelect.setOptions([]);
-        modelKeySelect.setValue('');
-        return;
-      }
-      modelKeySelect.setOptions(enabledKeys.map(k => ({
-        value: k.id,
-        label: k.name || 'key',
-      })));
-      modelKeySelect.setValue(enabledKeys.some(k => k.id === selected) ? selected : enabledKeys[0].id);
-    };
-
-    // ── Key 管理区（凭据-only：名称/密钥/启停/删除/测试连接） ──
-    const keysSection = document.createElement('div');
-    keysSection.className = 'keys-section';
-    const keysHead = document.createElement('div');
-    keysHead.className = 'keys-section-head';
-    const keysLabel = document.createElement('span');
-    keysLabel.className = 'settings-label';
-    keysLabel.textContent = fluxPortMode ? '密钥管理（对话 Key 与图像 Key 分开填写）' : '密钥管理（共用模型组）';
-    const addKeyBtn = document.createElement('button');
-    addKeyBtn.className = 'mini-btn';
-    addKeyBtn.textContent = '添加密钥';
-    addKeyBtn.addEventListener('click', () => void this._addKey(providerId, syncKeys, renderKeys));
-    keysHead.appendChild(keysLabel);
-    keysHead.appendChild(addKeyBtn);
-    keysSection.appendChild(keysHead);
-
-    const keysWrap = document.createElement('div');
-    keysWrap.className = 'keys-list';
-    keysSection.appendChild(keysWrap);
-    card.appendChild(keysSection);
-
-    // ── 底部操作（保存 = provider 级字段：简称/URL/文本对话 URL/代理） ──
+    // ── 底部操作（保存 = provider 级字段：简称/URL/代理） ──
     const actions = document.createElement('div');
     actions.className = 'provider-editor-actions';
     const saveBtn = document.createElement('button');
@@ -653,47 +564,6 @@ class SettingsPanel {
       const provider = this.providers.find(x => x.id === providerId);
       if (provider) provider.keys = next;
       this._refreshDefaultModelSelect();
-      refreshModelKeyOptions();
-    };
-
-    /** 重渲染 key 卡片列表（增删 key 后调用，保留 provider 级字段输入） */
-    const renderKeys = (): void => {
-      keysWrap.innerHTML = '';
-      if (keys.length === 0) {
-        const empty = document.createElement('div');
-        empty.className = 'key-empty';
-        empty.textContent = '暂无密钥，点击「添加密钥」创建';
-        keysWrap.appendChild(empty);
-        return;
-      }
-      const appendKeys = (title: string, group: BackendProviderKey[]): void => {
-        if (group.length === 0) return;
-        if (fluxPortMode) {
-          const heading = document.createElement('div');
-          heading.className = 'key-group-heading';
-          heading.textContent = title;
-          keysWrap.appendChild(heading);
-        }
-        group.forEach(k => keysWrap.appendChild(this._renderKeyCard(p, k, {
-          getUrl: kind => kind === 'chat'
-            ? (textApiUrlInput.value.trim() || urlInput.value.trim())
-            : urlInput.value.trim(),
-          onKeysChange: syncKeys,
-          onRenderKeys: renderKeys,
-          onRenderModels: renderModelRows,
-          fluxPortMode: fluxPortMode,
-        })));
-      };
-      if (fluxPortMode) {
-        const imageKeys = keys.filter(k => (k.models || []).some(model => model.type === 'drawing'));
-        const chatKeys = keys.filter(k => (k.models || []).some(model => model.type === 'chat') && !imageKeys.includes(k));
-        const unassigned = keys.filter(k => !imageKeys.includes(k) && !chatKeys.includes(k));
-        appendKeys('图像 Key', imageKeys);
-        appendKeys('对话 Key', chatKeys);
-        appendKeys('未分配 Key', unassigned);
-        return;
-      }
-      appendKeys('密钥', keys);
     };
 
     const saveFields = async (): Promise<void> => {
@@ -711,6 +581,15 @@ class SettingsPanel {
       }
     };
 
+    const persistGlobalKeys = async (): Promise<void> => {
+      try {
+        const res = await Backend.updateProvider(providerId, { global_keys: globalKeys });
+        showToast(res.status === 'success' ? '已保存' : (res.message || '保存失败'), res.status === 'success');
+      } catch (e) {
+        showToast('保存失败：' + (e as Error).message, false);
+      }
+    };
+
     // ── Key 级模型组函数（页面只做汇总展示） ──
 
     const renderModelRows = (): void => {
@@ -719,7 +598,6 @@ class SettingsPanel {
         const entries = keys
           .filter(k => k.enabled !== false)
           .flatMap(k => (k.models || [])
-            .filter(model => COMMON_FLUX_MODEL_IDS.has(model.id))
             .map(model => ({ key: k, model })));
         if (entries.length === 0) {
           const empty = document.createElement('div');
@@ -728,7 +606,7 @@ class SettingsPanel {
           modelList.appendChild(empty);
           return;
         }
-        const appendGroup = (title: string, type: 'chat' | 'drawing'): void => {
+        const appendGroup = (title: string, type: 'chat' | 'drawing' | 'video'): void => {
           const group = entries.filter(({ model }) => model.type === type);
           if (group.length === 0) return;
           const heading = document.createElement('div');
@@ -739,6 +617,7 @@ class SettingsPanel {
         };
         appendGroup('对话模型', 'chat');
         appendGroup('图像模型', 'drawing');
+        appendGroup('视频模型', 'video');
         return;
       }
       if (providerModels.length === 0) {
@@ -776,6 +655,23 @@ class SettingsPanel {
         idEl.title = m.id;
       }
 
+      const modelKeyInput = document.createElement('input');
+      modelKeyInput.className = 'settings-input model-key-input';
+      modelKeyInput.type = 'password';
+      modelKeyInput.value = m.api_key || '';
+      modelKeyInput.placeholder = '单独 Key（可选）';
+      modelKeyInput.title = '填写后优先于该类型的全局 Key';
+      modelKeyInput.spellcheck = false;
+      modelKeyInput.addEventListener('change', () => {
+        const update = (models: BackendModel[]) => models.map(item => (
+          item.id === m.id && item.type === m.type ? { ...item, api_key: modelKeyInput.value } : item
+        ));
+        void (async () => {
+          const ok = key ? await updateKeyModels(key.id, update) : await updateProviderModels(update(providerModels));
+          showToast(ok ? '已保存' : '保存失败', ok);
+        })();
+      });
+
       const sw = document.createElement('button');
       sw.className = 'switch ' + (m.enabled !== false ? 'on' : '');
       sw.title = '启用/停用';
@@ -795,6 +691,7 @@ class SettingsPanel {
       row.appendChild(badge);
       row.appendChild(nameEl);
       row.appendChild(idEl);
+      row.appendChild(modelKeyInput);
       row.appendChild(sw);
       row.appendChild(del);
       return row;
@@ -841,12 +738,17 @@ class SettingsPanel {
     };
 
     const fetchModels = async (): Promise<void> => {
-      const url = textApiUrlInput.value.trim() || urlInput.value.trim();
-      const sourceKey = keys.find(k => k.enabled !== false && Boolean(k.api_key));
-      if (!url) { showToast('请先填写 API 地址', false); return; }
-      if (!sourceKey) { showToast('请先启用并填写至少一个 API 密钥', false); return; }
+      const sources = [
+        { url: textApiUrlInput.value.trim() || urlInput.value.trim(), apiKey: globalKeys.chat },
+        { url: urlInput.value.trim(), apiKey: globalKeys.drawing },
+        { url: urlInput.value.trim(), apiKey: globalKeys.video },
+      ];
+      const legacyKey = keys.find(k => k.enabled !== false && Boolean(k.api_key))?.api_key || '';
+      const source = sources.find(item => Boolean(item.url && item.apiKey)) ||
+        (urlInput.value.trim() && legacyKey ? { url: urlInput.value.trim(), apiKey: legacyKey } : undefined);
+      if (!source) { showToast('请先填写 API 地址和任一类型的全局 Key', false); return; }
       try {
-        const res = await Backend.fetchModels(url, sourceKey.api_key);
+        const res = await Backend.fetchModels(source.url, source.apiKey);
         if (res.status !== 'success' || !res.models) {
           showToast(res.message || '拉取模型失败', false);
           return;
@@ -864,15 +766,12 @@ class SettingsPanel {
     };
 
     const addModel = (): void => {
-      const common = fluxPortMode
-        ? COMMON_FLUX_MODELS.find(model => model.value === commonModelSelect.getValue())
-        : undefined;
-      const mid = common?.value || midInput.value.trim();
+      const mid = midInput.value.trim();
       if (!mid) { showToast('请输入模型 ID', false); return; }
-      const mtype = common?.type || modelTypeSelect.getValue() || 'drawing';
+      const mtype = modelTypeSelect.getValue() || 'drawing';
       const newModel: BackendModel = {
         id: mid,
-        name: common?.label.replace(/（.*$/, '') || mnameInput.value.trim() || mid,
+        name: mnameInput.value.trim() || mid,
         type: mtype,
         enabled: true,
       };
@@ -886,8 +785,8 @@ class SettingsPanel {
           showToast(ok ? '已添加' : '模型保存失败', ok);
           return;
         }
-        const target = keys.find(k => k.id === modelKeySelect.getValue() && k.enabled !== false);
-        if (!target) { showToast('请选择一个启用的密钥组', false); return; }
+        const target = keys.find(k => k.enabled !== false);
+        if (!target) { showToast('模型配置不可用，请重新打开设置', false); return; }
         if ((target.models || []).some(m => m.id === mid)) { showToast('该模型已存在于所选密钥组', false); return; }
         try {
           const res = await Backend.updateKey(providerId, target.id, { models: [...(target.models || []), newModel] });
@@ -952,158 +851,8 @@ class SettingsPanel {
       showToast(ok2 ? '已删除' : '删除失败', ok2);
     };
 
-    refreshModelKeyOptions();
-    renderKeys();
     renderModelRows();
     return card;
-  }
-
-  /** 单张 key 卡片（凭据-only：名称/密钥/启停/测试连接/删除；key 级改动即时持久化） */
-  private _renderKeyCard(p: BackendProvider, k: BackendProviderKey, ctx: KeyCardCtx): HTMLElement {
-    const card = document.createElement('div');
-    card.className = 'key-card' + (k.enabled === false ? ' disabled' : '');
-    const providerId = p.id;
-    const keyId = k.id;
-    let keyVisible = false;
-    const { fluxPortMode } = ctx;
-    const isChatOnlyKey = (k.models || []).some(model => model.type === 'chat')
-      && !(k.models || []).some(model => model.type === 'drawing');
-
-    // ── 头部：key 名输入 + 启停 + 删除 ──
-    const head = document.createElement('div');
-    head.className = 'key-card-head';
-    const nameInput = document.createElement('input');
-    nameInput.className = 'key-name-input';
-    nameInput.value = k.name || '';
-    nameInput.placeholder = '密钥名称';
-    nameInput.spellcheck = false;
-    nameInput.addEventListener('change', () => {
-      void persistKey({ name: nameInput.value.trim() || nameInput.value });
-    });
-    const keySwitch = document.createElement('button');
-    keySwitch.className = 'switch' + (k.enabled !== false ? ' on' : '');
-    keySwitch.title = '启用/停用密钥';
-    keySwitch.addEventListener('click', () => {
-      const nextEnabled = k.enabled === false;
-      keySwitch.classList.toggle('on', nextEnabled);
-      card.classList.toggle('disabled', !nextEnabled);
-      void persistKey({ enabled: nextEnabled });
-    });
-    const delBtn = document.createElement('button');
-    delBtn.className = 'mini-btn danger';
-    delBtn.textContent = '删除';
-    delBtn.addEventListener('click', () => void deleteKey());
-    head.appendChild(nameInput);
-    head.appendChild(keySwitch);
-    head.appendChild(delBtn);
-    card.appendChild(head);
-
-    // ── 密钥字段（key 级） ──
-    const keyField = document.createElement('div');
-    keyField.className = 'settings-field';
-    keyField.innerHTML = `<span class="settings-label">${fluxPortMode ? (isChatOnlyKey ? '对话 API 密钥' : '图像 API 密钥') : 'API 密钥'}</span>`;
-    const keyBody = document.createElement('div');
-    keyBody.className = 'settings-field-body inline';
-    const keyInput = document.createElement('input');
-    keyInput.className = 'settings-input';
-    keyInput.type = 'password';
-    keyInput.value = k.api_key || '';
-    keyInput.placeholder = 'sk-...';
-    keyInput.spellcheck = false;
-    keyInput.addEventListener('change', () => {
-      void persistKey({ api_key: keyInput.value });
-    });
-    const eyeBtn = document.createElement('button');
-    eyeBtn.className = 'mini-btn';
-    eyeBtn.textContent = '显示';
-    eyeBtn.title = '显示/隐藏密钥';
-    eyeBtn.addEventListener('click', () => {
-      keyVisible = !keyVisible;
-      keyInput.type = keyVisible ? 'text' : 'password';
-      eyeBtn.textContent = keyVisible ? '隐藏' : '显示';
-    });
-    const testBtn = document.createElement('button');
-    testBtn.className = 'mini-btn';
-    testBtn.textContent = '测试连接';
-    testBtn.addEventListener('click', () => void testConnection());
-
-    keyBody.appendChild(keyInput);
-    keyBody.appendChild(eyeBtn);
-    keyBody.appendChild(testBtn);
-    keyField.appendChild(keyBody);
-    card.appendChild(keyField);
-
-    // ── 内部函数 ──
-
-    /** 即时持久化 key 字段（成功后同步本地/供应商副本 + 顶部默认模型下拉） */
-    const persistKey = async (updates: Record<string, unknown>): Promise<void> => {
-      try {
-        const res = await Backend.updateKey(providerId, keyId, updates);
-        if (res.status === 'success') {
-          if (res.keys) ctx.onKeysChange(res.keys);
-          showToast('已保存');
-        } else {
-          showToast(res.message || '保存失败', false);
-        }
-      } catch (e) {
-        showToast('保存失败：' + (e as Error).message, false);
-      }
-    };
-
-    const testConnection = async (): Promise<void> => {
-      const url = ctx.getUrl(isChatOnlyKey ? 'chat' : 'drawing');
-      const key = keyInput.value;
-      if (!url) { showToast('请先填写 API 地址', false); return; }
-      if (!key) { showToast('请先填写 API 密钥', false); return; }
-      try {
-        const res = await Backend.testConnection(url, key);
-        if (res.success) showToast(res.message || '连接成功');
-        else showToast(res.message || '连接失败', false);
-      } catch (e) {
-        showToast('测试失败：' + (e as Error).message, false);
-      }
-    };
-
-    const deleteKey = async (): Promise<void> => {
-      const ok = await confirmDialog({
-        title: '删除密钥',
-        message: `确定删除密钥「${nameInput.value || keyId}」？删除后其出图/对话将不可用，已引用该密钥模型的节点需重新选择模型。`,
-        confirmText: '删除',
-        cancelText: '取消',
-        danger: true,
-      });
-      if (!ok) return;
-      try {
-        const res = await Backend.deleteKey(providerId, keyId);
-        if (res.status === 'success') {
-          if (res.keys) ctx.onKeysChange(res.keys);
-          ctx.onRenderKeys();
-          showToast('已删除');
-        } else {
-          showToast(res.message || '删除失败', false);
-        }
-      } catch (e) {
-        showToast('删除失败：' + (e as Error).message, false);
-      }
-    };
-
-    return card;
-  }
-
-  /** 添加密钥（后端生成 key_${uuid} + 默认名 keyN）；新 Key 从空模型列表开始，由用户手动配置。 */
-  private async _addKey(providerId: string, onKeysChange: (next: BackendProviderKey[]) => void, onRenderKeys: () => void): Promise<void> {
-    try {
-      const res = await Backend.addKey(providerId);
-      if (res.status === 'success' && res.keys) {
-        onKeysChange(res.keys);
-        onRenderKeys();
-        showToast('已添加密钥');
-      } else {
-        showToast(res.message || '添加失败', false);
-      }
-    } catch (e) {
-      showToast('添加失败：' + (e as Error).message, false);
-    }
   }
 
   private async _toggleProvider(id: string, enabled: boolean): Promise<void> {

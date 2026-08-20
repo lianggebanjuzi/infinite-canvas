@@ -14,14 +14,10 @@ function isFluxPortProvider(provider: BackendProvider): boolean {
   return urls.includes('api.uselg.top') || urls.includes('api.ai-media.vip');
 }
 
-const COMMON_FLUX_IMAGE_MODELS = new Set([
-  'gpt-image-2',
-  'gemini-3-pro-image-preview',
-  'gemini-3.1-flash-image-preview',
-]);
-
-function isCommonFluxChatModel(modelId: string): boolean {
-  return /^gpt-5\./i.test(modelId);
+function isModelReady(provider: BackendProvider, key: BackendProviderKey, model: BackendModel, kind: 'chat' | 'drawing' | 'video'): boolean {
+  const url = kind === 'chat' ? (provider.text_api_url || provider.api_url) : provider.api_url;
+  const apiKey = model.api_key || provider.global_keys?.[kind] || key.api_key;
+  return Boolean(url?.trim()) && Boolean(apiKey?.trim());
 }
 
 /** 拉取可用的绘图模型列表（三层遍历：enabled provider → enabled key → enabled drawing model；三段 id）。
@@ -44,8 +40,7 @@ export async function fetchImageModels(): Promise<Array<{ id: string; name: stri
       if (keyName.includes('text') || keyName.includes('文本') || keyName.includes('chat') || keyName.includes('对话')) return;
         const keyLabel = (k.name || 'key').trim();
         (k.models || [])
-          .filter(m => m.enabled !== false && m.type === 'drawing')
-          .filter(m => !fluxPortMode || COMMON_FLUX_IMAGE_MODELS.has(m.id))
+          .filter(m => m.enabled !== false && m.type === 'drawing' && isModelReady(p, k, m, 'drawing'))
           .forEach(m => {
             const dedupeKey = `${p.id}:${m.id}`;
             if (!fluxPortMode && seen.has(dedupeKey)) return;
@@ -77,8 +72,7 @@ export async function fetchChatModels(): Promise<Array<{ id: string; name: strin
         if (k.enabled === false) return;
         const keyLabel = (k.name || 'key').trim();
         (k.models || [])
-          .filter(m => m.enabled !== false && m.type === 'chat')
-          .filter(m => !fluxPortMode || isCommonFluxChatModel(m.id))
+          .filter(m => m.enabled !== false && m.type === 'chat' && isModelReady(p, k, m, 'chat'))
           .forEach(m => {
             const dedupeKey = `${p.id}:${m.id}`;
             if (!fluxPortMode && seen.has(dedupeKey)) return;
