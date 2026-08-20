@@ -357,6 +357,32 @@ button:focus-visible, input[type="range"]:focus-visible, [tabindex]:focus-visibl
 .image-gallery-nav:hover:not(:disabled) { background:var(--accent-dim); }
 .image-gallery-nav:disabled { opacity:.35; cursor:default; }
 
+/* 多张结果图的叠放 deck：主图右侧露出后续图的层叠边（容器在 .pcard-img 之下，.pcard 无 overflow 裁剪）。
+   背层用画布底色描边模拟卡片间隔，微旋转 + 递减排版出"一叠图"的观感；指针穿透，不抢交互。 */
+.pcard-stack { position:absolute; inset:0; pointer-events:none; }
+.pcard-stack .stack-layer {
+  position:absolute; border-radius: var(--r-lg);
+  background-size:cover; background-position:center; background-repeat:no-repeat;
+  border:2px solid var(--bg-app); box-shadow: var(--shadow-node);
+}
+.pcard-stack .stack-layer.s1 { top:6px; bottom:6px; left:9px; right:-9px; transform: rotate(1.1deg); filter: brightness(.96); }
+.pcard-stack .stack-layer.s2 { top:12px; bottom:12px; left:18px; right:-18px; transform: rotate(2.2deg); filter: brightness(.92); }
+
+/* 「展开 N」按钮：批次卡右下角，点击打开结果查看器；风格沿用卡片悬浮 chip（pcard-tag/pcard-act 同款） */
+.pcard-expand {
+  position:absolute; right:6px; bottom:6px; z-index:5;
+  display:inline-flex; align-items:center; gap:4px;
+  padding:4px 10px; border:none; border-radius:999px;
+  background: rgba(255,253,250,.88); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+  color:#4A443C; font-size:10px; font-weight:600; letter-spacing:.02em; cursor:pointer;
+  box-shadow: 0 1px 4px rgba(60,50,40,.12);
+}
+.pcard-expand:hover { background:#FFFDFA; }
+/* 尺寸标注让位：有「展开 N」按钮时上移到按钮之上 */
+.pcard.has-deck .pcard-size { bottom:30px; }
+/* 失败横幅独占底部时隐藏展开按钮（与缩略行/尺寸标注同口径） */
+.pcard[data-status="fail"] .pcard-expand { display:none; }
+
 /* 端口：视觉小、热区大（::after 扩展到 25px）；支持拖线（手动连线 P0） */
 .port {
   position:absolute; width:11px; height:11px; border-radius:50%;
@@ -959,6 +985,7 @@ button:focus-visible, input[type="range"]:focus-visible, [tabindex]:focus-visibl
 .model-type-badge.chat { background: var(--warm-dim); color: var(--warm); }
 .model-name { flex:1; font-size:12px; color: var(--text-1); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .model-id { flex-shrink:0; font-size:10.5px; color: var(--text-3); max-width:140px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.model-key-input { flex:0 0 148px; min-width:0; padding:5px 8px; font-size:11px; }
 .model-empty { padding:14px 0; text-align:center; color: var(--text-3); font-size:12px; }
 .model-add-row { display:flex; gap:6px; align-items:center; }
 .model-add-row .settings-input { flex:1; min-width:0; }

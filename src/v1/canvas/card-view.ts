@@ -77,6 +77,7 @@ class CardView {
     if (isTextGen) el.classList.add('textgen');
     if (isTextSplit) el.classList.add('textsplit');
     el.innerHTML = `
+      <div class="pcard-stack"></div>
       <div class="pcard-img"></div>
       <div class="pcard-tag"><span class="dot"></span><span class="tag-text"></span><span class="tag-status"></span></div>
       ${isTextGen || isTextSplit ? '' : `<div class="pcard-actions">
@@ -119,6 +120,14 @@ class CardView {
 
   private _bindGalleryEvents(el: HTMLElement, nodeId: string): void {
     el.addEventListener('click', (e: MouseEvent) => {
+      // 「展开 N」：打开结果查看器浏览整批（叠放 deck 的入口，与右上角查看大图同路径）
+      const expandBtn = (e.target as Element).closest('.pcard-expand') as HTMLElement | null;
+      if (expandBtn) {
+        e.preventDefault(); e.stopPropagation();
+        const node = flowState.getNode(nodeId);
+        if (node) resultViewer.open(nodeId, node.activeGeneratedIndex || 0);
+        return;
+      }
       const button = (e.target as Element).closest('.image-gallery-nav') as HTMLElement | null;
       if (!button) return;
       e.preventDefault(); e.stopPropagation();
@@ -283,6 +292,10 @@ class CardView {
         && activeEl.matches('.split-input, .split-delimiter') && el.dataset.splitRebuild !== '1';
       if (img && this._editingNodeId !== node.id && !splitTyping) {
         if (isTextSplit) delete el.dataset.splitRebuild;
+        // 多张结果图的叠放 deck：主图右侧露出后续 1~2 张的层叠边（.pcard 无 overflow 裁剪，层在 .pcard-img 之下）
+        const showDeck = !isTextGen && !isTextSplit && !!mainSrc && galleryImages.length > 1;
+        const stackEl = el.querySelector('.pcard-stack') as HTMLElement | null;
+        if (stackEl) stackEl.innerHTML = showDeck ? this._deckLayersHtml(galleryImages, galleryIndex) : '';
         // 底部叠加参考图缩略行（本节点 refImages ∪ 上游可作参考图的图，动态增删，叠加不改变卡片尺寸）
         // 分辨率/比例标注条（仅图片卡有图且可算文案时显示；指针穿透，不遮挡操作）
         const sizeHtml = !isTextGen && mainSrc && sizeLabel
@@ -300,7 +313,8 @@ class CardView {
           // C-3：批次卡显示「第 x/N 张」+ 批次摘要（成功 x/y，仅部分失败时提示）+ 上下切换
           const gallerySummary = this._gallerySummary(node);
           const imageGallery = galleryImages.length > 1 ? `<div class="image-gallery-controls"><button class="image-gallery-nav" data-dir="-1" ${galleryIndex === 0 ? 'disabled' : ''}>↑</button><span class="image-gallery-count">${galleryIndex + 1} / ${galleryImages.length}${gallerySummary ? `<b class="image-gallery-summary">${gallerySummary}</b>` : ''}</span><button class="image-gallery-nav" data-dir="1" ${galleryIndex >= galleryImages.length - 1 ? 'disabled' : ''}>↓</button></div>` : '';
-          img.innerHTML = `<div class="ph" style="background-image:url('${escapeUrl(mainSrc)}')"></div><div class="scan"></div>${refStrip}${sizeHtml}${imageGallery}`;
+          const expandChip = showDeck ? `<button class="pcard-expand" type="button" title="展开查看全部 ${galleryImages.length} 张">展开 ${galleryImages.length}</button>` : '';
+          img.innerHTML = `<div class="ph" style="background-image:url('${escapeUrl(mainSrc)}')"></div><div class="scan"></div>${refStrip}${sizeHtml}${imageGallery}${expandChip}`;
         } else {
           img.innerHTML = `<div class="ph"><div class="ph-empty">${emptyContent()}</div></div><div class="scan"></div>${refStrip}`;
         }
@@ -331,6 +345,8 @@ class CardView {
     el.classList.toggle('selected', selection.isSelected(node.id));
     el.classList.toggle('pcard-asset', isAsset); // 素材态：细边框视觉（判分支 #9）
     el.classList.toggle('pcard-tall-image', isTallImage);
+    // 叠放 deck 态：尺寸标注让位「展开 N」按钮（CSS 里 .has-deck .pcard-size 上移）
+    el.classList.toggle('has-deck', !isTextGen && !isTextSplit && !!mainSrc && galleryImages.length > 1);
 
     const assetAdd = el.querySelector('.pcard-act.asset-add') as HTMLButtonElement | null;
     if (assetAdd) {
@@ -470,6 +486,17 @@ class CardView {
       .map(u => `<div class="pcard-up-thumb" style="background-image:url('${escapeUrl(u)}')" title="参考图"></div>`)
       .join('');
     return `<div class="pcard-upstreams">${thumbs}</div>`;
+  }
+
+  /**
+   * 叠放 deck 背层：取当前封面之后的 1~2 张作为露边层（循环取模，切换封面时 deck 跟着轮转）。
+   * 层数 = min(2, 总数-1)；2 张图只露 1 层。s2 先渲染（压在 s1 之下）。
+   */
+  private _deckLayersHtml(images: GeneratedImageItem[], index: number): string {
+    const len = images.length;
+    const l1 = images[(index + 1) % len];
+    const l2 = len > 2 ? images[(index + 2) % len] : null;
+    return `${l2 ? `<div class="stack-layer s2" style="background-image:url('${escapeUrl(l2.url)}')"></div>` : ''}<div class="stack-layer s1" style="background-image:url('${escapeUrl(l1.url)}')"></div>`;
   }
 
   /**
