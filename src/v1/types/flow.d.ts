@@ -167,6 +167,8 @@ interface FlowProject {
   version: '3.4';
   projectName: string;
   canvas: FlowCanvasState;
+  /** 项目内最近一次由用户选择的模型；新建同类节点时优先沿用。 */
+  modelDefaults?: Partial<Record<'drawing' | 'chat', string>>;
   nodes: FlowNode[];
   edges: FlowEdge[];
   createdAt: number;
@@ -231,6 +233,7 @@ interface FlowSnapshot {
   nodes: FlowNode[];
   edges: FlowEdge[];
   projectName: string;
+  modelDefaults: Record<'drawing' | 'chat', string>;
   dirty: boolean;
 }
 

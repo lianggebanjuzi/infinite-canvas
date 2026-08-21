@@ -2,7 +2,7 @@
 // 限并发批次调度：同一批次最多 5 个 Job 在途，成功结果逐张回调给画布。
 // 只做纯调度：Job 实际执行（Backend.generateImage + pollTask + 结果写回）由 run-engine 以 RunJobFn 注入，
 // 队列负责状态流转（creating→running→终态）、取消感知、批次完成判定与汇总回调。
-// 批间串行由 run-engine 的 busy 锁保证（本队列允许 submit 多个批次，但 run-engine 一次只提交一个）。
+// 多个节点的批次可同时提交；本队列以全局请求并发上限统一调度，避免压垮后端。
 
 import { batchStore } from '../state/batch-store';
 
@@ -92,7 +92,7 @@ class BatchQueue {
   /** 取消批次：剩余 Job → cancelled；在途 Job 通过 hooks.isCancelled 停止（B-2 取消语义） */
   cancelBatch(batchId: string): void {
     batchStore.cancelBatch(batchId);
-    this.pump(); // 若还有其它批次排队，可继续调度（批间串行由 run-engine busy 锁保证，正常无并发批次）
+    this.pump(); // 释放被取消批次占用的调度机会，让其它节点的队列继续推进
   }
 
   // ───────────────────────── 调度核心 ─────────────────────────

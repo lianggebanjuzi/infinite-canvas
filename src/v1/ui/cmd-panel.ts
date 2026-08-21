@@ -11,7 +11,6 @@ import { cardView } from '../canvas/card-view';
 import { interactions } from '../canvas/interactions';
 import { runEngine } from '../engine/run-engine';
 import { Backend, fetchImageModels, fetchChatModels } from '../api';
-import { DEFAULT_CHAT_MODEL_KEY } from '../nodes/text-gen';
 import { showToast } from './toast';
 import { floatingPanels } from './floating-panels';
 import { getSupportedAspectRatios, getModelCapabilities } from '../nodes/model-config';
@@ -68,6 +67,10 @@ class CmdPanel {
   private _multiRefs: HTMLElement[] = [];
   /** 提示词库弹窗 */
   private libPopup: HTMLElement | null = null;
+  /** 后端提示词库的完整文档：个人收藏写入 favorites，不影响已有分类素材。 */
+  private promptLibraryData: Record<string, unknown> = { common: [], skill: [], draw: [] };
+  private promptLibrary: string[] = [];
+  private promptLibraryReady: Promise<void> = Promise.resolve();
 
   init(): void {
     this.el = document.getElementById('cmd-panel');
@@ -102,6 +105,7 @@ class CmdPanel {
     // 预取模型列表（绘图 + 对话，供 chip 菜单与默认模型回填）
     void fetchImageModels().then(models => { this.modelOptions = models; });
     void fetchChatModels().then(models => { this.chatModelOptions = models; });
+    this.promptLibraryReady = this._loadPromptLibrary();
 
     this._bindEvents();
     flowState.subscribe(() => this.sync());
@@ -115,6 +119,7 @@ class CmdPanel {
 
     // 输入框：改自己 → 更新 params（不标 stale）；发送 → 运行
     this.input.addEventListener('input', () => {
+      this._autoResizeInput();
       const node = selection.single();
       if (!node) return;
       if (node.type === 'text-gen') {
@@ -165,14 +170,23 @@ class CmdPanel {
     // 提示词库按钮
     document.getElementById('cmd-lib-btn')?.addEventListener('click', (e: MouseEvent) => {
       e.stopPropagation();
-      this._toggleLibPopup();
+      void this._toggleLibPopup();
     });
 
     // 保存提示词按钮
     document.getElementById('cmd-lib-save')?.addEventListener('click', (e: MouseEvent) => {
       e.stopPropagation();
-      this._saveCurrentPromptToLibrary();
+      void this._saveCurrentPromptToLibrary();
     });
+  }
+
+  /** 按内容增高而非过早出现内部滚动条；极长文本仍在 240px 后滚动，避免遮住画布。 */
+  private _autoResizeInput(): void {
+    const maxHeight = 240;
+    this.input.style.height = 'auto';
+    const height = Math.max(52, Math.min(this.input.scrollHeight, maxHeight));
+    this.input.style.height = `${height}px`;
+    this.input.style.overflowY = this.input.scrollHeight > maxHeight ? 'auto' : 'hidden';
   }
 
   // ==================== 提示词库 ====================
@@ -180,40 +194,88 @@ class CmdPanel {
   private static readonly LIB_KEY = 'icv_prompt_library';
 
   private _getLibrary(): string[] {
+    return this.promptLibrary;
+  }
+
+  private _readLegacyLibrary(): string[] {
     try {
       const raw = localStorage.getItem(CmdPanel.LIB_KEY);
-      if (raw) return JSON.parse(raw);
+      const parsed: unknown = raw ? JSON.parse(raw) : [];
+      if (Array.isArray(parsed)) return parsed.filter((item): item is string => typeof item === 'string' && Boolean(item.trim()));
     } catch { /* ignore */ }
     return [];
   }
 
-  private _saveCurrentPromptToLibrary(): boolean {
+  private async _loadPromptLibrary(): Promise<void> {
+    const legacy = this._readLegacyLibrary();
+    try {
+      const result = await Backend.loadPromptsLibrary();
+      if (result.status !== 'success' || !result.data || typeof result.data !== 'object' || Array.isArray(result.data)) {
+        throw new Error(result.message || '读取提示词库失败');
+      }
+      this.promptLibraryData = result.data as Record<string, unknown>;
+      const favorites = Array.isArray(this.promptLibraryData.favorites)
+        ? this.promptLibraryData.favorites.filter((item): item is string => typeof item === 'string' && Boolean(item.trim()))
+        : [];
+      this.promptLibrary = [...new Set([...legacy, ...favorites])];
+
+      // 旧版本只存 localStorage；首次升级时迁移一次，之后关闭应用也会保留。
+      if (legacy.some(prompt => !favorites.includes(prompt))) {
+        await this._saveLibrary();
+      }
+    } catch (error) {
+      // 桌面端桥接不可用时仍可在当前会话使用旧数据，保存时会给出明确提示。
+      console.warn('加载持久化提示词库失败:', error);
+      this.promptLibrary = legacy;
+    }
+  }
+
+  private async _saveCurrentPromptToLibrary(): Promise<boolean> {
+    // 避免应用刚启动、后端收藏尚未读回时就覆盖已有收藏。
+    await this.promptLibraryReady;
     const text = this.input.value.trim();
     if (!text) {
       showToast('先输入提示词，再收藏到库中', false);
       return false;
     }
-    const lib = this._getLibrary();
-    if (lib.includes(text)) {
+    if (this.promptLibrary.includes(text)) {
       showToast('这条提示词已在库中', false);
       return false;
     }
-    lib.unshift(text);
-    this._saveLibrary(lib);
+    this.promptLibrary.unshift(text);
+    if (!await this._saveLibrary()) {
+      this.promptLibrary = this.promptLibrary.filter(prompt => prompt !== text);
+      return false;
+    }
     showToast('已收藏到提示词库');
     return true;
   }
 
-  private _saveLibrary(list: string[]): void {
-    localStorage.setItem(CmdPanel.LIB_KEY, JSON.stringify(list));
+  private async _saveLibrary(): Promise<boolean> {
+    // 作为平滑升级和后端异常时的当前会话后备；真正持久化由桌面端完成。
+    localStorage.setItem(CmdPanel.LIB_KEY, JSON.stringify(this.promptLibrary));
+    try {
+      const result = await Backend.savePromptsLibrary({
+        ...this.promptLibraryData,
+        favorites: this.promptLibrary,
+      });
+      if (result.status !== 'success') throw new Error(result.message || '保存提示词库失败');
+      this.promptLibraryData = { ...this.promptLibraryData, favorites: [...this.promptLibrary] };
+      return true;
+    } catch (error) {
+      console.warn('保存持久化提示词库失败:', error);
+      showToast('收藏未保存，请检查桌面端服务后重试', false);
+      return false;
+    }
   }
 
-  private _toggleLibPopup(): void {
+  private async _toggleLibPopup(): Promise<void> {
     if (this.libPopup) {
       this.libPopup.remove();
       this.libPopup = null;
       return;
     }
+    await this.promptLibraryReady;
     this._showLibPopup();
   }
 
@@ -287,10 +349,11 @@ class CmdPanel {
     renderList();
     searchInput.addEventListener('input', () => renderList(searchInput.value));
     saveCurrent.addEventListener('click', () => {
-      if (this._saveCurrentPromptToLibrary()) {
+      void this._saveCurrentPromptToLibrary().then(saved => {
+        if (!saved) return;
         library = this._getLibrary();
         renderList(searchInput.value);
-      }
+      });
     });
     head.querySelector('.prompt-lib-close')?.addEventListener('click', () => {
       popup.remove();
@@ -415,8 +478,8 @@ class CmdPanel {
     if (paramType === 'model') {
       flowState.updateNodeParams(nodeId, { model: value });
       if (value) {
-        // text-gen 记 chat 默认模型（与绘图默认模型互不污染）
-        localStorage.setItem(node.type === 'text-gen' ? DEFAULT_CHAT_MODEL_KEY : 'icv_default_model', value);
+        // 只记在当前项目：后续新建同类节点沿用用户最近选择，而不污染其它项目。
+        flowState.setModelDefault(node.type === 'text-gen' ? 'chat' : 'drawing', value);
       }
     } else if (paramType === 'aspectRatio') {
       flowState.updateNodeParams(nodeId, { aspectRatio: value });
@@ -502,6 +565,7 @@ class CmdPanel {
         this.input.value = p.prompt || '';
       }
     }
+    this._autoResizeInput();
     this.send.disabled = false;
 
     this._renderRefs();
@@ -522,7 +586,7 @@ class CmdPanel {
 
   private _modelFilling = new Set<string>();
 
-  /** 生成节点未配置模型时：自动回填默认模型（localStorage 或第一个可用模型） */
+  /** 生成节点未配置模型时：优先沿用当前项目的最近选择，否则取第一个可用模型。 */
   private _ensureModel(nodeId: string): void {
     if (this._modelFilling.has(nodeId)) return;
     this._modelFilling.add(nodeId);
@@ -532,7 +596,7 @@ class CmdPanel {
       const node = flowState.getNode(nodeId);
       if (!node || (node.params.model as string | undefined)) return;
       const opts = valid();
-      const saved = localStorage.getItem('icv_default_model');
+      const saved = flowState.getModelDefault('drawing');
       const target = saved && opts.some(m => m.id === saved)
         ? saved
         : (opts[0]?.id || '');
@@ -545,7 +609,7 @@ class CmdPanel {
     });
   }
 
-  /** text-gen 未配置模型时：自动回填默认对话模型（localStorage icv_default_chat_model 或第一个可用 chat 模型） */
+  /** text-gen 未配置模型时：优先沿用当前项目的最近选择，否则取第一个可用模型。 */
   private _ensureChatModel(nodeId: string): void {
     if (this._modelFilling.has(nodeId)) return;
     this._modelFilling.add(nodeId);
@@ -554,7 +618,7 @@ class CmdPanel {
       const node = flowState.getNode(nodeId);
       if (!node || (node.params.model as string | undefined)) return;
       const opts = valid();
-      const saved = localStorage.getItem(DEFAULT_CHAT_MODEL_KEY);
+      const saved = flowState.getModelDefault('chat');
       const target = saved && opts.some(m => m.id === saved)
         ? saved
         : (opts[0]?.id || '');

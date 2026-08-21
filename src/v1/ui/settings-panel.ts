@@ -1,6 +1,6 @@
 // src/v1/ui/settings-panel.ts
 // 设置/供应商面板（温馨园艺风，A7）
-// 完整供应商管理：列表 / 添加 / 编辑（url·provider 字段 + Key 级模型组 + Key 列表）/ 默认绘图模型 / 自定义下拉与确认弹窗
+// 完整供应商管理：列表 / 添加 / 编辑（url·provider 字段 + Key 级模型组 + Key 列表）/ 自定义下拉与确认弹窗
 // 模型可用性属于 Key。页面可以汇总展示，但绝不能把一把 Key 的模型复制给另一把 Key。
 // URL 保持供应商级配置；图像/文本/视频可配置全局 Key，模型也可单独覆盖 Key。
 
@@ -8,8 +8,6 @@ import { Backend } from '../api';
 import { showToast } from './toast';
 import { createSelect, type SelectHandle, type SelectOption } from './select';
 import { confirmDialog } from './confirm';
-
-const DEFAULT_MODEL_KEY = 'icv_default_model';
 
 /** 添加供应商时的类型选项 */
 const PROVIDER_TYPE_OPTIONS: SelectOption[] = [
@@ -40,7 +38,6 @@ class SettingsPanel {
   private shortInput: HTMLInputElement | null = null;
   private addBtn: HTMLButtonElement | null = null;
   private typeSelect: SelectHandle | null = null;
-  private defaultSelect: SelectHandle | null = null;
   private providers: BackendProvider[] = [];
   private editingId: string | null = null;
   /** 当前图片保存路径（_refresh 时 loadSettings 回显，P5） */
@@ -128,10 +125,8 @@ class SettingsPanel {
     if (!this.list) return;
 
     this.list.innerHTML = '';
-    // P1：图片保存路径配置区置于供应商列表顶部（默认绘图模型上方）
+    // P1：图片保存路径配置区置于供应商列表顶部。
     this.list.appendChild(this._renderImagePathSection());
-    this.list.appendChild(this._renderDefaultModelSelect());
-
     if (this.providers.length === 0) {
       const empty = document.createElement('div');
       empty.className = 'settings-empty';
@@ -233,80 +228,6 @@ class SettingsPanel {
     }
   }
 
-  /** 顶部「默认绘图模型」自定义下拉：数据源 = 所有 enabled 供应商 × enabled key 的 drawing 模型（三段 id）；
-   *  label 简化为「供应商短名 - 模型名」（去 key 名）+ 跨 key 重名去重（保留第一个 enabled key 条目） */
-  private _renderDefaultModelSelect(): HTMLElement {
-    this.defaultSelect?.destroy();
-
-    const drawing: SelectOption[] = [];
-    const seen = new Set<string>();
-    this.providers.forEach(p => {
-      if (!p.enabled) return;
-      const displayName = p.short_name || p.name;
-      (p.keys || []).forEach(k => {
-        if (k.enabled === false) return;
-        (k.models || []).forEach(m => {
-          const apiKey = m.api_key || p.global_keys?.drawing || k.api_key;
-          const ready = Boolean(p.api_url?.trim()) && Boolean(apiKey?.trim());
-          if (!ready || m.enabled === false || m.type !== 'drawing') return;
-          const dedupeKey = `${p.id}:${m.id}`;
-          if (seen.has(dedupeKey)) return; // 跨 key 重名去重：保留第一个 enabled key 条目
-          seen.add(dedupeKey);
-          // 三段式完整 id + label 去 key 名（前端不暴露 Key 概念）
-          drawing.push({ value: `${p.id}:${k.id}:${m.id}`, label: `${displayName} - ${m.name}` });
-        });
-      });
-    });
-
-    // 宽容回显：旧两段 id（provider:model）也能在当前列表中找到同名模型并回显三段值
-    const current = localStorage.getItem(DEFAULT_MODEL_KEY) || '';
-    const currentValue = this._matchDefaultOption(drawing, current);
-    this.defaultSelect = createSelect({
-      options: drawing,
-      value: currentValue,
-      placeholder: '暂无可用绘图模型',
-      onChange: (v) => {
-        localStorage.setItem(DEFAULT_MODEL_KEY, v);
-        showToast('默认绘图模型已更新');
-      },
-    });
-
-    const wrap = document.createElement('div');
-    wrap.className = 'settings-default-model';
-    const label = document.createElement('span');
-    label.className = 'settings-label';
-    label.textContent = '默认绘图模型';
-    wrap.appendChild(label);
-    this.defaultSelect.element.style.flex = '1';
-    wrap.appendChild(this.defaultSelect.element);
-    return wrap;
-  }
-
-  /** 局部刷新顶部「默认绘图模型」下拉（不重建列表，保持编辑态不被打断） */
-  private _refreshDefaultModelSelect(): void {
-    if (!this.list) return;
-    const newWrap = this._renderDefaultModelSelect();
-    const first = this.list.firstElementChild;
-    if (first && first.classList.contains('settings-default-model')) {
-      this.list.replaceChild(newWrap, first);
-    } else {
-      this.list.insertBefore(newWrap, this.list.firstChild);
-    }
-  }
-
-  /** 默认模型下拉宽容回显：旧两段 id 只在唯一匹配某把 Key 时转换，避免猜错账号组。 */
-  private _matchDefaultOption(options: SelectOption[], saved: string): string {
-    if (!saved) return '';
-    if (options.some(o => o.value === saved)) return saved;
-    const parts = saved.split(':');
-    if (parts.length === 2) {
-      const [pid, mid] = parts;
-      const hits = options.filter(o => o.value.startsWith(`${pid}:`) && o.value.endsWith(`:${mid}`));
-      if (hits.length === 1) return hits[0].value;
-    }
-    return '';
-  }
-
   /** 紧凑卡片视图：名称 / 简称·类型 / 模型数量（跨 key 汇总）/ 启用开关 / 编辑 / 删除 */
   private _renderCard(p: BackendProvider): HTMLElement {
     const card = document.createElement('div');
@@ -398,6 +319,25 @@ class SettingsPanel {
     head.appendChild(backBtn);
     card.appendChild(head);
 
+    // 基础连接在上、模型分栏在下：避免把连通性配置与模型操作拆到左右两侧。
+    const workspace = document.createElement('div');
+    workspace.className = 'provider-editor-workspace';
+    const connectionColumn = document.createElement('section');
+    connectionColumn.className = 'provider-editor-column provider-connection-column';
+    const connectionTitle = document.createElement('div');
+    connectionTitle.className = 'provider-editor-column-title';
+    connectionTitle.textContent = '基础连接';
+    connectionColumn.appendChild(connectionTitle);
+    const modelColumn = document.createElement('section');
+    modelColumn.className = 'provider-editor-column provider-model-column';
+    const modelTitle = document.createElement('div');
+    modelTitle.className = 'provider-editor-column-title';
+    modelTitle.textContent = '模型管理';
+    modelColumn.appendChild(modelTitle);
+    workspace.appendChild(connectionColumn);
+    workspace.appendChild(modelColumn);
+    card.appendChild(workspace);
+
     // ── 简称（provider 级） ──
     const shortField = document.createElement('div');
     shortField.className = 'settings-field';
@@ -407,7 +347,7 @@ class SettingsPanel {
     shortInput.value = p.short_name || '';
     shortInput.spellcheck = false;
     shortField.appendChild(shortInput);
-    card.appendChild(shortField);
+    connectionColumn.appendChild(shortField);
 
     // ── URL（保持原有供应商级配置） ──
     const makeUrlField = (label: string, value: string, placeholder: string): HTMLInputElement => {
@@ -420,7 +360,7 @@ class SettingsPanel {
       input.placeholder = placeholder;
       input.spellcheck = false;
       field.appendChild(input);
-      card.appendChild(field);
+      connectionColumn.appendChild(field);
       return input;
     };
     const urlInput = makeUrlField('API 地址', p.api_url || '', 'https://api.example.com/v1');
@@ -460,7 +400,7 @@ class SettingsPanel {
       body.appendChild(input);
       body.appendChild(eye);
       field.appendChild(body);
-      card.appendChild(field);
+      connectionColumn.appendChild(field);
     });
 
     // ── 使用代理（provider 级） ──
@@ -482,7 +422,7 @@ class SettingsPanel {
     proxyBody.appendChild(proxySwitch);
     proxyBody.appendChild(proxyHint);
     proxyField.appendChild(proxyBody);
-    card.appendChild(proxyField);
+    connectionColumn.appendChild(proxyField);
 
     // ── 模型管理（FluxPort 按 Key 手动配置；其它供应商共享模型组） ──
     const modelSection = document.createElement('div');
@@ -509,9 +449,28 @@ class SettingsPanel {
       : '模型可手动添加。未填写模型单独 Key 时，按图像、对话、视频使用上方对应全局 Key。';
     modelSection.appendChild(modelHint);
 
-    const modelList = document.createElement('div');
-    modelList.className = 'model-list';
-    modelSection.appendChild(modelList);
+    // 图像 / 文本 / 视频模型各自独立成栏，便于快速浏览和管理大量模型。
+    const modelGrid = document.createElement('div');
+    modelGrid.className = 'model-type-grid';
+    const modelLists = new Map<'drawing' | 'chat' | 'video', HTMLElement>();
+    ([
+      { type: 'drawing' as const, label: '图像模型' },
+      { type: 'chat' as const, label: '文本模型' },
+      { type: 'video' as const, label: '视频模型' },
+    ]).forEach(({ type, label }) => {
+      const column = document.createElement('section');
+      column.className = `model-type-column ${type}`;
+      const heading = document.createElement('div');
+      heading.className = 'model-type-column-title';
+      heading.textContent = label;
+      const list = document.createElement('div');
+      list.className = 'model-list';
+      column.appendChild(heading);
+      column.appendChild(list);
+      modelGrid.appendChild(column);
+      modelLists.set(type, list);
+    });
+    modelSection.appendChild(modelGrid);
 
     // 手动添加行
     const addRow = document.createElement('div');
@@ -539,7 +498,7 @@ class SettingsPanel {
     addRow.appendChild(modelTypeSelect.element);
     addRow.appendChild(maddBtn);
     modelSection.appendChild(addRow);
-    card.appendChild(modelSection);
+    modelColumn.appendChild(modelSection);
 
     // ── 底部操作（保存 = provider 级字段：简称/URL/代理） ──
     const actions = document.createElement('div');
@@ -558,12 +517,11 @@ class SettingsPanel {
 
     // ── 内部函数 ──
 
-    /** keys 数组变更：更新本地副本 + this.providers + 顶部默认模型下拉 */
+    /** keys 数组变更：更新本地副本与当前供应商缓存。 */
     const syncKeys = (next: BackendProviderKey[]): void => {
       keys = next;
       const provider = this.providers.find(x => x.id === providerId);
       if (provider) provider.keys = next;
-      this._refreshDefaultModelSelect();
     };
 
     const saveFields = async (): Promise<void> => {
@@ -593,41 +551,43 @@ class SettingsPanel {
     // ── Key 级模型组函数（页面只做汇总展示） ──
 
     const renderModelRows = (): void => {
-      modelList.innerHTML = '';
+      modelLists.forEach(list => { list.innerHTML = ''; });
+      const kindOf = (model: BackendModel): 'drawing' | 'chat' | 'video' => (
+        model.type === 'drawing' || model.type === 'video' ? model.type : 'chat'
+      );
+      const appendEmpty = (kind: 'drawing' | 'chat' | 'video'): void => {
+        const empty = document.createElement('div');
+        empty.className = 'model-empty';
+        empty.textContent = `暂无${kind === 'drawing' ? '图像' : kind === 'video' ? '视频' : '文本'}模型`;
+        modelLists.get(kind)?.appendChild(empty);
+      };
       if (fluxPortMode) {
         const entries = keys
           .filter(k => k.enabled !== false)
           .flatMap(k => (k.models || [])
             .map(model => ({ key: k, model })));
         if (entries.length === 0) {
-          const empty = document.createElement('div');
-          empty.className = 'model-empty';
-          empty.textContent = '暂无常用模型，请选择模型并分配给对应的 Key';
-          modelList.appendChild(empty);
+          appendEmpty('drawing');
+          appendEmpty('chat');
+          appendEmpty('video');
           return;
         }
-        const appendGroup = (title: string, type: 'chat' | 'drawing' | 'video'): void => {
-          const group = entries.filter(({ model }) => model.type === type);
-          if (group.length === 0) return;
-          const heading = document.createElement('div');
-          heading.className = 'model-group-heading';
-          heading.textContent = title;
-          modelList.appendChild(heading);
-          group.forEach(({ key, model }) => modelList.appendChild(buildModelRow(model, key)));
-        };
-        appendGroup('对话模型', 'chat');
-        appendGroup('图像模型', 'drawing');
-        appendGroup('视频模型', 'video');
+        entries.forEach(({ key, model }) => modelLists.get(kindOf(model))?.appendChild(buildModelRow(model, key)));
+        (['drawing', 'chat', 'video'] as const).forEach(kind => {
+          if (!modelLists.get(kind)?.children.length) appendEmpty(kind);
+        });
         return;
       }
       if (providerModels.length === 0) {
-        const empty = document.createElement('div');
-        empty.className = 'model-empty';
-        empty.textContent = '暂无模型，可“拉取模型”或手动添加';
-        modelList.appendChild(empty);
+        appendEmpty('drawing');
+        appendEmpty('chat');
+        appendEmpty('video');
         return;
       }
-      providerModels.forEach(model => modelList.appendChild(buildModelRow(model)));
+      providerModels.forEach(model => modelLists.get(kindOf(model))?.appendChild(buildModelRow(model)));
+      (['drawing', 'chat', 'video'] as const).forEach(kind => {
+        if (!modelLists.get(kind)?.children.length) appendEmpty(kind);
+      });
     };
 
     const buildModelRow = (m: BackendModel, key?: BackendProviderKey): HTMLElement => {
@@ -712,7 +672,6 @@ class SettingsPanel {
         return false;
       }
       providerModels = aggregateModels();
-      this._refreshDefaultModelSelect();
       renderModelRows();
       return true;
     };
@@ -732,7 +691,6 @@ class SettingsPanel {
         }
       }
       providerModels = aggregateModels();
-      this._refreshDefaultModelSelect();
       renderModelRows();
       return allOk;
     };
@@ -793,7 +751,6 @@ class SettingsPanel {
           if (res.status === 'success' && res.keys) {
             syncKeys(res.keys);
             providerModels = aggregateModels();
-            this._refreshDefaultModelSelect();
             renderModelRows();
             showToast('已添加');
           } else {

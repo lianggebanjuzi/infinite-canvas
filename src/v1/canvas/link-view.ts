@@ -10,7 +10,7 @@ import { CARD_W } from './canvas-view';
 import { cardView } from './card-view';
 import { showToast } from '../ui/toast';
 import { applyLinkFlowing } from '../ui/status-visuals';
-import { resolveDefaultModel } from '../api';
+import { fetchImageModels } from '../api';
 import { outputTypesOf, PORT_TYPES } from '../nodes/port-types';
 
 const NS = 'http://www.w3.org/2000/svg';
@@ -213,8 +213,13 @@ class LinkView {
     if (!node) { showToast('插入步骤失败', false); return; }
     dirty.markUpstreamChanged(node.id); // 原下游因上游变化标 stale
     selection.select(node.id);
-    void resolveDefaultModel().then(model => {
-      if (model && !(flowState.getNode(node.id)?.params.model)) {
+    void fetchImageModels().then(models => {
+      if (flowState.getNode(node.id)?.params.model) return;
+      const saved = flowState.getModelDefault('drawing');
+      const model = saved && models.some(item => item.id === saved)
+        ? saved
+        : (models.find(item => item.id)?.id || '');
+      if (model) {
         flowState.updateNodeParams(node.id, { model });
       }
     });

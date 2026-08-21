@@ -5,23 +5,13 @@
 import { API } from '../utils/api';
 import { DEFAULT_CHAT_MODEL_KEY } from './nodes/text-gen';
 
-/** FluxPort 的不同 Key 代表不同账号组，模型选项必须保留 Key。 */
-function isFluxPortProvider(provider: BackendProvider): boolean {
-  const urls = [provider.api_url, provider.text_api_url]
-    .filter((url): url is string => typeof url === 'string')
-    .join(' ')
-    .toLowerCase();
-  return urls.includes('api.uselg.top') || urls.includes('api.ai-media.vip');
-}
-
 function isModelReady(provider: BackendProvider, key: BackendProviderKey, model: BackendModel, kind: 'chat' | 'drawing' | 'video'): boolean {
   const url = kind === 'chat' ? (provider.text_api_url || provider.api_url) : provider.api_url;
   const apiKey = model.api_key || provider.global_keys?.[kind] || key.api_key;
   return Boolean(url?.trim()) && Boolean(apiKey?.trim());
 }
 
-/** 拉取可用的绘图模型列表（三层遍历：enabled provider → enabled key → enabled drawing model；三段 id）。
- * 仅 FluxPort 的同名模型保留每个 Key 的独立选项；普通供应商仍折叠重复项。 */
+/** 拉取可用绘图模型（三段 id 仅供路由；界面只展示模型名）。 */
 export async function fetchImageModels(): Promise<Array<{ id: string; name: string }>> {
   try {
     const result = (await API.loadProviders()) as BackendProviderList;
@@ -30,23 +20,15 @@ export async function fetchImageModels(): Promise<Array<{ id: string; name: stri
     const seen = new Set<string>();
     providers.forEach(p => {
       if (!p.enabled) return;
-      const displayName = p.short_name || p.name.slice(0, 6);
-      const fluxPortMode = isFluxPortProvider(p);
       (p.keys || []).forEach(k => {
         if (k.enabled === false) return;
-      // 对话 Key 不应出现在图片节点模型选择中。旧配置可能仍保留曾被
-      // “拉取模型”写入的绘图条目，因此以 Key 名作为额外隔离保护。
-      const keyName = (k.name || '').toLowerCase();
-      if (keyName.includes('text') || keyName.includes('文本') || keyName.includes('chat') || keyName.includes('对话')) return;
-        const keyLabel = (k.name || 'key').trim();
         (k.models || [])
           .filter(m => m.enabled !== false && m.type === 'drawing' && isModelReady(p, k, m, 'drawing'))
           .forEach(m => {
-            const dedupeKey = `${p.id}:${m.id}`;
-            if (!fluxPortMode && seen.has(dedupeKey)) return;
-            seen.add(dedupeKey);
-            const name = fluxPortMode ? `${displayName} · ${keyLabel} - ${m.name}` : `${displayName} - ${m.name}`;
-            models.push({ id: `${p.id}:${k.id}:${m.id}`, name });
+            // 相同模型只留一个可选项；完整路由 id 保留在 value，供后端优先命中并失败切换。
+            if (seen.has(m.id)) return;
+            seen.add(m.id);
+            models.push({ id: `${p.id}:${k.id}:${m.id}`, name: m.name || m.id });
           });
       });
     });
@@ -57,7 +39,7 @@ export async function fetchImageModels(): Promise<Array<{ id: string; name: stri
   }
 }
 
-/** 拉取可用的对话模型列表（text-gen 专用；仅 FluxPort 保留同名模型的 Key 路由）。 */
+/** 拉取可用对话模型（三段 id 仅供路由；界面只展示模型名）。 */
 export async function fetchChatModels(): Promise<Array<{ id: string; name: string }>> {
   try {
     const result = (await API.loadProviders()) as BackendProviderList;
@@ -66,19 +48,14 @@ export async function fetchChatModels(): Promise<Array<{ id: string; name: strin
     const seen = new Set<string>();
     providers.forEach(p => {
       if (!p.enabled) return;
-      const displayName = p.short_name || p.name.slice(0, 6);
-      const fluxPortMode = isFluxPortProvider(p);
       (p.keys || []).forEach(k => {
         if (k.enabled === false) return;
-        const keyLabel = (k.name || 'key').trim();
         (k.models || [])
           .filter(m => m.enabled !== false && m.type === 'chat' && isModelReady(p, k, m, 'chat'))
           .forEach(m => {
-            const dedupeKey = `${p.id}:${m.id}`;
-            if (!fluxPortMode && seen.has(dedupeKey)) return;
-            seen.add(dedupeKey);
-            const name = fluxPortMode ? `${displayName} · ${keyLabel} - ${m.name}` : `${displayName} - ${m.name}`;
-            models.push({ id: `${p.id}:${k.id}:${m.id}`, name });
+            if (seen.has(m.id)) return;
+            seen.add(m.id);
+            models.push({ id: `${p.id}:${k.id}:${m.id}`, name: m.name || m.id });
           });
       });
     });
@@ -177,6 +154,17 @@ export async function resolveDefaultChatModel(): Promise<string> {
 }
 
 export const Backend = {
+  // ── 提示词库 ──
+  /** 读取持久化提示词库（由桌面端写入 prompts_library.json，而非浏览器临时存储）。 */
+  async loadPromptsLibrary(): Promise<{ status?: string; data?: unknown; message?: string }> {
+    return (await API.loadPromptsLibrary()) as { status?: string; data?: unknown; message?: string };
+  },
+
+  /** 保存提示词库。调用方需保留原有分类字段，避免覆盖内置素材。 */
+  async savePromptsLibrary(data: unknown): Promise<{ status?: string; message?: string }> {
+    return (await API.savePromptsLibrary(data)) as { status?: string; message?: string };
+  },
+
   // ── 生成链路 ──
   async generateImage(prompt: string, options: Record<string, unknown>): Promise<BackendTaskCreate> {
     try {
@@ -202,6 +190,13 @@ export const Backend = {
   /** 按本地绝对路径读取原图 → base64 data_url（pywebview 桥接；一次性，用完即弃不常驻） */
   async loadLocalImage(filePath: string): Promise<{ status: string; data_url?: string; message?: string }> {
     return (await API.loadLocalImage(filePath)) as { status: string; data_url?: string; message?: string };
+  },
+
+  /** 手动导入图片：原图落地、前端只保留缩略图；未设置保存目录时使用会话临时目录。 */
+  async prepareImportedImage(imageData: string, filename?: string): Promise<{
+    status: string; path?: string; url?: string; thumbnail_data_url?: string; saved_to_disk?: boolean; message?: string;
+  }> {
+    return await API.prepareImportedImage(imageData, filename);
   },
 
   // ── 对话链路（text-gen 专用：同步阻塞，无 task 轮询） ──

@@ -214,6 +214,7 @@ class Persistence {
       version: '3.4',
       projectName: flowState.projectName,
       canvas: { ...flowState.canvas },
+      modelDefaults: { ...flowState.modelDefaults },
       nodes: flowState.nodes.map(n => ({
         ...n,
         // 共享约定 6：七态持久化归一为五态（queued→idle、partial-failed→done；run/done/stale/fail 原样）
@@ -262,6 +263,10 @@ class Persistence {
         scale: typeof p.canvas?.scale === 'number' ? p.canvas.scale : 1,
         panX: typeof p.canvas?.panX === 'number' ? p.canvas.panX : 60,
         panY: typeof p.canvas?.panY === 'number' ? p.canvas.panY : 40,
+      },
+      modelDefaults: {
+        drawing: typeof p.modelDefaults?.drawing === 'string' ? p.modelDefaults.drawing : '',
+        chat: typeof p.modelDefaults?.chat === 'string' ? p.modelDefaults.chat : '',
       },
       nodes,
       edges,

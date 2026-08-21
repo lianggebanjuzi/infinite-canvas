@@ -31,6 +31,7 @@ const BATCH_STATUS_TEXT: Record<BatchStatus, string> = {
 
 const ICON_RETRY = '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 0 1 15-6.7L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-15 6.7L3 16"/><path d="M3 21v-5h5"/></svg>';
 const ICON_CHEVRON = '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>';
+const ICON_CLOSE = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="m6 6 12 12M18 6 6 18"/></svg>';
 
 class TaskPanel {
   private el: HTMLElement | null = null;
@@ -103,6 +104,9 @@ class TaskPanel {
     const retryAll = s.failed > 0
       ? `<button class="tp-retry-all" data-action="retry-all" data-batch="${escapeAttr(batch.id)}" title="重试全部失败项">重试全部失败 (${s.failed})</button>`
       : '';
+    const remove = batch.status !== 'queued' && batch.status !== 'running'
+      ? `<button class="tp-remove" data-action="remove" data-batch="${escapeAttr(batch.id)}" title="移除这条批次记录（不会删除画布图片）" aria-label="移除批次记录">${ICON_CLOSE}</button>`
+      : '';
     const unknownHint = batch.unknownCount && batch.unknownCount > 0
       ? `<span class="tp-unknown" title="刷新前进行中的任务，状态未知">另有 ${batch.unknownCount} 个任务状态未知</span>`
       : '';
@@ -117,6 +121,7 @@ class TaskPanel {
         <span class="tp-summary">成功 <b>${s.succeeded}</b>/${s.total} · 失败 <b>${s.failed}</b> · 并发上限 ${batch.concurrency}</span>
         ${unknownHint}
         <span class="tp-head-actions">${retryAll}
+          ${remove}
           <button class="tp-toggle" data-action="toggle" data-batch="${escapeAttr(batch.id)}" title="${expanded ? '收起' : '展开'}">${chevron}</button>
         </span>
       </div>
@@ -168,6 +173,12 @@ class TaskPanel {
       const batch = batchStore.getBatch(batchId);
       if (!batch) { showToast('批次信息已失效', false); return; }
       void runEngine.retryFailed(batch.nodeId, batchId);
+      return;
+    }
+    if (action === 'remove') {
+      if (!runEngine.dismissBatch(batchId)) {
+        showToast('运行中的批次不能移除', false);
+      }
       return;
     }
   }

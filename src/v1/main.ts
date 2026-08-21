@@ -41,7 +41,7 @@ import { flowHistory } from './state/history';
 import { runEngine } from './engine/run-engine';
 import { batchStore } from './state/batch-store';
 import { assetStore } from './asset-store';
-import { resolveDefaultModel, resolveDefaultChatModel } from './api';
+import { fetchImageModels, fetchChatModels } from './api';
 
 // ───────────────────────── pywebview 就绪等待 ─────────────────────────
 function waitForPywebview(): Promise<void> {
@@ -144,14 +144,17 @@ function bindKeyboard(): void {
   });
 }
 
-// ───────────────────────── 为生成节点回填默认模型 ─────────────────────────
-// 类型感知：text-gen 回填 chat 默认模型（icv_default_chat_model），其余回填绘图默认模型（icv_default_model）
+// ───────────────────────── 为生成节点回填项目内模型偏好 ─────────────────────────
 async function fillDefaultModels(): Promise<void> {
   const needsChat = flowState.nodes.some(n => n.type === 'text-gen' && !(n.params.model as string | undefined));
   const needsDraw = flowState.nodes.some(n => n.type === 'image-gen' && !(n.params.model as string | undefined));
 
   if (needsChat) {
-    const chatModel = await resolveDefaultChatModel();
+    const chatModels = await fetchChatModels();
+    const saved = flowState.getModelDefault('chat');
+    const chatModel = saved && chatModels.some(item => item.id === saved)
+      ? saved
+      : (chatModels.find(item => item.id)?.id || '');
     if (chatModel) {
       flowState.nodes
         .filter(n => n.type === 'text-gen' && !(n.params.model as string | undefined))
@@ -159,7 +162,11 @@ async function fillDefaultModels(): Promise<void> {
     }
   }
   if (needsDraw) {
-    const drawModel = await resolveDefaultModel();
+    const drawModels = await fetchImageModels();
+    const saved = flowState.getModelDefault('drawing');
+    const drawModel = saved && drawModels.some(item => item.id === saved)
+      ? saved
+      : (drawModels.find(item => item.id)?.id || '');
     if (drawModel) {
       flowState.nodes
         .filter(n => n.type === 'image-gen' && !(n.params.model as string | undefined))

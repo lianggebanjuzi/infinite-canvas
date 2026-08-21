@@ -223,6 +223,18 @@ class BatchStore {
     this.notify();
   }
 
+  /**
+   * 移除已结束批次的会话记录。仅影响底部任务栏与重试状态，画布结果、历史记录均不删除。
+   * 运行中批次不可移除，避免队列失去执行态事实源。
+   */
+  removeFinishedBatch(batchId: string): boolean {
+    const batch = this.batches.get(batchId);
+    if (!batch || batch.status === 'queued' || batch.status === 'running') return false;
+    this.batches.delete(batchId);
+    this.notify();
+    return true;
+  }
+
   // ───────────────────────── 节点七态派生（B-5 唯一出口） ─────────────────────────
 
   /**

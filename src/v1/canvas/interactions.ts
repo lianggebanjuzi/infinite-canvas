@@ -13,7 +13,7 @@ import { linkView, connectionDescription } from './link-view';
 import { runEngine } from '../engine/run-engine';
 import { showToast } from '../ui/toast';
 import { floatingPanels } from '../ui/floating-panels';
-import { resolveDefaultModel, resolveDefaultChatModel } from '../api';
+import { Backend, fetchImageModels, fetchChatModels } from '../api';
 
 const DRAG_THRESHOLD = 3;
 
@@ -500,15 +500,21 @@ class Interactions {
     this._fillDefaultModelFor(node.id);
   }
 
-  /** 新节点默认模型回填（类型感知：text-gen → chat 默认模型，其余 → 绘图默认模型） */
+  /** 新节点优先沿用当前项目最近选择的同类模型；未选择过才取第一个可用模型。 */
   private _fillDefaultModelFor(nodeId: string): void {
     const node = flowState.getNode(nodeId);
     if (!node) return;
     if (node.type === 'text-split') return;
-    const resolver = node.type === 'text-gen' ? resolveDefaultChatModel : resolveDefaultModel;
-    void resolver().then(model => {
+    const kind = node.type === 'text-gen' ? 'chat' : 'drawing';
+    const loader = kind === 'chat' ? fetchChatModels : fetchImageModels;
+    void loader().then(models => {
       const cur = flowState.getNode(nodeId);
-      if (model && cur && !(cur.params.model as string | undefined)) {
+      if (!cur || (cur.params.model as string | undefined)) return;
+      const saved = flowState.getModelDefault(kind);
+      const model = saved && models.some(item => item.id === saved)
+        ? saved
+        : (models.find(item => item.id)?.id || '');
+      if (model) {
         flowState.updateNodeParams(nodeId, { model });
       }
     });
@@ -624,9 +630,10 @@ class Interactions {
   private _dropImage(src: string, world: { x: number; y: number }, screenX: number, screenY: number, _fileName?: string): void {
     const targetNode = this._nodeAt(screenX, screenY);
     const img = new Image();
-    img.onload = () => {
+    img.onload = async () => {
       const ratio = img.naturalWidth / img.naturalHeight;
       const r = ratio > 0 ? ratio : 4 / 3;
+      const imported = _fileName ? await this._prepareImportedImage(src, _fileName) : { displayUrl: src, origin: null };
 
       if (targetNode) {
         // 素材节点不接收上游图
@@ -640,7 +647,10 @@ class Interactions {
           flowHistory.record();
           const assetNode = flowState.addNode('image-gen', pos.x, pos.y, {
             isAsset: true,
-            imageUrl: src,
+            imageUrl: imported.displayUrl,
+            imageOrigin: imported.origin,
+            imageWidth: img.naturalWidth,
+            imageHeight: img.naturalHeight,
             ratio: r,
             status: 'idle',
             title: '素材',
@@ -653,7 +663,7 @@ class Interactions {
         }
         // 自建图片节点：追加参考图（现状保留）
         flowHistory.record();
-        flowState.addRefImage(targetNode.id, src);
+        flowState.addRefImage(targetNode.id, imported.displayUrl);
         dirty.markStale(targetNode.id);
         showToast('已添加参考图');
         return;
@@ -664,7 +674,10 @@ class Interactions {
       flowHistory.record();
       const node = flowState.addNode('image-gen', world.x - CARD_W / 2, world.y - h / 2, {
         isAsset: true,
-        imageUrl: src,
+        imageUrl: imported.displayUrl,
+        imageOrigin: imported.origin,
+        imageWidth: img.naturalWidth,
+        imageHeight: img.naturalHeight,
         ratio: r,
         status: 'idle',
         title: '素材',
@@ -675,6 +688,22 @@ class Interactions {
     };
     img.onerror = () => showToast('图片加载失败', false);
     img.src = src;
+  }
+
+  /** 手动导入图片走与生成结果相同的双轨：卡片展示缩略图，原图只保留本地路径供查看。 */
+  private async _prepareImportedImage(src: string, filename: string): Promise<{ displayUrl: string; origin: ImageOrigin | null }> {
+    try {
+      const saved = await Backend.prepareImportedImage(src, filename);
+      if (saved.status === 'success' && saved.thumbnail_data_url && saved.path) {
+        return {
+          displayUrl: saved.thumbnail_data_url,
+          origin: { path: saved.path, url: saved.url },
+        };
+      }
+    } catch {
+      // 保存/生成缩略图失败时保留原有导入行为，不阻断用户继续放图。
+    }
+    return { displayUrl: src, origin: null };
   }
 
   /** 命中检测：返回 (x,y) 处最上层的节点 */
@@ -705,13 +734,14 @@ class Interactions {
         const src = ev.target?.result as string;
         if (!src) { this.pendingFileNodeId = null; return; }
         const img = new Image();
-        img.onload = () => {
+        img.onload = async () => {
           if (this.pendingFileNodeId) {
             const nodeId = this.pendingFileNodeId;
             const target = flowState.getNode(nodeId);
             if (target) {
               const ratio = img.naturalWidth / img.naturalHeight;
               const r = ratio > 0 ? ratio : 4 / 3;
+              const imported = await this._prepareImportedImage(src, file.name);
               // 素材节点不接收上游图
               if (flowState.isAssetNode(target)) {
                 showToast('素材节点不能添加参考图', false);
@@ -724,7 +754,10 @@ class Interactions {
                 flowHistory.record();
                 const assetNode = flowState.addNode('image-gen', pos.x, pos.y, {
                   isAsset: true,
-                  imageUrl: src,
+                  imageUrl: imported.displayUrl,
+                  imageOrigin: imported.origin,
+                  imageWidth: img.naturalWidth,
+                  imageHeight: img.naturalHeight,
                   ratio: r,
                   status: 'idle',
                   title: '素材',
@@ -738,7 +771,7 @@ class Interactions {
               }
               // 自建图片节点：追加参考图（现状保留）
               flowHistory.record();
-              flowState.addRefImage(nodeId, src);
+              flowState.addRefImage(nodeId, imported.displayUrl);
               dirty.markStale(nodeId);
               showToast('已添加参考图');
             }

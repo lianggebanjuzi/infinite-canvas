@@ -16,19 +16,20 @@ class HistoryStack {
   private redoStack: FlowSnapshot[] = [];
   private assetUndoStack: AssetSnapshot[] = [];
   private assetRedoStack: AssetSnapshot[] = [];
-  private suspended = false;
+  /** 运行可能并行，暂停状态必须可嵌套，不能由先结束的节点提前恢复。 */
+  private suspendDepth = 0;
 
   get canUndo(): boolean {
-    return this.undoStack.length > 0 && !this.suspended;
+    return this.undoStack.length > 0 && this.suspendDepth === 0;
   }
 
   get canRedo(): boolean {
-    return this.redoStack.length > 0 && !this.suspended;
+    return this.redoStack.length > 0 && this.suspendDepth === 0;
   }
 
   /** 在用户手势入口前调用：当前状态入 undo 栈、清空 redo 栈、超限丢最旧（flow + assets 并行） */
   record(): void {
-    if (this.suspended) return;
+    if (this.suspendDepth > 0) return;
     this.undoStack.push(flowState.captureSnapshot());
     this.assetUndoStack.push(assetStore.captureSnapshot());
     if (this.undoStack.length > HISTORY_LIMIT) {
@@ -41,7 +42,7 @@ class HistoryStack {
 
   /** 撤销：弹出最近快照恢复；恢复前把当前状态压入 redo 栈（flow + assets 并行） */
   undo(): void {
-    if (this.suspended) return;
+    if (this.suspendDepth > 0) return;
     const snap = this.undoStack.pop();
     const assetSnap = this.assetUndoStack.pop();
     if (!snap) return;
@@ -53,7 +54,7 @@ class HistoryStack {
 
   /** 重做：对称 */
   redo(): void {
-    if (this.suspended) return;
+    if (this.suspendDepth > 0) return;
     const snap = this.redoStack.pop();
     const assetSnap = this.assetRedoStack.pop();
     if (!snap) return;
@@ -65,11 +66,11 @@ class HistoryStack {
 
   /** 引擎运行期隔离：运行中状态变更不入栈 */
   suspend(): void {
-    this.suspended = true;
+    this.suspendDepth += 1;
   }
 
   resume(): void {
-    this.suspended = false;
+    this.suspendDepth = Math.max(0, this.suspendDepth - 1);
   }
 
   /** 清空两栈（打开/新建项目后调用，避免跨项目撤销；flow + assets 并行） */

@@ -7,6 +7,7 @@ import base64
 import os
 import requests
 from datetime import datetime
+import tempfile
 
 from backend.api.gemini_compat import resolve_image_api_base
 
@@ -63,7 +64,7 @@ class ImageAPI:
     # 保存图片到本地
     # ─────────────────────────────────────────
 
-    def save_image_to_local(self, image_data, filename=None):
+    def save_image_to_local(self, image_data, filename=None, allow_temp=False):
         try:
             from PIL import Image
             import io
@@ -75,8 +76,13 @@ class ImageAPI:
             settings  = self.settings_api.load_settings()
             save_path = settings.get('image_save_path', '')
 
+            saved_to_disk = bool(save_path)
             if not save_path:
-                return {"status": "skipped", "message": "未设置图片保存路径"}
+                if not allow_temp:
+                    return {"status": "skipped", "message": "未设置图片保存路径"}
+                # 手动导入也需要走「原图落地 + 缩略图展示」双轨；未配置目录时放在系统临时目录，
+                # 只保证当前会话可查看大图，避免把 4K 原图常驻在项目 JSON / 画布 DOM 中。
+                save_path = os.path.join(tempfile.gettempdir(), 'infinite_canvas_imports')
 
             if not os.path.exists(save_path):
                 os.makedirs(save_path)
@@ -108,6 +114,7 @@ class ImageAPI:
 
             # 生成缩略图
             thumb_path = self._generate_thumbnail(file_path)
+            thumb_data_url = make_thumbnail_data_url_from_file(file_path)
 
             print(f"图片已保存: {file_path}")
             safe_path = file_path.replace('\\', '/')
@@ -115,9 +122,11 @@ class ImageAPI:
             
             return {
                 "status": "success",
-                "path":   file_path,
+                "path":   safe_path,
                 "url":    f"file:///{safe_path}",
-                "thumbnail": f"file:///{safe_thumb}" if safe_thumb else None
+                "thumbnail": f"file:///{safe_thumb}" if safe_thumb else None,
+                "thumbnail_data_url": thumb_data_url,
+                "saved_to_disk": saved_to_disk,
             }
 
         except Exception as e:

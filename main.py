@@ -407,6 +407,11 @@ class InfiniteCanvasAPI:
     def save_image_to_local(self, img_url):
         return self.image.save_image_to_local(img_url)
 
+    def prepare_imported_image(self, image_data, filename=None):
+        """手动导入：保存原图并返回轻量缩略图；未配置保存目录时使用会话临时目录。"""
+        # 不沿用用户原始文件名，避免重复导入同名文件时覆盖已保存的原图。
+        return self.image.save_image_to_local(image_data, allow_temp=True)
+
     def save_image_as(self, image_data, filename=None):
         return self.image.save_image_as(image_data, filename)
 

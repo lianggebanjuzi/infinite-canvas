@@ -13,13 +13,13 @@
 //   - 重跑先 removeChildren 清掉旧的「纯引擎产出」子节点（安全策略见 flow-state；手动改造的保留并标 stale；
 //     用户拍板：历史子节点按现有安全策略处理，不额外删除）
 //   - 批次汇总：全成功 done / 有成功有失败 partial-failed / 全失败 fail / 取消 idle（旧图保留）
-//   - busy 锁粒度=整个批次（批次内并发、批次间串行）
+//   - 运行保护粒度=单个节点；不同节点可并行，单个批次内部仍由队列限流
 //
 // 文本走线 / 反推归位（增量）：
 //   - prompt 合成唯一入口 composeImagePrompt：上游文本（getUpstreamTextPrompts 连线序拼接）+ 自身 params.prompt（非空追加在后）
 //   - 文本变化三处联动（运行成功/就地编辑/历史回填）统一 = 写 outputText + dirty.markUpstreamChanged；旁路覆盖下游 prompt 的旧函数已删除
 //   - 文本节点 runTextGen 接入上游图（data:image 过滤 + 前置校验「图片格式不支持反推」），反推归位到文本节点自身
-//   - 素材节点（isAsset）不可运行：run() 静默跳过（不 toast、不设 busy），canRun 亦拒绝
+//   - 素材节点（isAsset）不可运行：run() 静默跳过（不 toast、不设运行态），canRun 亦拒绝
 
 import { flowState } from '../state/flow-state';
 import { dirty } from '../state/dirty';
@@ -119,23 +119,25 @@ function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
 }
 
 class RunEngine {
-  /** 全局串行：同一时间只跑一个任务（避免 pywebview 轮询互相干扰；批次内并发、批次间串行） */
-  private busy = false;
-  private activeRun: ActiveRun | null = null;
+  /** 按节点维护活动任务：不同节点可并行，同一节点仍由 status='run' 防重复启动。 */
+  private activeRuns = new Map<string, ActiveRun>();
 
   /** 执行中批次处理器注册表（batchId → runJob/onComplete；供逐条/全部重试复用，新批次开始时清理同节点旧条目） */
   private _batchRunners = new Map<string, BatchRunner>();
-  /** 本批次新建的产出节点 id 集合（供 markUpstreamChangedExcept 跳过；runBatch 不再建子卡，仅扩图/历史入口使用） */
-  private _createdCardIds = new Set<string>();
-  /** 本批次是否出现过「生成图未落盘到用户配置目录」（P3：批次结束统一 toast 一次，避免逐张刷屏） */
-  private _sawNotSavedToDisk = false;
-
   /** 读取批次进度（cmd-panel 选中 run 节点时展示「生成中 done/total」）；从 batch-store 派生（共享约定 1，禁止双写） */
   getBatchProgress(nodeId: string): { total: number; done: number; failed: number } | undefined {
     const batch = batchStore.getActiveBatch(nodeId) ?? batchStore.getLatestBatch(nodeId);
     if (!batch) return undefined;
     const s = batchStore.summarize(batch.id);
     return { total: s.total, done: s.succeeded, failed: s.failed };
+  }
+
+  /** 移除已结束批次在底部任务栏中的记录；不影响画布生成结果或历史。 */
+  dismissBatch(batchId: string): boolean {
+    const batch = batchStore.getBatch(batchId);
+    if (!batch || batch.status === 'queued' || batch.status === 'running') return false;
+    this._batchRunners.delete(batchId);
+    return batchStore.removeFinishedBatch(batchId);
   }
 
   /**
@@ -163,19 +165,18 @@ class RunEngine {
     return null;
   }
 
-  /** 是否正在生成（撤销/重做 busy 期间禁用、关闭弹窗 busy 时附加中断警示） */
+  /** 是否存在运行中的节点（撤销/重做与关闭保护仍在运行期禁用）。 */
   isBusy(): boolean {
-    return this.busy;
+    return this.activeRuns.size > 0;
   }
 
   /** Stop owning this local run without waiting for an upstream task that cannot be cancelled. */
   cancel(nodeId: string): boolean {
-    const active = this.activeRun;
-    if (!active || active.nodeId !== nodeId) return false;
+    const active = this.activeRuns.get(nodeId);
+    if (!active) return false;
 
     active.cancelled = true;
-    this.activeRun = null;
-    this.busy = false;
+    this.activeRuns.delete(nodeId);
     // 取消批次：剩余 Job → cancelled；在途 Job 由队列 hooks.isCancelled 停止（B-2 取消语义）
     const batch = batchStore.getActiveBatch(nodeId);
     if (batch) batchQueue.cancelBatch(batch.id);
@@ -191,15 +192,14 @@ class RunEngine {
   }
 
   private _isActive(run: ActiveRun): boolean {
-    return this.activeRun === run && !run.cancelled;
+    return this.activeRuns.get(run.nodeId) === run && !run.cancelled;
   }
 
   async run(nodeId: string): Promise<void> {
     const node = flowState.getNode(nodeId);
     if (!node) return;
     if (node.status === 'run') return;
-    if (this.busy) { showToast('已有任务在运行，请稍候', false); return; }
-    // 素材节点（isAsset）数据层闸门：静默跳过（不 toast、不设 busy；防 run-all 噪音；canRun 亦拒绝）
+    // 素材节点（isAsset）数据层闸门：静默跳过（不 toast；防 run-all 噪音；canRun 亦拒绝）
     if (flowState.isAsset(nodeId)) return;
 
     const def = nodeRegistry.get(node.type);
@@ -207,8 +207,7 @@ class RunEngine {
     if (typeof check === 'string') { showToast(check, false); return; }
 
     const active: ActiveRun = { nodeId, cancelled: false, historySuspended: true };
-    this.busy = true;
-    this.activeRun = active;
+    this.activeRuns.set(nodeId, active);
     flowHistory.suspend(); // 引擎内部状态/产出变更不入撤销栈（R5.5）
     try {
       if (node.type === 'text-gen') {
@@ -222,10 +221,7 @@ class RunEngine {
         flowHistory.resume();
         active.historySuspended = false;
       }
-      if (this.activeRun === active) {
-        this.activeRun = null;
-        this.busy = false;
-      }
+      if (this.activeRuns.get(nodeId) === active) this.activeRuns.delete(nodeId);
     }
   }
 
@@ -236,23 +232,22 @@ class RunEngine {
    * （首版不支持重跑，重跑走普通生成）。
    * 不破坏原图：源节点 imageUrl 不动（区别于 runBatch 图生图分支清空语义）；执行中源节点置 run + 流光，
    * 结束后恢复执行前状态（源节点本身未被改动）。
-   * 复用：全局 busy 锁、Backend.generateImage + pollTask、createResultCard（parentId + suppressStale 连线 + 入历史）、
+   * 复用：节点级运行保护、Backend.generateImage + pollTask、createResultCard（parentId + suppressStale 连线 + 入历史）、
    * dirty.markUpstreamChangedExcept、toast。
    */
   async runOutpaint(nodeId: string, opts: OutpaintOptions): Promise<void> {
     const node = flowState.getNode(nodeId);
     if (!node) return;
     if (node.status === 'run') { showToast('该节点正在生成中', false); return; }
-    if (this.busy) { showToast('已有任务在运行，请稍候', false); return; }
     const refs = opts.referenceImages || [];
     if (refs.length === 0) { showToast('请先合成扩图底图', false); return; }
     if (!opts.model) { showToast('请先在设置中配置 Nano Banana 系列模型', false); return; }
 
     const active: ActiveRun = { nodeId, cancelled: false, historySuspended: true };
-    this.busy = true;
-    this.activeRun = active;
+    this.activeRuns.set(nodeId, active);
     flowHistory.suspend(); // 引擎内部状态/产出节点不入撤销栈
     const prevStatus = node.status;
+    const createdCardIds = new Set<string>();
     try {
       // 执行中：源节点 run + 上游连线流光（结束后恢复原状态）
       flowState.updateNode(nodeId, { status: 'run', error: null });
@@ -313,9 +308,8 @@ class RunEngine {
       if (!this._isActive(active)) return;
 
       // 新产出节点从 stale 传播豁免；源节点旧下游标 stale（与引擎其它成功链路口径一致）
-      this._createdCardIds.clear();
-      this._createdCardIds.add(card.id);
-      dirty.markUpstreamChangedExcept(nodeId, this._createdCardIds);
+      createdCardIds.add(card.id);
+      dirty.markUpstreamChangedExcept(nodeId, createdCardIds);
 
       // 源节点恢复执行前状态（不破坏原图：imageUrl 不动、状态不误标 done）
       flowState.updateNode(nodeId, { status: prevStatus, error: null });
@@ -332,10 +326,7 @@ class RunEngine {
         flowHistory.resume();
         active.historySuspended = false;
       }
-      if (this.activeRun === active) {
-        this.activeRun = null;
-        this.busy = false;
-      }
+      if (this.activeRuns.get(nodeId) === active) this.activeRuns.delete(nodeId);
     }
   }
 
@@ -346,7 +337,7 @@ class RunEngine {
    * 输入：当前 outputText（可能空）+ 命令（instruction）+ 文本模型。
    * 成功分支：写 outputText → pushTextHistory → dirty.markUpstreamChanged（全下游标 stale，旁路已删除：不覆盖下游 prompt）→ toast。
    * 失败/空文本：fail + error，不写历史。
-   * 前置：canRun 已通过；busy 锁已持有。
+   * 前置：canRun 已通过；该节点已注册为运行中。
    */
   private async runTextGen(nodeId: string, active: ActiveRun): Promise<void> {
     const node = flowState.getNode(nodeId);
@@ -423,7 +414,7 @@ class RunEngine {
 
   /**
    * 批次执行（生成节点专用）：经 batch-queue 限流执行（默认并发 2，可配 1~3）。
-   * 前置：canRun 已通过；busy 锁已持有。
+   * 前置：canRun 已通过；当前节点已进入运行态。
    * B 批次改造（T03）：
    *   - 删除 Promise.allSettled 全量并发与瞬时 batchProgress；改为 batchStore.createBatch → batchQueue.submit；
    *   - Batch = 执行态事实源；Job 成功回调（onComplete）单向写回节点结果（imageUrl/generatedImages/trace 带 batchId+jobId）；
@@ -465,8 +456,9 @@ class RunEngine {
     flowState.updateNode(nodeId, { status: 'run', error: null });
     linkView.setNodeFlowing(nodeId, true);
 
-    this._createdCardIds.clear();
-    this._sawNotSavedToDisk = false; // P3：批次级未落盘标记复位
+    // 每个批次独占其产出和落盘状态；节点间并行时不能共用引擎级可变状态。
+    const createdCardIds = new Set<string>();
+    const batchFlags = { sawNotSavedToDisk: false };
     // 新批次开始：同节点旧批次执行器失效（旧批次重试入口不再可用）
     for (const [bid, runner] of this._batchRunners) {
       if (runner.nodeId === nodeId) this._batchRunners.delete(bid);
@@ -485,11 +477,11 @@ class RunEngine {
       prompts,
     });
     const outputType: GenerationTrace['outputType'] = isTxt2Img ? 'txt2img' : 'img2img';
-    const runJob = this._makeRunJob(options);
+    const runJob = this._makeRunJob(options, () => { batchFlags.sawNotSavedToDisk = true; });
     // count=1 单图路径保持「第 1 张写回自身」；count>1 与文本拆分写回 generatedImages；
     // 锁定保护仅对 manual-count 生效（与旧 runOneWorker 一致；text-split 旧 _applyTextSplitResults 本就不查锁）
     const isSingleImage = !usesTextSplit && total === 1;
-    const onJobComplete = this._makeBatchJobComplete(nodeId, refs, outputType, isSingleImage, !usesTextSplit);
+    const onJobComplete = this._makeBatchJobComplete(nodeId, refs, outputType, isSingleImage, !usesTextSplit, createdCardIds);
     const onComplete: BatchCompleteFn = async () => { /* 成功结果已逐张写回；终态只由下方汇总收敛。 */ };
     this._batchRunners.set(batchId, { nodeId, runJob, onJobComplete, onComplete });
 
@@ -514,10 +506,10 @@ class RunEngine {
         error: null,
         lastRunAt: Date.now(),
       });
-      dirty.markUpstreamChangedExcept(nodeId, this._createdCardIds);
+      dirty.markUpstreamChangedExcept(nodeId, createdCardIds);
       showToast(s.failed > 0 ? `成功 ${s.succeeded}/${s.total}，失败 ${s.failed}` : `成功 ${s.succeeded}/${s.total}`);
       // P3：本批次出现过未落盘（未配置图片保存路径）→ 统一提示一次，不阻断结果展示
-      if (this._sawNotSavedToDisk) {
+      if (batchFlags.sawNotSavedToDisk) {
         showToast('图片保存路径未设置，生成图不会落盘到本地', false);
       }
     } else {
@@ -533,7 +525,7 @@ class RunEngine {
    * 不负责状态流转（队列 markJobStatus）；在 await 间隙通过 hooks.isCancelled 感知取消，防止取消后继续写结果。
    * 与旧 runOneWorker 的区别：不建子卡、不写回节点（写回统一在批次终态 onComplete 做，保证按 index 有序）。
    */
-  private _makeRunJob(options: Record<string, unknown>): RunJobFn {
+  private _makeRunJob(options: Record<string, unknown>, markNotSavedToDisk: () => void): RunJobFn {
     return async (job, hooks): Promise<JobRunOutcome> => {
       if (hooks.isCancelled()) return { success: false, error: '已取消' };
       try {
@@ -555,7 +547,7 @@ class RunEngine {
         if (hooks.isCancelled()) return { success: false, error: '已取消' };
         if (!displayUrl) throw new Error(result.error || '生成成功但未返回图片数据');
         // P3：该张图未落盘到用户配置目录（tempfile 兜底）→ 标记，批次结束统一 toast
-        if (result.savedToDisk === false) this._sawNotSavedToDisk = true;
+        if (result.savedToDisk === false) markNotSavedToDisk();
         // 原图引用（图片性能优化：卡片主视觉=缩略图，大图按需加载用）
         const origin: ImageOrigin | null = result.originalPath
           ? { path: result.originalPath, url: result.originalUrl }
@@ -589,6 +581,7 @@ class RunEngine {
     outputType: GenerationTrace['outputType'],
     isSingleImage: boolean,
     checkLock: boolean,
+    createdCardIds: Set<string>,
   ): BatchJobCompleteFn {
     let lockedLayout: ResultLayout | null = null;
     return async (batch, job) => {
@@ -607,7 +600,7 @@ class RunEngine {
           batchId: batch.id,
           jobId: job.id,
         }, origin, job.prompt, im.width, im.height);
-        this._createdCardIds.add(card.id);
+        createdCardIds.add(card.id);
         return;
       }
       if (isSingleImage) {
@@ -848,21 +841,19 @@ class RunEngine {
 
   /**
    * 重试单个失败 Job（B-3）：复用原批次快照的 options/参考图/写回逻辑（_batchRunners），重新入队执行。
-   * busy 锁粒度 = 整个批次（重试也是整批串行）；成功图不因兄弟失败丢失。
+   * 运行保护粒度 = 当前节点批次；其它节点可继续运行。
    */
   async retryJob(nodeId: string, batchId: string, jobId: string): Promise<void> {
     const node = flowState.getNode(nodeId);
     if (!node) return;
     if (node.status === 'run') { showToast('该节点正在生成中', false); return; }
-    if (this.busy) { showToast('已有任务在运行，请稍候', false); return; }
     const runner = this._batchRunners.get(batchId);
     if (!runner) { showToast('批次信息已失效，请重新运行', false); return; }
     const job = batchStore.getJob(batchId, jobId);
     if (!job || (job.status !== 'failed' && job.status !== 'cancelled')) return;
 
     const active: ActiveRun = { nodeId, cancelled: false, historySuspended: true };
-    this.busy = true;
-    this.activeRun = active;
+    this.activeRuns.set(nodeId, active);
     flowHistory.suspend();
     try {
       flowState.updateNode(nodeId, { status: 'run', error: null });
@@ -872,7 +863,7 @@ class RunEngine {
       this._applyRetryOutcome(nodeId, batchId, finished);
     } finally {
       if (active.historySuspended) { flowHistory.resume(); active.historySuspended = false; }
-      if (this.activeRun === active) { this.activeRun = null; this.busy = false; }
+      if (this.activeRuns.get(nodeId) === active) this.activeRuns.delete(nodeId);
     }
   }
 
@@ -881,15 +872,13 @@ class RunEngine {
     const node = flowState.getNode(nodeId);
     if (!node) return;
     if (node.status === 'run') { showToast('该节点正在生成中', false); return; }
-    if (this.busy) { showToast('已有任务在运行，请稍候', false); return; }
     const runner = this._batchRunners.get(batchId);
     if (!runner) { showToast('批次信息已失效，请重新运行', false); return; }
     const failed = (batchStore.getBatch(batchId)?.jobs.filter(j => j.status === 'failed') ?? []);
     if (failed.length === 0) { showToast('没有可重试的失败项', false); return; }
 
     const active: ActiveRun = { nodeId, cancelled: false, historySuspended: true };
-    this.busy = true;
-    this.activeRun = active;
+    this.activeRuns.set(nodeId, active);
     flowHistory.suspend();
     try {
       flowState.updateNode(nodeId, { status: 'run', error: null });
@@ -899,7 +888,7 @@ class RunEngine {
       this._applyRetryOutcome(nodeId, batchId, finished);
     } finally {
       if (active.historySuspended) { flowHistory.resume(); active.historySuspended = false; }
-      if (this.activeRun === active) { this.activeRun = null; this.busy = false; }
+      if (this.activeRuns.get(nodeId) === active) this.activeRuns.delete(nodeId);
     }
   }
 

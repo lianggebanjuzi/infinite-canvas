@@ -57,6 +57,7 @@ declare const pywebview: {
     unified_chat(messages: Array<{ role: string; content: string }>, options?: Record<string, unknown>): Promise<{ content?: string; reply?: string; text?: string }>;
     unified_chat_v2(user_input: string, options?: Record<string, unknown>): Promise<{ content?: string; reply?: string; text?: string }>;
     save_image_to_local(image_data: unknown, filename?: string): Promise<{ path?: string }>;
+    prepare_imported_image(image_data: string, filename?: string): Promise<{ status: string; path?: string; url?: string; thumbnail_data_url?: string; saved_to_disk?: boolean; message?: string }>;
     save_image_as(image_data: unknown, filename?: string): Promise<{ path?: string }>;
     load_local_image(file_path: string): Promise<{ status: string; data_url?: string; message?: string }>;
     outpaint(image_base64: string, direction: string, ratio: string, prompt: string, provider_id: string, model_id?: string, resolution?: string, user_mask?: unknown): Promise<{ url?: string }>;
@@ -157,6 +158,10 @@ export const API = {
 
     async saveImageToLocal(imgUrl: string) {
         return await pywebview.api.save_image_to_local(imgUrl);
+    },
+
+    async prepareImportedImage(imageData: string, filename?: string) {
+        return await pywebview.api.prepare_imported_image(imageData, filename);
     },
 
     async saveImageAs(imageData: unknown, filename?: string) {

@@ -18,6 +18,8 @@ export class FlowState {
   selectedIds = new Set<string>();
   canvas: FlowCanvasState = { scale: 1, panX: 60, panY: 40 };
   projectName = '未命名项目';
+  /** 当前项目最近一次人工选择的模型；不使用跨项目 localStorage。 */
+  modelDefaults: Record<'drawing' | 'chat', string> = { drawing: '', chat: '' };
   dirty = false;
   /** 画布是否曾经有过节点（addNode/replaceAll 置 true；用于区分"首次启动空画布"与"用户主动删空"） */
   everHadNodes = false;
@@ -289,6 +291,18 @@ export class FlowState {
     this.notify();
   }
 
+  getModelDefault(kind: 'drawing' | 'chat'): string {
+    return this.modelDefaults[kind] || '';
+  }
+
+  setModelDefault(kind: 'drawing' | 'chat', model: string): void {
+    if (!model || this.modelDefaults[kind] === model) return;
+    this.modelDefaults[kind] = model;
+    this.updatedAt = Date.now();
+    this.dirty = true;
+    this.notify();
+  }
+
   /** 替换节点图片（换图/生成回写），并更新比例与原图真实像素尺寸（width/height 可选，旧数据缺失） */
   setNodeImage(id: string, imageUrl: string | null, ratio?: number, imageWidth?: number, imageHeight?: number): void {
     const node = this.getNode(id);
@@ -521,6 +535,15 @@ export class FlowState {
     const defaultCanvas: FlowCanvasState = { scale: 1, panX: 60, panY: 40 };
     this.canvas = { ...defaultCanvas, ...(project.canvas || {}) };
     this.projectName = project.projectName || '未命名项目';
+    const savedDefaults = project.modelDefaults || {};
+    const lastModel = (type: NodeType): string => {
+      const node = [...this.nodes].reverse().find(item => item.type === type && typeof item.params?.model === 'string' && item.params.model);
+      return (node?.params.model as string | undefined) || '';
+    };
+    this.modelDefaults = {
+      drawing: typeof savedDefaults.drawing === 'string' ? savedDefaults.drawing : lastModel('image-gen'),
+      chat: typeof savedDefaults.chat === 'string' ? savedDefaults.chat : lastModel('text-gen'),
+    };
     this.createdAt = project.createdAt || Date.now();
     this.updatedAt = project.updatedAt || Date.now();
     this.selectedIds.clear();
@@ -535,6 +558,7 @@ export class FlowState {
       nodes: this.nodes.map(n => this._cloneNode(n)),
       edges: this.edges.map(e => ({ ...e })),
       projectName: this.projectName,
+      modelDefaults: { ...this.modelDefaults },
       dirty: this.dirty,
     };
   }
@@ -544,6 +568,7 @@ export class FlowState {
     this.nodes = (snap.nodes || []).map(n => this._cloneNode(n));
     this.edges = (snap.edges || []).map(e => ({ ...e }));
     this.projectName = snap.projectName || '未命名项目';
+    this.modelDefaults = { drawing: snap.modelDefaults?.drawing || '', chat: snap.modelDefaults?.chat || '' };
     this.selectedIds.clear();
     this.dirty = snap.dirty;
     this.updatedAt = Date.now();

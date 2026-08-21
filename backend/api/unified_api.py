@@ -216,28 +216,44 @@ class UnifiedAPIRouter:
         """
         options = options or {}
 
-        provider, key, model_entry = self._resolve_chat_model(options.get('model'))
-        if not provider:
-            raise AppError(503, "没有可用的对话模型，请先在设置中配置")
+        candidates, unavailable_reason = self._chat_candidates(options.get('model'))
+        if not candidates:
+            raise AppError(503, unavailable_reason or "没有可用的对话模型，请先在设置中配置")
 
+        failures = []
+        for provider, key, model_entry in candidates:
+            try:
+                return self._chat_with_candidate(messages, options, provider, key, model_entry)
+            except AppError as error:
+                # 只在当前模型同名的候选间切换；避免把用户选择的 gpt-5.6-luna
+                # 静默替换为其它模型。参数错误等本地问题也不应重复提交。
+                if error.code not in (401, 402, 422, 429, 500, 502, 503, 504):
+                    raise
+                failures.append(error.message)
+
+        reasons = '；'.join(dict.fromkeys(failures))
+        model_id = candidates[0][2].id
+        raise AppError(
+            503,
+            f"模型「{model_id}」已依次尝试 {len(candidates)} 组可用供应商/密钥，均无法完成对话"
+            + (f"：{reasons}" if reasons else ""),
+        )
+
+    def _chat_with_candidate(self, messages, options, provider, key, model_entry):
+        """向一个已验证的同名文本模型候选发请求；由 chat 负责候选切换。"""
         connection = self._get_connection(provider, key, ModelType.CHAT, model_entry.id)
         if not connection:
-            raise AppError(503, f"供应商「{provider.get('name', '')}」的文本对话未启用或尚未填写 URL / API Key，请到设置中补充")
+            raise AppError(503, "文本对话尚未填写 URL / API Key，请到设置中补充")
 
         api_url   = connection['api_url'].rstrip('/')
         api_key   = connection['api_key']
         use_proxy = provider.get('use_proxy', False)
         proxies   = None if use_proxy else {"http": None, "https": None, "all": None}
-
-        url     = self._resolve_chat_url(api_url)
-        headers = {
-            'Authorization': f'Bearer {api_key}',
-            'Content-Type':  'application/json'
-        }
-        payload = self._build_chat_payload(model_entry.id, messages, options)
+        url       = self._resolve_chat_url(api_url)
+        headers   = {'Authorization': f'Bearer {api_key}', 'Content-Type': 'application/json'}
+        payload   = self._build_chat_payload(model_entry.id, messages, options)
 
         print(f"[UnifiedAPI] 对话请求 | provider={provider['name']} | model={model_entry.id} | url={url}")
-
         try:
             response = requests.post(
                 # 文本/反推请求不设客户端超时：部分上游模型首包较慢，由用户主动取消或上游自行结束。
@@ -245,12 +261,13 @@ class UnifiedAPIRouter:
             )
             if response.status_code == 200:
                 return self._parse_chat_response(response.json())
-            else:
-                self._handle_http_error(response)
+            self._handle_http_error(response)
         except requests.exceptions.Timeout:
             raise UpstreamTimeoutError()
         except requests.exceptions.ConnectionError:
             raise UpstreamError(503, "无法连接到服务器，请检查网络或代理设置")
+        except AppError:
+            raise
         except Exception as e:
             print(f"[UnifiedAPI] 对话异常: {e}")
             raise UnknownError(str(e))
@@ -349,13 +366,34 @@ class UnifiedAPIRouter:
         if not prompt or not prompt.strip():
             raise ValidationError("提示词不能为空")
 
-        provider, key, model_entry = self._resolve_drawing_model(options.get('model'))
-        if not provider:
-            raise AppError(503, "没有可用的图片模型，请先在设置中配置")
+        candidates, unavailable_reason = self._drawing_candidates(options.get('model'))
+        if not candidates:
+            raise AppError(503, unavailable_reason or "没有可用的图片模型，请先在设置中配置")
+
+        failures = []
+        for provider, key, model_entry in candidates:
+            try:
+                return self._generate_image_with_candidate(prompt, options, provider, key, model_entry)
+            except AppError as error:
+                # 参数校验错误与非上游 4xx 不应换供应商重复提交；密钥、配额、限流、
+                # 模型兼容和上游故障则继续尝试同一模型的其它可用密钥/供应商。
+                if error.code not in (401, 402, 422, 429, 500, 502, 503, 504):
+                    raise
+                failures.append(error.message)
+
+        reasons = '；'.join(dict.fromkeys(failures))
+        raise AppError(
+            503,
+            f"已依次尝试 {len(candidates)} 组可用图像密钥，均无法生成"
+            + (f"：{reasons}" if reasons else ""),
+        )
+
+    def _generate_image_with_candidate(self, prompt, options, provider, key, model_entry):
+        """使用一个已验证的图像模型候选发起请求；由 generate_image 负责候选切换。"""
 
         connection = self._get_connection(provider, key, ModelType.DRAWING, model_entry.id)
         if not connection:
-            raise AppError(503, f"供应商「{provider.get('name', '')}」的图像生成未启用或尚未填写 URL / API Key，请到设置中补充后再生成")
+            raise AppError(503, "图像生成尚未填写 URL / API Key，请到设置中补充后再生成")
 
         api_url   = connection['api_url'].rstrip('/')
         api_key   = connection['api_key']
@@ -578,6 +616,153 @@ class UnifiedAPIRouter:
 
         # ── 未指定/空 → 全量第一个可用模型 ──
         return self._first_available_model(providers, ModelType.CHAT)
+
+    def _chat_candidates(self, model_str=None):
+        """按首选路由优先、其它供应商/密钥中同名模型兜底的顺序返回文本候选。"""
+        providers = self._load_providers()
+        parts = (model_str or '').split(':') if model_str else []
+        requested_model_id = (
+            ':'.join(parts[2:]) if len(parts) >= 3
+            else parts[1] if len(parts) == 2
+            else parts[0] if len(parts) == 1
+            else ''
+        )
+        preferred = (parts[0], parts[1]) if len(parts) >= 3 else (None, None)
+        if not requested_model_id:
+            provider, key, model = self._first_available_model(providers, ModelType.CHAT)
+            if not provider or not model:
+                return [], "没有启用并配置完整的对话模型，请先在设置中配置"
+            requested_model_id = model.id
+            preferred = (provider.get('id'), key.get('id'))
+
+        candidates = []
+        seen = set()
+        found_model = False
+        found_enabled_key = False
+
+        def append_candidate(provider, key, model):
+            candidate_id = (provider.get('id'), key.get('id'), model.get('id'))
+            if candidate_id in seen:
+                return
+            if not self._get_connection(provider, key, ModelType.CHAT, model.get('id', '')):
+                return
+            seen.add(candidate_id)
+            candidates.append((provider, key, ModelEntry(
+                id=model['id'], name=model.get('name', model['id']),
+                type=ModelType.CHAT,
+                api_format=self._detect_api_format(model['id'], ModelType.CHAT),
+                enabled=model.get('enabled', True),
+            )))
+
+        def scan(preferred_only=False):
+            nonlocal found_model, found_enabled_key
+            for provider in providers:
+                for key in provider.get('keys') or []:
+                    if preferred_only and (provider.get('id'), key.get('id')) != preferred:
+                        continue
+                    for model in key.get('models') or []:
+                        if not model.get('enabled', True) or model.get('id') != requested_model_id:
+                            continue
+                        model_type = model.get('type', '')
+                        is_chat = model_type == 'chat' or (
+                            not model_type and self._is_chat_model(model.get('id', ''))
+                        )
+                        if not is_chat:
+                            continue
+                        found_model = True
+                        if not provider.get('enabled') or not key.get('enabled', True):
+                            continue
+                        found_enabled_key = True
+                        append_candidate(provider, key, model)
+
+        if preferred[0]:
+            scan(preferred_only=True)
+        scan()
+        if candidates:
+            return candidates, ''
+        if not found_model:
+            return [], "所选对话模型已删除或未配置"
+        if not found_enabled_key:
+            return [], "所选对话模型的供应商或密钥已停用"
+        return [], "所选对话模型尚未填写可用的 URL 或 API Key"
+
+    def _drawing_candidates(self, model_str=None):
+        """按首选路由优先、同名模型全局兜底的顺序返回可请求的图像候选。
+
+        前端 value 仍是 ``provider:key:model``，但界面只显示模型名。某一把 Key
+        失效时，不能因为路由 id 已固定就阻断其它供应商；这里保留首选顺序并收集
+        所有配置了同一模型 ID 的可用连接，生成链路逐一尝试。
+        """
+        providers = self._load_providers()
+        parts = (model_str or '').split(':') if model_str else []
+        requested_model_id = (
+            ':'.join(parts[2:]) if len(parts) >= 3
+            else parts[1] if len(parts) == 2
+            else parts[0] if len(parts) == 1
+            else ''
+        )
+        preferred = (parts[0], parts[1]) if len(parts) >= 3 else (None, None)
+        if not requested_model_id:
+            provider, key, model = self._first_available_model(providers, ModelType.DRAWING)
+            if not provider or not model:
+                return [], "没有启用并配置完整的图片模型，请先在设置中配置"
+            requested_model_id = model.id
+            preferred = (provider.get('id'), key.get('id'))
+        candidates = []
+        seen = set()
+        found_model = False
+        found_enabled_key = False
+
+        def append_candidate(provider, key, model):
+            candidate_id = (provider.get('id'), key.get('id'), model.get('id'))
+            if candidate_id in seen:
+                return
+            if not self._get_connection(provider, key, ModelType.DRAWING, model.get('id', '')):
+                return
+            seen.add(candidate_id)
+            candidates.append((provider, key, ModelEntry(
+                id=model['id'], name=model.get('name', model['id']),
+                type=ModelType.DRAWING,
+                api_format=self._detect_api_format(model['id'], ModelType.DRAWING),
+                enabled=model.get('enabled', True),
+            )))
+
+        def scan(preferred_only=False):
+            nonlocal found_model, found_enabled_key
+            for provider in providers:
+                for key in provider.get('keys') or []:
+                    if preferred_only and (provider.get('id'), key.get('id')) != preferred:
+                        continue
+                    for model in key.get('models') or []:
+                        if not model.get('enabled', True):
+                            continue
+                        model_type = model.get('type', '')
+                        is_drawing = model_type == 'drawing' or (
+                            not model_type and not self._is_chat_model(model.get('id', ''))
+                        )
+                        if not is_drawing:
+                            continue
+                        if requested_model_id and model.get('id') != requested_model_id:
+                            continue
+                        found_model = True
+                        if not provider.get('enabled') or not key.get('enabled', True):
+                            continue
+                        found_enabled_key = True
+                        append_candidate(provider, key, model)
+
+        # 首先尊重节点当前选择；随后才找其它供应商/密钥中同名的模型。
+        if preferred[0]:
+            scan(preferred_only=True)
+        scan()
+        if candidates:
+            return candidates, ''
+        if requested_model_id and not found_model:
+            return [], "所选图像模型已删除或未配置"
+        if requested_model_id and not found_enabled_key:
+            return [], "所选图像模型的供应商或密钥已停用"
+        if requested_model_id:
+            return [], "所选图像模型尚未填写可用的 URL 或 API Key"
+        return [], "没有启用并配置完整的图片模型，请先在设置中配置"
 
     def _resolve_drawing_model(self, model_str=None):
         """解析图片生成模型（multi-key：与 _resolve_chat_model 同构）"""
