@@ -143,7 +143,7 @@ class CardView {
         if (cardEl) this.updateCard(cardEl, node);
         return;
       }
-      // 扇形缩略图：点击设为封面并收起
+      // 扇形缩略图：点击只切换封面，展开状态保持，方便连续比较其它图片。
       const thumb = (e.target as Element).closest('.fan-thumb') as HTMLElement | null;
       if (thumb) {
         e.preventDefault(); e.stopPropagation();
@@ -151,7 +151,6 @@ class CardView {
         const images = node?.generatedImages || [];
         const index = Math.min(Math.max(0, Number(thumb.dataset.index || 0)), Math.max(0, images.length - 1));
         const item = images[index];
-        if (node) this._collapseFan(nodeId, node);
         if (node && item) {
           flowState.updateNode(nodeId, { activeGeneratedIndex: index, imageUrl: item.url, imageOrigin: item.origin || null,
             imageWidth: item.width, imageHeight: item.height });
@@ -563,12 +562,12 @@ class CardView {
 
   /**
    * 展开态缩略图：每列最多三张，超出则向右新增一列（错峰入场；当前封面 accent 描边）。
-   * 点缩略图 = 设为封面并收起（事件见 _bindGalleryEvents）。ratio = 卡片宽高比，缩略图保持同比例。
+   * 点缩略图 = 设为封面但保持展开（事件见 _bindGalleryEvents）。ratio = 卡片宽高比，缩略图保持同比例。
    */
   private _fanStripHtml(images: GeneratedImageItem[], activeIndex: number, ratio: number, closing = false): string {
     const r = ratio > 0 ? ratio : 4 / 3;
     const thumbs = images.map((img, i) =>
-      `<div class="fan-thumb${i === activeIndex ? ' active' : ''}" data-index="${i}" title="第 ${i + 1} 张 · 点击设为封面" style="background-image:url('${escapeUrl(img.url)}');aspect-ratio:${r};--fan-delay:${i * 45}ms"></div>`
+      `<div class="fan-thumb${i === activeIndex ? ' active' : ''}" data-index="${i}" title="第 ${i + 1} 张 · 点击切换封面" style="background-image:url('${escapeUrl(img.url)}');aspect-ratio:${r};--fan-delay:${i * 45}ms"></div>`
     ).join('');
     return `<div class="pcard-fan${closing ? ' is-closing' : ''}">${thumbs}</div>`;
   }
