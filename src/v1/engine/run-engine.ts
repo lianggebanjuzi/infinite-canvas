@@ -6,7 +6,7 @@
 //   - 生成节点 run → runBatch：N=clamp(count,1,4) 或文本拆分段数（启动时快照）
 //   - 经 batch-queue 限流执行（默认并发 2，可配 1~3）；删除 Promise.allSettled 全量并发
 //   - Batch = 执行态事实源（batch-store）；Job 成功回调（onComplete）单向写回节点结果
-//   - count=1 单图：第 1 张（也是唯一一张）写回源节点自身 imageUrl（旧图先入历史；锁定保护沿用）
+//   - count=1 单图：第 1 张（也是唯一一张）写回源节点自身 imageUrl（旧图先入历史）
 //   - count>1 与文本拆分：全部成功图写回 generatedImages（同一节点卡内浏览），首图兼作 imageUrl 预览；
 //     废除自动建子卡（createResultCard 保留供扩图/历史兼容入口使用）
 //   - 每 Job 独立 error；失败可逐条（retryJob）/全部（retryFailed）重试；成功图不因兄弟失败丢失
@@ -34,7 +34,6 @@ import { historyPersist } from '../history-persist';
 import { linkView } from '../canvas/link-view';
 import { CARD_W, imageCardHeight } from '../canvas/canvas-view';
 import { showToast } from '../ui/toast';
-import { assetStore } from '../asset-store';
 
 /** 节点定义执行上下文（供 canRun/buildOptions 使用） */
 const ctx: FlowContext = {
@@ -449,7 +448,7 @@ class RunEngine {
     }
 
     // 2. 重跑顶掉：置 run 之前先清掉上次的「纯引擎产出」子节点（安全策略见 flow-state；
-    //    手动改造/锁定的产出节点保留并标 stale；用户拍板：历史子节点按现有安全策略处理，不额外删除）
+    //    手动改造的产出节点保留并标 stale；用户拍板：历史子节点按现有安全策略处理，不额外删除）
     flowState.removeChildren(nodeId);
 
     // 3. 置 run + 上游连线流光
@@ -479,9 +478,8 @@ class RunEngine {
     const outputType: GenerationTrace['outputType'] = isTxt2Img ? 'txt2img' : 'img2img';
     const runJob = this._makeRunJob(options, () => { batchFlags.sawNotSavedToDisk = true; });
     // count=1 单图路径保持「第 1 张写回自身」；count>1 与文本拆分写回 generatedImages；
-    // 锁定保护仅对 manual-count 生效（与旧 runOneWorker 一致；text-split 旧 _applyTextSplitResults 本就不查锁）
     const isSingleImage = !usesTextSplit && total === 1;
-    const onJobComplete = this._makeBatchJobComplete(nodeId, refs, outputType, isSingleImage, !usesTextSplit, createdCardIds);
+    const onJobComplete = this._makeBatchJobComplete(nodeId, refs, outputType, isSingleImage, createdCardIds);
     const onComplete: BatchCompleteFn = async () => { /* 成功结果已逐张写回；终态只由下方汇总收敛。 */ };
     this._batchRunners.set(batchId, { nodeId, runJob, onJobComplete, onComplete });
 
@@ -570,8 +568,6 @@ class RunEngine {
 
   /**
    * 单张完成写回回调：每个 Job 成功后立即更新节点，因此用户可在其它任务仍运行时浏览结果。
-   * - 保护点 2（Q3 不退化）：manual-count 模式下源节点当前 imageUrl（旧图）被锁定 → 全部成功图改走
-   *   createResultCard 新建产出节点（旧图保留；与旧 runOneWorker 行为一致）；
    * - count=1 单图 → _writeBackToSelf；count>1 / 文本拆分 → 更新当前已完成的 generatedImages；
    * - 取消批次不写回（与现状 cancel 语义一致）；Job 独立成功图不因兄弟失败丢失（B-3）。
    */
@@ -580,29 +576,13 @@ class RunEngine {
     refs: string[],
     outputType: GenerationTrace['outputType'],
     isSingleImage: boolean,
-    checkLock: boolean,
     createdCardIds: Set<string>,
   ): BatchJobCompleteFn {
-    let lockedLayout: ResultLayout | null = null;
     return async (batch, job) => {
       const node = flowState.getNode(nodeId);
       if (!node) return;
       if (batch.status === 'cancelled') return; // 取消不写回（与现状 cancel 语义一致；Job 结果仍保留在 batch-store）
       if (job.status !== 'succeeded' || !job.image) return;
-      // 保护点 2：源节点当前 imageUrl（旧图）被锁定 → 不写回自身，全部改走新建产出节点（旧图保留，Q3）
-      if (checkLock && !!node.imageUrl && assetStore.isLockedByImageUrl(node.imageUrl)) {
-        lockedLayout ??= { x: node.x + CARD_W + RESULT_GAP_X, cursorY: node.y };
-        const im = job.image;
-        const origin: ImageOrigin | null = im.originalPath ? { path: im.originalPath, url: im.originalUrl } : null;
-        const card = await this.createResultCard(nodeId, im.url, lockedLayout, {}, {
-          outputType,
-          refs,
-          batchId: batch.id,
-          jobId: job.id,
-        }, origin, job.prompt, im.width, im.height);
-        createdCardIds.add(card.id);
-        return;
-      }
       if (isSingleImage) {
         const im = job.image;
         const origin: ImageOrigin | null = im.originalPath ? { path: im.originalPath, url: im.originalUrl } : null;

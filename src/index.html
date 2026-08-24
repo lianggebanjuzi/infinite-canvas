@@ -264,7 +264,7 @@
 </div>
 
 <!-- 大图查看（左右分栏：左信息栏 + 右大图；图片性能优化：先显示缩略图 + loading，再按需加载原图；信息栏字段由 JS 填充） -->
-<div class="img-modal" id="img-modal">
+<div class="img-modal" id="img-modal" tabindex="-1">
   <div class="img-modal-panel" id="img-modal-panel">
     <button class="img-modal-close" id="img-modal-close" title="关闭">
       <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
@@ -273,6 +273,11 @@
     <div class="img-modal-fields" id="img-modal-fields"></div>
   </div>
   <div class="img-modal-stage" id="img-modal-stage">
+    <div class="img-modal-nav" aria-label="图片切换">
+      <button class="img-modal-nav-btn prev" id="img-modal-prev" title="上一张（←）" aria-label="上一张">‹</button>
+      <span class="img-modal-count" id="img-modal-count"></span>
+      <button class="img-modal-nav-btn next" id="img-modal-next" title="下一张（→）" aria-label="下一张">›</button>
+    </div>
     <img id="img-modal-img" alt="">
     <div class="img-modal-loading" id="img-modal-loading">加载原图中…</div>
   </div>

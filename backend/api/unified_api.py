@@ -939,7 +939,7 @@ class UnifiedAPIRouter:
         return None, None, None
 
     def _get_connection(self, provider, key, model_type, model_id=''):
-        """返回原 URL 及模型专用 Key（优先）或同类型全局 Key。"""
+        """返回模型连接；Key 按能力类型隔离，旧 key.api_key 仅经同类型 channel 兼容。"""
         kind = model_type.value
         # URL 保持原设置：文本优先 text_api_url，图像/视频走 api_url。
         api_url = (
@@ -948,8 +948,10 @@ class UnifiedAPIRouter:
         ).strip()
         model = next((m for m in key.get('models', []) if m.get('id') == model_id), {})
         global_keys = provider.get('global_keys') or {}
+        channel = (key.get('channels') or {}).get(kind) or {}
+        channel_key = channel.get('api_key') if channel.get('enabled') is not False else ''
         api_key = str(
-            model.get('api_key') or global_keys.get(kind) or key.get('api_key') or ''
+            model.get('api_key') or global_keys.get(kind) or channel_key or ''
         ).strip()
         return {'api_url': api_url, 'api_key': api_key} if api_url and api_key else None
 

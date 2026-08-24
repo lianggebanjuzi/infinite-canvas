@@ -1,17 +1,17 @@
 // src/v1/asset-store.ts
-// 采纳/锁定单一数据源（X1）：ImageAssetRecord 管理 + 订阅通知 + 持久化 + 撤销快照。
+// 资产库单一数据源：ImageAssetRecord 管理 + 订阅通知 + 持久化 + 撤销快照。
 // 任何 UI（画布角标/图库/对比面板/资产库）只读写这一个 store，四处同步天然成立（X1）。
-// 索引键 = 图指纹 hashRef(imageUrl)（唯一定位「一张图」而非「一个节点」）；nodeId 冗余供保护逻辑回溯。
+// 索引键 = 图指纹 hashRef(imageUrl)（唯一定位「一张图」而非「一个节点」）。
 // 持久化：主索引 <图片保存目录>/assets.json（未配置降级 APP_DIR/assets.json，原子写；incremental-3 起）。
-// 写路径：adopt/unadopt/setLocked/addTags → 置 dirty（X2）+ notify + 防抖 300ms 落盘；撤销 applySnapshot 后立即落盘回退（X3）。
-// 内存缓存：urlByKey（图 URL，资产库渲染用）/ metaByKey（采纳时刻元数据，复现 S9 用；不持久化）。
+// 写路径：add/remove/addTags → 置 dirty + notify + 防抖 300ms 落盘；撤销 applySnapshot 后立即落盘回退。
+// 内存缓存：urlByKey（图 URL，资产库渲染用）/ metaByKey（添加时刻元数据，复现用；不持久化）。
 
 import { flowState } from './state/flow-state';
 import { historyPersist } from './history-persist';
 import { Backend } from './api';
 import { showToast } from './ui/toast';
 
-/** 落盘防抖间隔（ms）：采纳/锁定是高频小变更，合并写避免逐次 IO */
+/** 落盘防抖间隔（ms）：小变更合并写避免逐次 IO */
 const PERSIST_DEBOUNCE_MS = 300;
 
 /** 未配置图片保存路径的降级提示（共享知识 3：人话常量，禁止改字面量） */
@@ -31,7 +31,7 @@ class AssetStore {
     // 无额外初始化动作：打开项目后由 persistence.open 调 loadFromBackend()
   }
 
-  /** 打开项目后恢复采纳/锁定（顺序：restore → clear → loadHistory → loadAssets → notify）；失败静默回退空索引 */
+  /** 打开项目后恢复资产库；失败静默回退空索引。 */
   async loadFromBackend(): Promise<void> {
     try {
       const res = await Backend.loadAssets();
@@ -42,13 +42,15 @@ class AssetStore {
         res.records.forEach(r => {
           if (r && typeof r.key === 'string') {
             const rec = this._normalize(r);
+            // 兼容旧数据：过去移除会留下 adopted=false 的记录，加载时将它视为已移除。
+            if (r.added === false || r.adopted === false) return;
             this.records.set(rec.key, rec);
             if (rec.imageUrl) this.urlByKey.set(rec.key, rec.imageUrl);
           }
         });
         this.notify();
       } else {
-        // empty / error：迁移策略 = 无索引 → 空（全未采纳/未锁定）
+        // empty / error：迁移策略 = 无索引 → 空资产库
         this.notify();
       }
     } catch {
@@ -59,52 +61,28 @@ class AssetStore {
 
   // ───────────────────────── 写入口（唯一写路径） ─────────────────────────
 
-  /** 采纳（认可 + 自动置锁定，B2）。imageUrl 采纳时写入（资产库显示用）；originalPath 写入原图引用；
-   *  meta 采纳元数据：R2 起除写内存 metaByKey 外，还会把配方字段合并写入记录本体（_applyRecipe），
+  /** 添加到资产库。imageUrl 写入（资产库显示用）；originalPath 写入原图引用；
+   *  meta 添加时元数据：除写内存 metaByKey 外，还会把配方字段合并写入记录本体（_applyRecipe），
    *  随现有 300ms 防抖落盘 assets.json，成为跨项目/跨会话的持久化真相（见 AdoptMeta 注释）。 */
-  adopt(key: string, nodeId: string, imageUrl?: string, originalPath?: string, meta?: AdoptMeta): void {
+  add(key: string, nodeId: string, imageUrl?: string, originalPath?: string, meta?: AdoptMeta): void {
     const rec = this._getOrCreate(key, nodeId, imageUrl, originalPath);
     if (imageUrl) this.urlByKey.set(key, imageUrl);
-    // 写 meta（含配方入记录）放在 adopted return 之前：重复采纳也刷新配方（沿用 metaByKey 既有语义）
+    // 重复添加也刷新配方。
     if (meta) {
       this.metaByKey.set(key, meta);
       this._applyRecipe(rec, meta);
     }
-    if (rec.adopted) return;
-    rec.adopted = true;
-    rec.locked = true; // 采纳 = 认可 + 保护
+    rec.added = true;
     rec.updatedAt = Date.now();
-    this._appendProjectName(rec); // A5：记录采纳时所在项目名（跨项目溯源）
+    this._appendProjectName(rec);
     this._afterChange();
   }
 
-  /** 取消采纳（仅撤 adopted；锁定状态保留——用户可单独锁定未采纳的图） */
-  unadopt(key: string): void {
-    const rec = this.records.get(key);
-    if (!rec || !rec.adopted) return;
-    rec.adopted = false;
-    rec.updatedAt = Date.now();
-    this._afterChange();
-  }
-
-  /** 锁定/解锁（未采纳的图也可单独锁定，B3）。对无记录图解锁时直接返回，不产生无意义空记录（QA O3）。 */
-  setLocked(key: string, nodeId: string, locked: boolean, imageUrl?: string, originalPath?: string): void {
-    let rec = this.records.get(key);
-    if (!rec) {
-      if (!locked) return; // 无记录且要解锁：无事可做，不建空记录
-      rec = this._getOrCreate(key, nodeId, imageUrl, originalPath);
-    } else if (nodeId) {
-      // nodeId 冗余：图当前所在节点可能已变化，随写更新（与 _getOrCreate 一致，空串不覆盖防误清）
-      rec.nodeId = nodeId;
-    }
-    if (imageUrl) {
-      this.urlByKey.set(key, imageUrl);
-      if (!rec.thumbnail) rec.thumbnail = imageUrl; // 缩略图=展示图 URL（首次写入，不覆盖已有值）
-    }
-    if (originalPath && !rec.originalPath) rec.originalPath = originalPath; // 原图引用（首次写入）
-    if (rec.locked === locked) return;
-    rec.locked = locked;
-    rec.updatedAt = Date.now();
+  /** 从资产库移除。删除记录而不是保留隐藏状态。 */
+  remove(key: string): void {
+    if (!this.records.delete(key)) return;
+    this.urlByKey.delete(key);
+    this.metaByKey.delete(key);
     this._afterChange();
   }
 
@@ -125,23 +103,17 @@ class AssetStore {
 
   // ───────────────────────── URL 便捷入口（UI 层统一走这里，禁止手算 hash） ─────────────────────────
 
-  /** 按图 URL 采纳（内部转 key + 写 imageUrl/缩略图/原图引用，S3 资产库缩略图数据源） */
-  adoptByUrl(url: string, nodeId: string, meta?: AdoptMeta, originalPath?: string): void {
+  /** 按图 URL 添加（内部转 key + 写 imageUrl/缩略图/原图引用）。 */
+  addByUrl(url: string, nodeId: string, meta?: AdoptMeta, originalPath?: string): void {
     if (!url) return;
-    this.adopt(this._keyOf(url), nodeId, url, originalPath, meta);
+    this.add(this._keyOf(url), nodeId, url, originalPath, meta);
   }
 
-  /** 按图 URL 取消采纳 */
-  unadoptByUrl(url: string): void {
+  /** 按图 URL 从资产库移除。 */
+  removeByUrl(url: string): void {
     if (!url) return;
     const rec = this.getByImageUrl(url);
-    if (rec) this.unadopt(rec.key);
-  }
-
-  /** 按图 URL 锁定/解锁 */
-  setLockedByUrl(url: string, nodeId: string, locked: boolean, originalPath?: string): void {
-    if (!url) return;
-    this.setLocked(this._keyOf(url), nodeId, locked, url, originalPath);
+    if (rec) this.remove(rec.key);
   }
 
   /** 按图 URL 追加标签 */
@@ -151,9 +123,9 @@ class AssetStore {
     if (rec) this.addTags(rec.key, tags);
   }
 
-  // ───────────────────────── 配方构造（R2：采纳/读侧共享） ─────────────────────────
+  // ───────────────────────── 配方构造（添加/读侧共享） ─────────────────────────
 
-  /** 从生成节点构造采纳元数据（R2 写侧）：node.trace 优先（source of truth），缺失时 node.params 兜底；
+  /** 从生成节点构造添加元数据（写侧）：node.trace 优先（source of truth），缺失时 node.params 兜底；
    *  无可用配方返回 undefined（调用方传 undefined = 不写配方，保持旧行为）。 */
   metaFromNode(node: FlowNode | null | undefined): AdoptMeta | undefined {
     if (!node) return undefined;
@@ -216,23 +188,8 @@ class AssetStore {
 
   // ───────────────────────── 查询（UI 判定一律走这里） ─────────────────────────
 
-  isAdoptedByImageUrl(url: string): boolean {
-    const rec = this.getByImageUrl(url);
-    return !!rec && rec.adopted;
-  }
-
-  isLockedByImageUrl(url: string): boolean {
-    const rec = this.getByImageUrl(url);
-    return !!rec && rec.locked;
-  }
-
-  /** 冗余回溯：按 nodeId 查锁定（保护逻辑里节点可能已被遍历但 imageUrl 变更/清空） */
-  isLockedNode(nodeId: string): boolean {
-    if (!nodeId) return false;
-    for (const rec of this.records.values()) {
-      if (rec.nodeId === nodeId && rec.locked) return true;
-    }
-    return false;
+  isAddedByImageUrl(url: string): boolean {
+    return !!this.getByImageUrl(url);
   }
 
   getByImageUrl(url: string): ImageAssetRecord | null {
@@ -243,13 +200,12 @@ class AssetStore {
     return rec ?? null;
   }
 
-  /** 已采纳资产列表（S3：adopted=true，按 updatedAt 倒序）；url 优先级 = record.imageUrl → urlByKey 缓存；
+  /** 资产列表（按 updatedAt 倒序）；url 优先级 = record.imageUrl → urlByKey 缓存；
    *  thumbnailUrl = record.thumbnail || url（缩略图优先）；originalPath = 原图引用；
    *  meta = 会话缓存优先，未命中时由记录配方合成（R2：跨会话 meta 不空，记录 = 持久化真相） */
-  getAdoptedAssets(): AssetAsset[] {
+  getAssets(): AssetAsset[] {
     const list: AssetAsset[] = [];
     this.records.forEach(rec => {
-      if (!rec.adopted) return;
       const url = rec.imageUrl || this.urlByKey.get(rec.key) || '';
       list.push({
         record: { ...rec, tags: [...rec.tags], projectName: [...(rec.projectName || [])] },
@@ -278,13 +234,14 @@ class AssetStore {
     return { records: this.list() };
   }
 
-  /** 撤销/重做恢复：整体替换 records + notify + 立即落盘回退索引文件（X3 验收「撤销采纳后索引文件回退」） */
+  /** 撤销/重做恢复：整体替换 records + notify + 立即落盘回退索引文件。 */
   applySnapshot(snap: AssetSnapshot): void {
     this.records.clear();
     this.urlByKey.clear();
     (snap.records || []).forEach(r => {
       if (r && typeof r.key === 'string') {
         const rec = this._normalize(r);
+        if (r.added === false || r.adopted === false) return;
         this.records.set(rec.key, rec);
         if (rec.imageUrl) this.urlByKey.set(rec.key, rec.imageUrl);
       }
@@ -318,7 +275,7 @@ class AssetStore {
     if (existing) {
       // nodeId 冗余：图当前所在节点可能已变化，随写更新
       if (nodeId) existing.nodeId = nodeId;
-      // imageUrl 只在采纳/锁定时写入：旧记录缺失时补全，已有值不覆盖（共享知识 6）
+      // imageUrl 仅在添加时写入：旧记录缺失时补全，已有值不覆盖。
       if (imageUrl && !existing.imageUrl) existing.imageUrl = imageUrl;
       if (imageUrl) this.urlByKey.set(key, imageUrl);
       // 缩略图=展示图 URL；原图引用首写不覆盖（图片性能优化）
@@ -333,8 +290,7 @@ class AssetStore {
       thumbnail: imageUrl || '',
       originalPath: originalPath || '',
       projectName: [],
-      adopted: false,
-      locked: false,
+      added: true,
       tags: [],
       category: '成图', // B8 P2：分类预留，默认 '成图'，本期不渲染分类 UI
       updatedAt: Date.now(),
@@ -354,8 +310,7 @@ class AssetStore {
       thumbnail: typeof r.thumbnail === 'string' ? r.thumbnail : '',
       originalPath: typeof r.originalPath === 'string' ? r.originalPath : '',
       projectName: Array.isArray(r.projectName) ? r.projectName.filter(n => typeof n === 'string') : [],
-      adopted: !!r.adopted,
-      locked: !!r.locked,
+      added: true,
       tags: Array.isArray(r.tags) ? r.tags.filter(t => typeof t === 'string') : [],
       category: typeof r.category === 'string' && r.category ? r.category : '成图',
       updatedAt: typeof r.updatedAt === 'number' ? r.updatedAt : Date.now(),
@@ -372,8 +327,7 @@ class AssetStore {
     };
   }
 
-  /** R2：把采纳元数据合并写入记录本体（仅覆盖非 undefined 字段；数组拷贝，不整体替换）。
-   *  重复采纳/部分 meta 不会清空既有配方；记录随现有防抖落盘 assets.json。 */
+  /** 把添加时元数据合并写入记录本体（仅覆盖非 undefined 字段；数组拷贝，不整体替换）。 */
   private _applyRecipe(rec: ImageAssetRecord, meta: AdoptMeta): void {
     if (typeof meta.prompt === 'string') rec.prompt = meta.prompt;
     if (typeof meta.model === 'string') rec.model = meta.model;
@@ -390,7 +344,7 @@ class AssetStore {
     if (typeof meta.createdAt === 'number') rec.createdAt = meta.createdAt;
   }
 
-  /** A5：采纳时把当前项目名追加进 projectName（去重追加，不删除） */
+  /** 添加时把当前项目名追加进 projectName（去重追加，不删除） */
   private _appendProjectName(rec: ImageAssetRecord): void {
     const name = flowState.projectName || '未命名项目';
     if (name && !rec.projectName.includes(name)) rec.projectName.push(name);
@@ -398,7 +352,7 @@ class AssetStore {
 
   /** 变更后统一动作：置 dirty（X2）+ 双 notify + 防抖落盘 */
   private _afterChange(): void {
-    // X2：采纳/锁定变更计入 dirty（顶栏「未保存」亮起）；dirty 复位仅发生在保存成功或 replaceAll（沿用信任层约定）
+    // 资产库变更计入 dirty（顶栏「未保存」亮起）。
     flowState.dirty = true;
     flowState.updatedAt = Date.now();
     flowState.notify();

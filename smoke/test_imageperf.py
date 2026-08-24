@@ -23,7 +23,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from PIL import Image
 
-from backend.api.image_api import make_thumbnail_data_url
+from backend.api.image_api import make_thumbnail_data_url, make_thumbnail_data_url_from_file
 from backend.api.provider_api import ProviderAPI
 from backend.api.unified_api import UnifiedAPIRouter
 
@@ -139,6 +139,27 @@ def main():
             check('缩略图远小于原图', len(thumb_bytes) < len(raw_bytes), f'{len(thumb_bytes)} < {len(raw_bytes)}')
             t_img.close()
         check('缩略图失败返回 None（非法字节）', make_thumbnail_data_url(b'not-an-image') is None, str(make_thumbnail_data_url(b'not-an-image')))
+
+        # 手机照片常以未旋转的像素 + EXIF Orientation=6（顺时针 90°）保存。
+        # 缩略图必须把方向烘焙进像素，否则会与浏览器显示的原图方向不一致。
+        oriented = Image.new('RGB', (1200, 800), '#4a8a3f')
+        exif = Image.Exif()
+        exif[274] = 6  # Orientation: Rotate 90° clockwise
+        oriented_buf = io.BytesIO()
+        oriented.save(oriented_buf, 'JPEG', exif=exif)
+        oriented_bytes = oriented_buf.getvalue()
+        oriented_thumb = make_thumbnail_data_url(oriented_bytes)
+        _, oriented_thumb_bytes = decode_data_url(oriented_thumb)
+        with Image.open(io.BytesIO(oriented_thumb_bytes)) as oriented_img:
+            check('内存缩略图应用 EXIF 方向（1200×800 + 方向 6 → 683×1024）', oriented_img.size == (683, 1024), str(oriented_img.size))
+
+        oriented_path = os.path.join(root, 'orientation-6.jpg')
+        with open(oriented_path, 'wb') as f:
+            f.write(oriented_bytes)
+        oriented_file_thumb = make_thumbnail_data_url_from_file(oriented_path)
+        _, oriented_file_thumb_bytes = decode_data_url(oriented_file_thumb)
+        with Image.open(io.BytesIO(oriented_file_thumb_bytes)) as oriented_file_img:
+            check('文件缩略图应用 EXIF 方向（导入链路）', oriented_file_img.size == (683, 1024), str(oriented_file_img.size))
 
         # ═════════════ T01-2 返回结构（多图 + 单图） ═════════════
 

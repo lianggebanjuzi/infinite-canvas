@@ -7,8 +7,8 @@ import { selection } from '../state/selection';
 import { dirty } from '../state/dirty';
 import { flowHistory } from '../state/history';
 import { nodeRegistry } from '../nodes/node-registry';
-import { canvasView, CARD_W, imageCardHeight } from './canvas-view';
-import { cardView, openImageModal, imageModalInfoFromNode } from './card-view';
+import { canvasView, CARD_W, IMAGE_CARD_MAX_H, imageCardHeight } from './canvas-view';
+import { cardView, openNodeImageModal } from './card-view';
 import { linkView, connectionDescription } from './link-view';
 import { runEngine } from '../engine/run-engine';
 import { showToast } from '../ui/toast';
@@ -83,6 +83,8 @@ class Interactions {
       // 中键：画布平移（preventDefault 避免浏览器 autoscroll 图标；不改动选中态）
       if (e.button === 1) {
         e.preventDefault();
+        // 悬浮框的定位依赖画布坐标；平移时先收起，松手后再按最终位置恢复，避免它们在结束瞬间跳位。
+        floatingPanels.suspendForPan();
         this.drag = {
           mode: 'pan',
           startX: e.clientX,
@@ -122,6 +124,7 @@ class Interactions {
       // Tab 化：点画布空白统一收起悬浮面板（收起只走 Esc / 点空白）；hide() 幂等，未显示时无副作用。
       // 注意：放在 Shift 分支之前——Shift+点空白框选同样属于「点画布空白」，一并收起。
       floatingPanels.hide();
+      cardView.collapseAllFans();
       if (e.shiftKey) {
         this._startFrameSelect(e);
         return;
@@ -136,8 +139,8 @@ class Interactions {
       if (!cardEl) return;
       const node = flowState.getNode(cardEl.dataset.nodeId || '');
       if (!node) return;
-      // 有图 → 查看大图（按需加载原图：带 imageOrigin 路径 + 真实像素标注 + 信息栏）；空图片卡（无输出图且无参考图，非文本卡）双击 → 弹文件选择器加载参考图
-      if (node.imageUrl) { void openImageModal(node.imageUrl, node.imageOrigin, { width: node.imageWidth, height: node.imageHeight }, imageModalInfoFromNode(node)); return; }
+      // 有图 → 与右上「查看大图」走同一图片信息弹窗；空图片卡（无输出图且无参考图，非文本卡）双击 → 弹文件选择器加载参考图
+      if (node.imageUrl) { openNodeImageModal(node.id, node.activeGeneratedIndex || 0); return; }
       if (node.type !== 'text-gen' && (!node.refImages || node.refImages.length === 0)) {
         this.openFilePickerForRef(node.id);
       }
@@ -152,8 +155,8 @@ class Interactions {
       return;
     }
     if ((e.target as Element).closest('.pcard-act') || (e.target as Element).closest('.port')) return;
-    // 卡内批次控件（展开按钮/扇形缩略图/上下切换）：点击不触发卡片拖拽与选中
-    if ((e.target as Element).closest('.pcard-expand, .fan-thumb, .image-gallery-nav')) return;
+    // 卡内批次控件（折叠叠图入口/展开缩略图/上下切换）：点击不触发卡片拖拽与选中
+    if ((e.target as Element).closest('.stack-layer, .fan-thumb, .image-gallery-nav')) return;
     this._lastNodeDragMoved = false; // 本次按下重置拖动守卫（随后 click 依据本次是否位移判定）
 
     const nodeId = cardEl.dataset.nodeId || '';
@@ -292,7 +295,13 @@ class Interactions {
     if (this._renderFrame !== null) return;
     this._renderFrame = requestAnimationFrame(() => {
       this._renderFrame = null;
-      cardView.renderAll();
+      const d = this.drag;
+      const nodeIds = d?.group && d.group.length > 1
+        ? d.group.map(n => n.id)
+        : (d?.nodeId ? [d.nodeId] : []);
+      // 拖动中只同步受影响卡片的几何属性；完整内容在 mouseup 的状态提交后统一刷新。
+      // 这样不会每帧为全部节点重建参考图缩略行（其中可能包含大型 data URL）。
+      cardView.updateDragGeometry(nodeIds);
       linkView.renderAll();
     });
   }
@@ -306,8 +315,6 @@ class Interactions {
       if (this._renderFrame !== null) {
         cancelAnimationFrame(this._renderFrame);
         this._renderFrame = null;
-        cardView.renderAll();
-        linkView.renderAll();
       }
       if (d.moved) {
         flowState.updatedAt = Date.now();
@@ -325,6 +332,7 @@ class Interactions {
 
     if (d.mode === 'pan') {
       canvasView.endPan();
+      floatingPanels.resumeAfterPan();
     }
 
     if (d.mode === 'connect') {
@@ -603,20 +611,70 @@ class Interactions {
       const files = Array.from(e.dataTransfer?.files || []);
 
       if (historySrc) {
-        this._dropImage(historySrc, world, e.clientX, e.clientY);
+        void this._dropImage(historySrc, world, e.clientX, e.clientY);
         return;
       }
       if (files.length > 0) {
-        const file = files.find(f => f.type.startsWith('image/'));
-        if (file) {
-          const reader = new FileReader();
-          reader.onload = (ev) => {
-            const src = ev.target?.result as string;
-            if (src) this._dropImage(src, world, e.clientX, e.clientY, file.name);
-          };
-          reader.readAsDataURL(file);
+        const imageFiles = files.filter(f => f.type.startsWith('image/'));
+        if (imageFiles.length > 0) {
+          // 在异步读取文件前命中一次目标卡，避免首张素材创建后，后续图片
+          // 被误判为投到了刚创建的素材卡上。
+          const targetNode = this._nodeAt(e.clientX, e.clientY);
+          if (targetNode && flowState.isAssetNode(targetNode)) {
+            showToast('素材节点不能添加参考图', false);
+            return;
+          }
+
+          // FileReader 与原图落盘都是异步操作；串行执行才能让 FileList 的第 N 张
+          // 严格对应模型请求里的第 N 张参考图（图 1 / 图 2 / 图 3）。
+          void this._dropFilesInOrder(imageFiles, world, e.clientX, e.clientY, targetNode);
         }
       }
+    });
+  }
+
+  /** 多文件按 FileList 原始顺序串行读取、落盘并挂载；绝不以异步完成顺序决定参考图顺序。 */
+  private async _dropFilesInOrder(
+    files: File[],
+    world: { x: number; y: number },
+    screenX: number,
+    screenY: number,
+    targetNode: FlowNode | null,
+  ): Promise<void> {
+    const columns = Math.min(3, files.length);
+    for (let index = 0; index < files.length; index += 1) {
+      const file = files[index];
+      const src = await this._readFileAsDataUrl(file);
+      if (!src) {
+        showToast(`图片加载失败：${file.name}`, false);
+        continue;
+      }
+      const col = index % columns;
+      const row = Math.floor(index / columns);
+      const offsetX = (col - (columns - 1) / 2) * (CARD_W + 48);
+      const offsetY = row * (IMAGE_CARD_MAX_H + 48);
+      await this._dropImage(
+        src,
+        { x: world.x + offsetX, y: world.y + offsetY },
+        screenX,
+        screenY,
+        file.name,
+        targetNode,
+        // 放到文本节点时，素材会按该节点左侧的网格排布；否则使用投放点网格。
+        targetNode?.type === 'text-gen'
+          ? { x: -col * (CARD_W + 48), y: offsetY }
+          : undefined,
+      );
+    }
+  }
+
+  private _readFileAsDataUrl(file: File): Promise<string | null> {
+    return new Promise(resolve => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(typeof reader.result === 'string' ? reader.result : null);
+      reader.onerror = () => resolve(null);
+      reader.onabort = () => resolve(null);
+      reader.readAsDataURL(file);
     });
   }
 
@@ -627,10 +685,22 @@ class Interactions {
    *   落到自建 image-gen 卡 → 追加参考图（现状保留）；
    *   空白处 → 建素材节点（image-gen + isAsset:true，整卡显图、角标「素材」、不可运行）。
    */
-  private _dropImage(src: string, world: { x: number; y: number }, screenX: number, screenY: number, _fileName?: string): void {
-    const targetNode = this._nodeAt(screenX, screenY);
-    const img = new Image();
-    img.onload = async () => {
+  private _dropImage(
+    src: string,
+    world: { x: number; y: number },
+    screenX: number,
+    screenY: number,
+    _fileName?: string,
+    targetNodeOverride?: FlowNode | null,
+    assetPositionOffset?: { x: number; y: number },
+  ): Promise<void> {
+    const targetNode = targetNodeOverride === undefined
+      ? this._nodeAt(screenX, screenY)
+      : targetNodeOverride;
+    return new Promise(resolve => {
+      const img = new Image();
+      img.onload = async () => {
+        try {
       const ratio = img.naturalWidth / img.naturalHeight;
       const r = ratio > 0 ? ratio : 4 / 3;
       const imported = _fileName ? await this._prepareImportedImage(src, _fileName) : { displayUrl: src, origin: null };
@@ -644,6 +714,8 @@ class Interactions {
         // 文本节点：自动建素材节点并连线（素材→文本；素材放文本左侧避免覆盖松手点）
         if (targetNode.type === 'text-gen') {
           const pos = this._assetPositionNear(targetNode, r);
+          pos.x += assetPositionOffset?.x ?? 0;
+          pos.y += assetPositionOffset?.y ?? 0;
           flowHistory.record();
           const assetNode = flowState.addNode('image-gen', pos.x, pos.y, {
             isAsset: true,
@@ -685,9 +757,18 @@ class Interactions {
       });
       selection.select(node.id);
       showToast('已创建素材节点');
-    };
-    img.onerror = () => showToast('图片加载失败', false);
-    img.src = src;
+        } catch {
+          showToast('图片处理失败', false);
+        } finally {
+          resolve();
+        }
+      };
+      img.onerror = () => {
+        showToast('图片加载失败', false);
+        resolve();
+      };
+      img.src = src;
+    });
   }
 
   /** 手动导入图片走与生成结果相同的双轨：卡片展示缩略图，原图只保留本地路径供查看。 */

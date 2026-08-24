@@ -19,6 +19,9 @@ class FloatingPanels {
   private _visible = false;
   /** 用于区分“切换选中节点”和“同一节点内部状态更新”，避免输入时反复弹出面板 */
   private _selectionKey = '';
+  /** 中键平移期间临时收起面板；结束时仅恢复原本已显示的面板。 */
+  private _suspendedForPan = false;
+  private _restoreAfterPan = false;
 
   constructor() {
     flowState.subscribe(() => this._revealOnSelectionChange());
@@ -53,6 +56,27 @@ class FloatingPanels {
   hide(): void {
     if (!this._visible) return;
     this._visible = false;
+    flowState.notify();
+  }
+
+  /** 开始平移画布：先收起已显示的上下悬浮框，避免它们滞后于画布而发生跳位。 */
+  suspendForPan(): void {
+    if (this._suspendedForPan) return;
+    this._suspendedForPan = true;
+    this._restoreAfterPan = this._visible;
+    if (!this._visible) return;
+    this._visible = false;
+    flowState.notify();
+  }
+
+  /** 结束平移：仅恢复开始前就已显示、且仍有单选节点的悬浮框。 */
+  resumeAfterPan(): void {
+    if (!this._suspendedForPan) return;
+    const shouldRestore = this._restoreAfterPan && !!selection.single();
+    this._suspendedForPan = false;
+    this._restoreAfterPan = false;
+    if (!shouldRestore) return;
+    this._visible = true;
     flowState.notify();
   }
 

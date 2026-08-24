@@ -20,9 +20,11 @@ def make_thumbnail_data_url(image_bytes: bytes, max_edge: int = 1024, quality: i
     """
     try:
         import io
-        from PIL import Image
+        from PIL import Image, ImageOps
 
-        img = Image.open(io.BytesIO(image_bytes))
+        # 浏览器会根据 JPEG 的 EXIF Orientation 自动旋转原图；缩略图也必须
+        # 先将该方向实际烘焙到像素中，否则卡片的比例虽正确、内容却会横竖颠倒。
+        img = ImageOps.exif_transpose(Image.open(io.BytesIO(image_bytes)))
         img.thumbnail((max_edge, max_edge), Image.Resampling.LANCZOS)
         buf = io.BytesIO()
         img.convert('RGB').save(buf, 'JPEG', quality=quality, optimize=True)
@@ -41,9 +43,10 @@ def make_thumbnail_data_url_from_file(image_path: str, max_edge: int = 1024, qua
     """
     try:
         import io
-        from PIL import Image
+        from PIL import Image, ImageOps
 
         with Image.open(image_path) as img:
+            img = ImageOps.exif_transpose(img)
             img.thumbnail((max_edge, max_edge), Image.Resampling.LANCZOS)
             buf = io.BytesIO()
             img.convert('RGB').save(buf, 'JPEG', quality=quality, optimize=True)
@@ -209,12 +212,12 @@ class ImageAPI:
     # ─────────────────────────────────────────
     def _generate_thumbnail(self, image_path, max_size=800):
         try:
-            from PIL import Image
+            from PIL import Image, ImageOps
             
             base_name = os.path.splitext(image_path)[0]
             thumb_path = f"{base_name}_thumb.jpg"
             
-            img = Image.open(image_path)
+            img = ImageOps.exif_transpose(Image.open(image_path))
             img.thumbnail((max_size, max_size), Image.Resampling.LANCZOS)
             img.convert('RGB').save(thumb_path, 'JPEG', quality=85, optimize=True)
             

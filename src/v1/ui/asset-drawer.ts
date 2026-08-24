@@ -1,7 +1,7 @@
 // src/v1/ui/asset-drawer.ts
-// 资产库抽屉（incremental-3，S3-S9）：只显示 AssetStore 中 adopted=true 的图（按 updatedAt 倒序）。
-// 数据源 = assetStore.getAdoptedAssets()；订阅 assetStore 即时刷新（X1 四处同步之一，S7）。
-// 卡片动作：取消采纳（X3 变更前 flowHistory.record()）/ 锁定·解锁 / 查看大图（复用 #img-modal）/
+// 资产库抽屉：显示已添加的图（按 updatedAt 倒序）。
+// 数据源 = assetStore.getAssets()；订阅 assetStore 即时刷新。
+// 卡片动作：移除（变更前 flowHistory.record()）/ 查看大图（复用 #img-modal）/
 //           复制配方（R2：一键复制 prompt 全文，无配方置灰）/
 //           拖入画布（复用 application/history-image 拖拽语义）。（复现入口已移除：配方信息保留即够用）
 // R2 配方信息区：prompt 摘要（1-2 行截断，title 全文）+ model · 比例 · 分辨率 chips；无配方显示缺失占位。
@@ -15,11 +15,8 @@ import { historyDrawer } from './history-drawer';
 import { openImageModal } from '../canvas/card-view';
 import { showToast } from './toast';
 
-const ICON_CHECK = '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>';
-const ICON_LOCK = '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>';
-
 /** 空态文案（共享知识 3：人话常量，禁止改字面量） */
-const EMPTY_TEXT = '还没有采纳的图。在画布或对比面板采纳满意的成图后，会出现在这里。';
+const EMPTY_TEXT = '还没有素材。可在画布或对比面板中添加图片到资产库。';
 /** 搜索无结果文案（共享知识 3） */
 const NO_MATCH_TEXT = '无匹配资产';
 
@@ -51,7 +48,7 @@ class AssetDrawer {
       this.render();
     });
 
-    // 订阅 AssetStore：任一采纳/锁定变更 → 资产库即时刷新（X1，S7：资产库与画布/历史/对比四处同步）
+    // 订阅 AssetStore：添加、移除或标签变更后即时刷新。
     this.unsubscribeAsset = assetStore.subscribe(() => this.render());
 
     this.render();
@@ -79,7 +76,7 @@ class AssetDrawer {
   /** 渲染：计数 / 空态 / 无匹配 / 卡片（S3/S6/S8；分批插入，避免大量大图一次阻塞 JS 主线程） */
   private render(): void {
     if (!this.grid) return;
-    const all = assetStore.getAdoptedAssets();
+    const all = assetStore.getAssets();
     if (this.countEl) this.countEl.textContent = `(${all.length})`;
 
     const filtered = this._filtered(all);
@@ -120,7 +117,7 @@ class AssetDrawer {
     }
   }
 
-  /** S8：按 prompt / model / tags 过滤已采纳图 */
+  /** 按 prompt / model / tags 过滤资产。 */
   private _filtered(all: AssetAsset[]): AssetAsset[] {
     const q = this.query;
     if (!q) return all;
@@ -133,7 +130,7 @@ class AssetDrawer {
     });
   }
 
-  /** 卡片：缩略图 + 配方信息区（R2）/ 采纳+锁定角标 / hover 动作（取消采纳·锁定·查看·复制配方）/ 拖入手势（S4） */
+  /** 卡片：缩略图 + 配方信息区 / 动作（移除·查看·复制配方）/ 拖入手势。 */
   private _renderCard(item: AssetAsset): void {
     if (!this.grid) return;
     const div = document.createElement('div');
@@ -144,11 +141,10 @@ class AssetDrawer {
     if (hasUrl) {
       div.draggable = true;
     } else {
-      // 旧记录无 imageUrl（incremental-2 写入）：图源缺失占位卡（可取消采纳/锁定，无缩略图、无可拖 URL）
+      // 旧记录无 imageUrl：图源缺失占位卡（可移除，无缩略图、无可拖 URL）
       div.classList.add('asset-missing');
     }
     div.title = new Date(item.record.updatedAt).toLocaleString('zh-CN');
-    const locked = item.record.locked;
     // R2：配方信息区（prompt 摘要 1-2 行截断 + model · 比例 · 分辨率 chips；无配方 → 缺失占位）
     const recipeMeta = this._recipeMeta(item);
     const recipeHtml = this._recipeHtml(recipeMeta);
@@ -158,13 +154,8 @@ class AssetDrawer {
         ${hasUrl ? '' : '<div class="asset-placeholder">图源缺失</div>'}
       </div>
       ${recipeHtml}
-      <div class="ht-badges">
-        <span class="ht-badge adopt" title="已采纳">${ICON_CHECK}</span>
-        ${locked ? `<span class="ht-badge lock" title="已锁定">${ICON_LOCK}</span>` : ''}
-      </div>
       <div class="ht-actions asset-actions">
-        <button class="ht-act" data-act="unadopt">取消采纳</button>
-        <button class="ht-act${locked ? ' on' : ''}" data-act="lock">${locked ? '已锁定' : '锁定'}</button>
+        <button class="ht-act" data-act="remove">移除</button>
         <button class="ht-act" data-act="view">查看</button>
         <button class="ht-act" data-act="copy"${hasRecipe ? '' : ' disabled title="配方缺失"'}>复制配方</button>
       </div>`;
@@ -179,22 +170,17 @@ class AssetDrawer {
       div.addEventListener('dragend', () => { div.style.opacity = ''; });
     }
 
-    // hover 动作（AssetStore 唯一写入口；X3 用户手势变更前 record）
+    // 卡片动作（AssetStore 唯一写入口；用户手势变更前记录撤销快照）
     div.addEventListener('click', (e: MouseEvent) => {
       const btn = (e.target as Element).closest('.ht-act') as HTMLElement | null;
       if (!btn) return;
       e.preventDefault();
       e.stopPropagation();
       const act = btn.dataset.act || '';
-      if (act === 'unadopt') {
-        flowHistory.record(); // X3：资产库取消采纳入撤销栈
-        assetStore.unadopt(item.record.key);
-        showToast('已取消采纳');
-      } else if (act === 'lock') {
-        flowHistory.record(); // X3：锁定变更入撤销栈
-        const nextLocked = !item.record.locked;
-        assetStore.setLocked(item.record.key, item.record.nodeId, nextLocked);
-        showToast(nextLocked ? '已锁定' : '已解锁');
+      if (act === 'remove') {
+        flowHistory.record();
+        assetStore.remove(item.record.key);
+        showToast('已从资产库移除');
       } else if (act === 'view') {
         // 查看大图：缩略图先显示 + 按需加载原图（有 originalPath 时桥接取原图，失败回退缩略图）
         if (hasUrl) this._viewImage(thumbUrl, item);

@@ -100,11 +100,11 @@ button:focus-visible, input[type="range"]:focus-visible, [tabindex]:focus-visibl
 }
 .left-capsule .capsule-btn:hover { background: var(--bg-hover); color: var(--text-1); }
 .left-capsule .capsule-btn.active { color: var(--accent); background: var(--accent-dim); }
-/* 资产库卡片单列（卡片动作含取消采纳/锁定/查看/复现四个，单列宽度才放得下；资产库不走瀑布流） */
+/* 资产库卡片单列（资产库不走瀑布流） */
 .asset-drawer .history-grid { display:grid; grid-template-columns:1fr; gap:10px; column-count:auto; }
 /* 资产库计数（side-head 右侧） */
 .asset-count { font-size:10.5px; color: var(--text-3); }
-/* 资产库旧记录无 imageUrl 的占位（可取消采纳/锁定，无缩略图；占位区在卡片内 .asset-card-img.no-img 居中） */
+/* 资产库旧记录无 imageUrl 的占位（可移除，无缩略图；占位区在卡片内 .asset-card-img.no-img 居中） */
 .asset-thumb.asset-missing .asset-card-img { background: var(--bg-hover); display:flex; align-items:center; justify-content:center; }
 .asset-placeholder { font-size:11px; color: var(--text-3); pointer-events:none; }
 .sidebar-left {
@@ -118,10 +118,14 @@ button:focus-visible, input[type="range"]:focus-visible, [tabindex]:focus-visibl
 }
 .side-head { padding:14px 16px 11px; font-size:12px; font-weight:600; color: var(--text-2); display:flex; align-items:center; justify-content:space-between; }
 .side-head span { letter-spacing:.04em; }
-/* 历史图库：自适应高度瀑布流（CSS columns；抽屉宽 ~280px → 2 列，不同比例图片自然参差；
-   卡片 break-inside:avoid 防止跨列断裂；列间距用 column-gap） */
-.history-grid { padding:0 14px 14px; overflow-y:auto; flex:1; column-count:2; column-gap:10px; }
-.history-grid > * { break-inside:avoid; }
+/* 历史图库：固定两列、从上往下逐行排列。
+   不用 CSS columns：分栏在高度溢出时会继续向右创建新列，导致图库需要横向浏览；
+   网格会始终在抽屉内向下延展，由自身承接纵向滚动。 */
+.history-grid {
+  padding:0 14px 14px; flex:1; min-height:0;
+  display:grid; grid-template-columns:repeat(2, minmax(0, 1fr)); gap:10px;
+  overflow-x:hidden; overflow-y:auto;
+}
 /* 成图卡：图片完整显示不裁切（内嵌 <img> 按原比例自适应高度），底部按钮行常驻；无固定 aspect-ratio */
 .history-thumb {
   position:relative; display:flex; flex-direction:column;
@@ -357,22 +361,22 @@ button:focus-visible, input[type="range"]:focus-visible, [tabindex]:focus-visibl
 .image-gallery-nav:hover:not(:disabled) { background:var(--accent-dim); }
 .image-gallery-nav:disabled { opacity:.35; cursor:default; }
 
-/* 多张结果图的叠放 deck：主图右侧露出后续图的层叠边（容器在 .pcard-img 之下，.pcard 无 overflow 裁剪）。
-   背层用画布底色描边模拟卡片间隔，微旋转 + 递减排版出"一叠图"的观感；指针穿透，不抢交互。 */
+/* 多张结果图的叠放 deck：主图右侧露出后续图的层叠边；露出的叠图本身可点击展开。
+   容器在 .pcard-img 之下，.pcard 无 overflow 裁剪。 */
 .pcard-stack { position:absolute; inset:0; pointer-events:none; }
 .pcard-stack .stack-layer {
   position:absolute; border-radius: var(--r-lg);
   background-size:cover; background-position:center; background-repeat:no-repeat;
-  border:2px solid var(--bg-app); box-shadow: var(--shadow-node);
-  transition: transform .28s ease;
+  border:2px solid var(--bg-app); box-shadow:var(--shadow-node); padding:0;
+  cursor:pointer; pointer-events:auto; transition:transform .28s ease, filter .15s ease;
 }
-.pcard-stack .stack-layer.s1 { top:6px; bottom:6px; left:9px; right:-9px; transform: rotate(1.1deg); filter: brightness(.96); }
-.pcard-stack .stack-layer.s2 { top:12px; bottom:12px; left:18px; right:-18px; transform: rotate(2.2deg); filter: brightness(.92); }
+.pcard-stack .stack-layer.s1 { top:6px; bottom:6px; left:9px; right:-9px; transform:rotate(1.1deg); filter:brightness(.96); }
+.pcard-stack .stack-layer.s2 { top:12px; bottom:12px; left:18px; right:-18px; transform:rotate(2.2deg); filter:brightness(.92); }
 /* hover 微展开：背层外扩 + 转角加大，提示"下面还有图" */
-.pcard:hover .pcard-stack .stack-layer.s1 { transform: rotate(2deg) translate(4px, -2px); }
-.pcard:hover .pcard-stack .stack-layer.s2 { transform: rotate(3.8deg) translate(9px, -4px); }
+.pcard:hover .pcard-stack .stack-layer.s1 { transform:rotate(2deg) translate(4px, -2px); }
+.pcard:hover .pcard-stack .stack-layer.s2 { transform:rotate(3.8deg) translate(9px, -4px); }
 
-/* 展开态缩略图：每列最多三张，超出向右新增列，避免十几张横向拉成一长条。 */
+/* 展开态缩略图：每列最多三张，超出向右新增列，保持整齐清晰。 */
 .pcard.has-fan { z-index: 15; }
 .pcard-fan {
   position:absolute; left:calc(100% + 12px); top:50%; transform:translateY(-50%);
@@ -380,34 +384,19 @@ button:focus-visible, input[type="range"]:focus-visible, [tabindex]:focus-visibl
   align-items:center; gap:10px; pointer-events:auto;
 }
 .fan-thumb {
-  width:118px; flex:0 0 auto; border-radius: var(--r-md);
+  width:118px; flex:0 0 auto; border-radius:var(--r-md);
   background-size:cover; background-position:center; background-repeat:no-repeat;
   border:2px solid var(--bg-panel); box-shadow: var(--shadow-bar);
-  cursor:pointer; transition: transform .18s ease, box-shadow .18s ease, border-color .18s ease;
+  cursor:pointer; transition:transform .18s ease, box-shadow .18s ease, border-color .18s ease;
   animation: fanIn .26s cubic-bezier(.2,.9,.3,1.15) backwards;
   animation-delay:var(--fan-delay, 0ms);
 }
-.fan-thumb:hover { transform: translateY(-5px) scale(1.045); box-shadow: 0 10px 26px rgba(60,54,46,.2); }
+.fan-thumb:hover { transform:translateY(-5px) scale(1.045); box-shadow:0 10px 26px rgba(60,54,46,.2); }
 .fan-thumb.active { border-color: var(--accent); }
-@keyframes fanIn { from { opacity:0; transform: translateX(-16px) scale(.9); } to { opacity:1; transform:none; } }
+@keyframes fanIn { from { opacity:0; transform:translateX(-16px) scale(.9); } to { opacity:1; transform:none; } }
 .pcard-fan.is-closing { pointer-events:none; }
 .pcard-fan.is-closing .fan-thumb { animation:fanOut .22s cubic-bezier(.4,0,.8,.4) both; animation-delay:0ms; }
 @keyframes fanOut { from { opacity:1; transform:none; } to { opacity:0; transform:translateX(-14px) scale(.9); } }
-
-/* 「展开 N / 收起」按钮：批次卡右下角，点击在卡片右侧就地展开缩略图排列；风格沿用卡片悬浮 chip（pcard-tag/pcard-act 同款） */
-.pcard-expand {
-  position:absolute; right:6px; bottom:6px; z-index:5;
-  display:inline-flex; align-items:center; gap:4px;
-  padding:4px 10px; border:none; border-radius:999px;
-  background: rgba(255,253,250,.88); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
-  color:#4A443C; font-size:10px; font-weight:600; letter-spacing:.02em; cursor:pointer;
-  box-shadow: 0 1px 4px rgba(60,50,40,.12);
-}
-.pcard-expand:hover { background:#FFFDFA; }
-/* 尺寸标注让位：有「展开 N / 收起」按钮时上移到按钮之上 */
-.pcard.has-deck .pcard-size { bottom:30px; }
-/* 失败横幅独占底部时隐藏展开按钮（与缩略行/尺寸标注同口径） */
-.pcard[data-status="fail"] .pcard-expand { display:none; }
 
 /* 端口：视觉小、热区大（::after 扩展到 25px）；支持拖线（手动连线 P0） */
 .port {
@@ -844,6 +833,21 @@ button:focus-visible, input[type="range"]:focus-visible, [tabindex]:focus-visibl
   max-width:100%; max-height:100%;
   border-radius: var(--r-md); box-shadow: var(--shadow-bar); cursor:default;
 }
+.img-modal-nav { position:absolute; inset:0; z-index:2; pointer-events:none; }
+.img-modal-nav-btn {
+  position:absolute; top:50%; transform:translateY(-50%); width:42px; height:42px;
+  display:flex; align-items:center; justify-content:center; border:1px solid rgba(255,255,255,.42); border-radius:50%;
+  background:rgba(30,27,23,.6); backdrop-filter:blur(8px); color:#fff; font:32px/1 var(--font); cursor:pointer;
+  pointer-events:auto; transition:background .15s, transform .15s, opacity .15s;
+}
+.img-modal-nav-btn.prev { left:16px; }
+.img-modal-nav-btn.next { right:16px; }
+.img-modal-nav-btn:hover:not(:disabled) { background:rgba(30,27,23,.82); transform:translateY(-50%) scale(1.08); }
+.img-modal-nav-btn:disabled { opacity:.3; cursor:default; }
+.img-modal-count {
+  position:absolute; left:50%; bottom:14px; transform:translateX(-50%); padding:5px 10px; border-radius:999px;
+  background:rgba(30,27,23,.64); color:#fff; font-size:11px; pointer-events:none;
+}
 .img-modal-loading {
   position:absolute; top:50%; left:50%; transform:translate(-50%,-50%);
   padding:8px 16px; border-radius: var(--r-md); background: rgba(20,18,15,.78);
@@ -1159,7 +1163,7 @@ button:focus-visible, input[type="range"]:focus-visible, [tabindex]:focus-visibl
 .history-tab-count { font-size:10px; opacity:.7; }
 .history-empty { padding:18px 0; text-align:center; color: var(--text-3); font-size:11.5px; }
 
-/* 历史图库：成图卡角标（采纳/锁定） */
+/* 历史图库：成图卡角标（旧样式保留给其他状态） */
 .history-thumb { position:relative; }
 .ht-badges { position:absolute; top:5px; right:5px; display:flex; flex-direction:column; gap:3px; pointer-events:none; }
 .ht-badge {
@@ -1169,7 +1173,7 @@ button:focus-visible, input[type="range"]:focus-visible, [tabindex]:focus-visibl
 .ht-badge.adopt { background: var(--st-done); }
 .ht-badge.lock { background: var(--warm); }
 
-/* 历史图库：hover 动作条（资产库复用：取消采纳/锁定/查看/复制配方/复现，A6/B2/B3） */
+/* 历史图库：hover 动作条（资产库复用：移除/查看/复制配方） */
 .ht-actions {
   position:absolute; left:4px; right:4px; bottom:4px; display:flex; gap:3px;
   opacity:0; transform: translateY(4px); transition: all .15s; pointer-events:none;
@@ -1284,7 +1288,7 @@ button:focus-visible, input[type="range"]:focus-visible, [tabindex]:focus-visibl
   font-size:10.5px; color: var(--text-3); padding:7px 9px;
   border-top:1px solid var(--border-soft); background: var(--bg-panel);
 }
-/* 资产卡片 hover 动作：5 个按钮（取消采纳/锁定/查看/复制配方/复现）单行放得下 */
+/* 资产卡片动作条 */
 .asset-drawer .ht-actions { gap:2px; }
 .asset-drawer .ht-act { font-size:9.5px; padding:3px 0; }
 /* 复制配方按钮：无配方置灰（disabled） */

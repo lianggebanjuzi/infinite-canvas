@@ -1,9 +1,7 @@
 // src/v1/ui/history-drawer.ts
 // 左侧悬浮历史图库抽屉 + 拖入手势（改造自 src/components/history-sidebar.ts）
 // 增量（成图库收口）：B1 成图/文本分区 tab（默认成图）；B5 搜索（prompt/model/tags 过滤成图，outputText 过滤文本）
-//   B2/B3 采纳/锁定动作 + 角标（同一 AssetStore，X1 同步之一）
-// incremental-3 拆分（S1/S2）：历史图库专注「全部出图/文本记录」——移除采纳/锁定 hover 动作，
-//   保留只读角标（已采纳/已锁定，天然不可点）；复制提示词/拖入画布/搜索/tab 全部保留；
+// 历史图库专注「全部出图/文本记录」；复制提示词/拖入画布/搜索/tab 全部保留；
 //   新增 setMutex（互斥回调，由 main.ts 编排，不内部 import 资产抽屉）与 getEntryByImageUrl（资产库配方反查）。
 //   （复现入口已于 2026-08-20 移除：配方信息保留即够用，见当日 memory）
 // 生成图自动加入（addImage 带搜索元数据）；拖拽缩略图到画布触发 A4 语义（由 interactions 处理落点）。
@@ -64,9 +62,6 @@ export interface HistoryImageMeta {
   height?: number;          // 原图真实像素高
 }
 
-const ICON_CHECK = '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>';
-const ICON_LOCK = '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>';
-
 class HistoryDrawer {
   private items: HistoryItem[] = [];
   private open = false;
@@ -105,7 +100,7 @@ class HistoryDrawer {
       });
     });
 
-    // 订阅 AssetStore：采纳/锁定变更 → 图库只读角标即时刷新（X1 同步之一）
+    // 订阅 AssetStore：资产标签变化时刷新搜索结果。
     this.unsubscribeAsset = assetStore.subscribe(() => this.render());
 
     this.render();
@@ -218,7 +213,7 @@ class HistoryDrawer {
     this.drawer?.classList.toggle('open', open);
   }
 
-  /** 过滤 + 渲染（tab / 搜索 / 采纳锁定角标 / hover 动作；恒按时间平铺；分批插入，避免大量大图一次阻塞 JS 主线程） */
+  /** 过滤 + 渲染（tab / 搜索 / hover 动作；恒按时间平铺；分批插入，避免大量大图一次阻塞 JS 主线程） */
   private render(): void {
     this._syncTabCounts();
     if (!this.grid) return;
@@ -313,7 +308,7 @@ class HistoryDrawer {
     this.grid.appendChild(div);
   }
 
-  /** 成图卡：图片完整显示（不裁切）+ 只读角标（S2）+ 底部常驻按钮行（复制提示词；无 prompt 不渲染）+ 拖入手势 + 点击查看大图 */
+  /** 成图卡：图片完整显示（不裁切）+ 底部常驻按钮行（复制提示词；无 prompt 不渲染）+ 拖入手势 + 点击查看大图 */
   private _renderImageItem(item: HistoryItem): void {
     if (!this.grid) return;
     const div = document.createElement('div');
@@ -321,15 +316,9 @@ class HistoryDrawer {
     div.draggable = true;
     div.title = new Date(item.timestamp).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
 
-    const adopted = item.src ? assetStore.isAdoptedByImageUrl(item.src) : false;
-    const locked = item.src ? assetStore.isLockedByImageUrl(item.src) : false;
     const hasPrompt = !!(item.prompt || '').trim();
     div.innerHTML = `
       <div class="ht-media"><img class="ht-img" src="${escapeAttr(item.src)}" alt="" draggable="false" loading="lazy"></div>
-      <div class="ht-badges">
-        ${adopted ? `<span class="ht-badge adopt" title="已采纳">${ICON_CHECK}</span>` : ''}
-        ${locked ? `<span class="ht-badge lock" title="已锁定">${ICON_LOCK}</span>` : ''}
-      </div>
       ${hasPrompt ? `
       <div class="ht-actions ht-actions-static">
         <button class="ht-act" data-act="copy">复制提示词</button>

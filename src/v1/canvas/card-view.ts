@@ -10,7 +10,6 @@ import { CARD_W, IMAGE_CARD_MAX_H, TEXT_CARD_MAX_H, imageCardHeight } from './ca
 import { interactions } from './interactions';
 import { applyCardStatus } from '../ui/status-visuals';
 import { showToast } from '../ui/toast';
-import { resultViewer } from '../ui/result-viewer';
 import { assetStore } from '../asset-store';
 import { Backend } from '../api';
 
@@ -45,6 +44,26 @@ class CardView {
 
   getEl(id: string): HTMLElement | undefined {
     return this.els.get(id);
+  }
+
+  /**
+   * 拖拽中的轻量几何同步：仅改动被拖节点的位置/尺寸，不扫描节点内容或重算参考图缩略行。
+   * 参考图 data URL 较大，逐帧调用 renderAll 会造成不必要的字符串拼接和样式计算。
+   */
+  updateDragGeometry(nodeIds: Iterable<string>): void {
+    for (const id of nodeIds) {
+      const node = flowState.getNode(id);
+      const el = this.els.get(id);
+      if (!node || !el) continue;
+      el.style.left = node.x + 'px';
+      el.style.top = node.y + 'px';
+      el.style.width = (node.w ?? CARD_W) + 'px';
+      const img = el.querySelector('.pcard-img') as HTMLElement | null;
+      if (img) {
+        const isTextNode = node.type === 'text-gen' || node.type === 'text-split';
+        img.style.height = (isTextNode ? (node.h ?? this.cardHeight(node)) : this.cardHeight(node)) + 'px';
+      }
+    }
   }
 
   renderAll(): void {
@@ -126,17 +145,13 @@ class CardView {
 
   private _bindGalleryEvents(el: HTMLElement, nodeId: string): void {
     el.addEventListener('click', (e: MouseEvent) => {
-      // 「展开 N / 收起」：切换卡片右侧的扇形缩略图排列（就地展开，不再弹结果查看器）
-      const expandBtn = (e.target as Element).closest('.pcard-expand') as HTMLElement | null;
+      // 点击右侧露出的折叠叠图：展开所有结果（不额外放「多图」按钮）。
+      const expandBtn = (e.target as Element).closest('.stack-layer') as HTMLElement | null;
       if (expandBtn) {
         e.preventDefault(); e.stopPropagation();
         const node = flowState.getNode(nodeId);
         if (!node) return;
         if (this._closingFans.has(nodeId)) return;
-        if (this._expandedFans.has(nodeId)) {
-          this._collapseFan(nodeId, node);
-          return;
-        }
         this._expandedFans.add(nodeId);
         this._contentFingerprint.delete(nodeId); // 扇形态不在指纹里，强制重建
         const cardEl = this.els.get(nodeId);
@@ -187,6 +202,14 @@ class CardView {
       const currentEl = this.els.get(nodeId);
       if (current && currentEl) this.updateCard(currentEl, current);
     }, 230);
+  }
+
+  /** 点击画布空白处时收起所有已展开的多图扇形。 */
+  collapseAllFans(): void {
+    [...this._expandedFans].forEach(nodeId => {
+      const node = flowState.getNode(nodeId);
+      if (node) this._collapseFan(nodeId, node);
+    });
   }
 
   /** 拆分卡全部在卡内编辑，避免挤占图片节点的指令面板。 */
@@ -262,15 +285,15 @@ class CardView {
     });
   }
 
-  /** 将当前图片保存到资产库；画布节点不再提供采纳/锁定切换入口。 */
+  /** 将当前图片添加到资产库。 */
   private _addToAssetLibrary(nodeId: string): void {
     const node = flowState.getNode(nodeId);
     if (!node || !node.imageUrl) return;
     const url = node.imageUrl;
-    if (assetStore.isAdoptedByImageUrl(url)) return;
+    if (assetStore.isAddedByImageUrl(url)) return;
     flowHistory.record(); // 用户手势入口：变更前入撤销栈（X3）
     // AssetStore 保持既有资产持久化和去重语义；此处只暴露“添加到资产库”的用户动作。
-    assetStore.adoptByUrl(url, node.id, assetStore.metaFromNode(node), node.imageOrigin?.path);
+    assetStore.addByUrl(url, node.id, assetStore.metaFromNode(node), node.imageOrigin?.path);
     showToast('已添加到资产库');
   }
 
@@ -308,8 +331,8 @@ class CardView {
     const title = node.title || '节点';
     const text = node.outputText || '';
     // 资产库状态纳入指纹，添加后立即重建按钮状态。
-    const adopted = !!mainSrc && assetStore.isAdoptedByImageUrl(mainSrc);
-    const assetState = adopted ? 'added' : '';
+    const added = !!mainSrc && assetStore.isAddedByImageUrl(mainSrc);
+    const assetState = added ? 'added' : '';
     // P1（W2-5）：文本节点空态引导——有图片上游（可反推）时给轻量提示
     const emptyHint = isTextGen && flowState.getReferenceImages(node.id).length > 0
       ? '已连接上游图，可反推'
@@ -340,7 +363,7 @@ class CardView {
         && activeEl.matches('.split-input, .split-delimiter') && el.dataset.splitRebuild !== '1';
       if (img && this._editingNodeId !== node.id && !splitTyping) {
         if (isTextSplit) delete el.dataset.splitRebuild;
-        // 多张结果图两种形态：折叠 = 叠放 deck（主图右缘露后续 1~2 张层叠边）；展开 = 右侧扇形一排缩略图。
+        // 多张结果图两种形态：折叠 = 右侧露出的可点击叠图；展开 = 右侧规整缩略图列。
         // 容器都是 .pcard-stack（在 .pcard-img 之下、.pcard 无 overflow 裁剪，扇形排用 pointer-events:auto 恢复交互）。
         const fanOpen = !isTextGen && !isTextSplit && !!mainSrc && galleryImages.length > 1 && this._expandedFans.has(node.id);
         const fanClosing = !isTextGen && !isTextSplit && !!mainSrc && galleryImages.length > 1 && this._closingFans.has(node.id);
@@ -369,10 +392,7 @@ class CardView {
           // C-3：批次卡显示「第 x/N 张」+ 批次摘要（成功 x/y，仅部分失败时提示）+ 上下切换
           const gallerySummary = this._gallerySummary(node);
           const imageGallery = galleryImages.length > 1 ? `<div class="image-gallery-controls"><button class="image-gallery-nav" data-dir="-1" ${galleryIndex === 0 ? 'disabled' : ''}>↑</button><span class="image-gallery-count">${galleryIndex + 1} / ${galleryImages.length}${gallerySummary ? `<b class="image-gallery-summary">${gallerySummary}</b>` : ''}</span><button class="image-gallery-nav" data-dir="1" ${galleryIndex >= galleryImages.length - 1 ? 'disabled' : ''}>↓</button></div>` : '';
-          const expandChip = (showDeck || fanVisible)
-            ? `<button class="pcard-expand" type="button" ${fanClosing ? 'disabled' : ''} title="${fanClosing ? '正在收起' : (fanOpen ? '收起排列' : `展开全部 ${galleryImages.length} 张`)}">${fanOpen ? '收起' : `展开 ${galleryImages.length}`}</button>`
-            : '';
-          img.innerHTML = `<div class="ph" style="background-image:url('${escapeUrl(mainSrc)}')"></div><div class="scan"></div>${refStrip}${sizeHtml}${imageGallery}${expandChip}`;
+          img.innerHTML = `<div class="ph" style="background-image:url('${escapeUrl(mainSrc)}')"></div><div class="scan"></div>${refStrip}${sizeHtml}${imageGallery}`;
         } else {
           img.innerHTML = `<div class="ph"><div class="ph-empty">${emptyContent()}</div></div><div class="scan"></div>${refStrip}`;
         }
@@ -403,31 +423,23 @@ class CardView {
     el.classList.toggle('selected', selection.isSelected(node.id));
     el.classList.toggle('pcard-asset', isAsset); // 素材态：细边框视觉（判分支 #9）
     el.classList.toggle('pcard-tall-image', isTallImage);
-    // 叠放/扇形态：尺寸标注让位「展开 N / 收起」按钮（CSS 里 .has-deck .pcard-size 上移）；
-    // .has-fan 抬升卡片层级，扇形排浮于邻近卡片之上
+    // .has-fan 抬升卡片层级，让展开的缩略图列浮于邻近卡片之上。
     const batchUi = !isTextGen && !isTextSplit && !!mainSrc && galleryImages.length > 1;
-    el.classList.toggle('has-deck', batchUi);
     el.classList.toggle('has-fan', batchUi && (this._expandedFans.has(node.id) || this._closingFans.has(node.id)));
 
     const assetAdd = el.querySelector('.pcard-act.asset-add') as HTMLButtonElement | null;
     if (assetAdd) {
-      assetAdd.disabled = !mainSrc || adopted;
-      assetAdd.title = adopted ? '已添加到资产库' : '添加到资产库';
-      assetAdd.classList.toggle('added', adopted);
+      assetAdd.disabled = !mainSrc || added;
+      assetAdd.title = added ? '已添加到资产库' : '添加到资产库';
+      assetAdd.classList.toggle('added', added);
     }
 
-    // 查看大图（C-3：批次节点打开结果查看器；单图走原图按需加载 modal）
+    // 查看大图：与双击卡片统一走图片信息弹窗；多图时可在弹窗内翻页。
     const act = el.querySelector('.pcard-act') as HTMLButtonElement | null;
     if (act) {
       act.onclick = (e: MouseEvent) => {
         e.stopPropagation();
-        if (mainSrc) {
-          if ((node.generatedImages?.length || 0) > 1) {
-            resultViewer.open(node.id, node.activeGeneratedIndex || 0);
-          } else {
-            void openImageModal(mainSrc, node.imageOrigin, { width: node.imageWidth, height: node.imageHeight }, imageModalInfoFromNode(node));
-          }
-        }
+        if (mainSrc) void openNodeImageModal(node.id, node.activeGeneratedIndex || 0);
       };
     }
   }
@@ -550,18 +562,18 @@ class CardView {
   }
 
   /**
-   * 叠放 deck 背层：取当前封面之后的 1~2 张作为露边层（循环取模，切换封面时 deck 跟着轮转）。
+   * 折叠态叠图：露出后续图片的边缘；露出的图层本身就是展开入口。
    * 层数 = min(2, 总数-1)；2 张图只露 1 层。s2 先渲染（压在 s1 之下）。
    */
   private _deckLayersHtml(images: GeneratedImageItem[], index: number): string {
     const len = images.length;
     const l1 = images[(index + 1) % len];
     const l2 = len > 2 ? images[(index + 2) % len] : null;
-    return `${l2 ? `<div class="stack-layer s2" style="background-image:url('${escapeUrl(l2.url)}')"></div>` : ''}<div class="stack-layer s1" style="background-image:url('${escapeUrl(l1.url)}')"></div>`;
+    return `${l2 ? `<button class="stack-layer s2" type="button" title="展开 ${len} 张结果" aria-label="展开 ${len} 张结果" style="background-image:url('${escapeUrl(l2.url)}')"></button>` : ''}<button class="stack-layer s1" type="button" title="展开 ${len} 张结果" aria-label="展开 ${len} 张结果" style="background-image:url('${escapeUrl(l1.url)}')"></button>`;
   }
 
   /**
-   * 展开态缩略图：每列最多三张，超出则向右新增一列（错峰入场；当前封面 accent 描边）。
+   * 展开态缩略图：按列规整排列（当前封面 accent 描边）。
    * 点缩略图 = 设为封面但保持展开（事件见 _bindGalleryEvents）。ratio = 卡片宽高比，缩略图保持同比例。
    */
   private _fanStripHtml(images: GeneratedImageItem[], activeIndex: number, ratio: number, closing = false): string {
@@ -648,6 +660,16 @@ export interface ImageModalInfo {
   prompt?: string;
 }
 
+interface ImageModalNavigation {
+  index: number;
+  total: number;
+  onPrev: () => void;
+  onNext: () => void;
+}
+
+/** 当前图片弹窗请求号：切换图片或关闭后，较早的原图异步加载不得覆盖当前内容。 */
+let imageModalRequest = 0;
+
 /** 由节点合成大图信息栏数据：trace（实际生成档案）优先，params 兜底（旧节点无 trace） */
 export function imageModalInfoFromNode(node: FlowNode): ImageModalInfo {
   const p = (node.params || {}) as unknown as StyleTransferParams;
@@ -659,6 +681,38 @@ export function imageModalInfoFromNode(node: FlowNode): ImageModalInfo {
     resolution: t?.resolution || p.resolution,
     prompt: t?.prompt || p.prompt,
   };
+}
+
+/**
+ * 由节点打开图片信息弹窗：单图与多图共用同一查看体验；多图在弹窗内左右翻页，
+ * 不改变画布卡片当前封面，避免“查看”行为意外修改画布状态。
+ */
+export function openNodeImageModal(nodeId: string, index?: number): void {
+  const node = flowState.getNode(nodeId);
+  if (!node || !node.imageUrl) return;
+  const generated = Array.isArray(node.generatedImages) ? node.generatedImages.filter(item => !!item?.url) : [];
+  const items = generated.length > 0
+    ? generated
+    : [{
+        url: node.imageUrl,
+        prompt: imageModalInfoFromNode(node).prompt || '',
+        origin: node.imageOrigin,
+        width: node.imageWidth,
+        height: node.imageHeight,
+      }];
+  const current = Math.min(Math.max(0, index ?? node.activeGeneratedIndex ?? 0), items.length - 1);
+  const item = items[current];
+  const nodeInfo = imageModalInfoFromNode(node);
+  const info: ImageModalInfo = { ...nodeInfo, prompt: item.prompt || nodeInfo.prompt };
+  const navigation: ImageModalNavigation | undefined = items.length > 1
+    ? {
+        index: current,
+        total: items.length,
+        onPrev: () => openNodeImageModal(nodeId, Math.max(0, current - 1)),
+        onNext: () => openNodeImageModal(nodeId, Math.min(items.length - 1, current + 1)),
+      }
+    : undefined;
+  void openImageModal(item.url, item.origin, { width: item.width, height: item.height }, info, navigation);
 }
 
 /**
@@ -674,11 +728,13 @@ export async function openImageModal(
   origin?: { path?: string; url?: string } | null,
   dims?: { width?: number; height?: number },
   info?: ImageModalInfo,
+  navigation?: ImageModalNavigation,
 ): Promise<void> {
   const modal = document.getElementById('img-modal') as HTMLElement | null;
   const img = document.getElementById('img-modal-img') as HTMLImageElement | null;
   const loading = document.getElementById('img-modal-loading') as HTMLElement | null;
   if (!modal || !img) return;
+  const request = ++imageModalRequest;
 
   // 信息栏：渲染字段行（缺失字段 → '—'）；返回「分辨率」value 元素供原图加载后更新真实像素
   const resValueEl = renderModalInfo(info, dims);
@@ -694,18 +750,43 @@ export async function openImageModal(
     }
     // 未加载原图：保留 dims/info 初值（下方设置），不因缩略图 onload 覆盖
   };
-  img.onload = refreshMeta;
+  img.onload = () => {
+    if (request === imageModalRequest) refreshMeta();
+  };
 
   // 1. 先显示缩略图（几十 KB 秒开）+ loading
   img.src = src;
   modal.classList.add('show');
+  modal.focus({ preventScroll: true });
   if (loading) loading.style.display = 'flex';
 
-  const close = (): void => modal.classList.remove('show');
+  const prevBtn = document.getElementById('img-modal-prev') as HTMLButtonElement | null;
+  const nextBtn = document.getElementById('img-modal-next') as HTMLButtonElement | null;
+  const countEl = document.getElementById('img-modal-count') as HTMLElement | null;
+  const hasNavigation = !!navigation && navigation.total > 1;
+  if (prevBtn) {
+    prevBtn.style.display = hasNavigation ? 'flex' : 'none';
+    prevBtn.disabled = !hasNavigation || navigation!.index <= 0;
+    prevBtn.onclick = (e: MouseEvent) => { e.stopPropagation(); navigation?.onPrev(); };
+  }
+  if (nextBtn) {
+    nextBtn.style.display = hasNavigation ? 'flex' : 'none';
+    nextBtn.disabled = !hasNavigation || navigation!.index >= navigation!.total - 1;
+    nextBtn.onclick = (e: MouseEvent) => { e.stopPropagation(); navigation?.onNext(); };
+  }
+  if (countEl) {
+    countEl.textContent = hasNavigation ? `${navigation!.index + 1} / ${navigation!.total}` : '';
+    countEl.style.display = hasNavigation ? 'block' : 'none';
+  }
+
+  const close = (): void => {
+    imageModalRequest++;
+    modal.classList.remove('show');
+  };
   // 关闭：点背景（含右侧大图区）或右上 ×；信息栏内点击不关闭
   modal.onclick = (e: MouseEvent) => {
     const t = e.target as Element;
-    if (t === modal || t.closest('.img-modal-stage')) close();
+    if (t === modal || (t.closest('.img-modal-stage') && !t.closest('.img-modal-nav'))) close();
   };
   const closeBtn = document.getElementById('img-modal-close') as HTMLElement | null;
   if (closeBtn) {
@@ -714,6 +795,11 @@ export async function openImageModal(
       close();
     };
   }
+  modal.onkeydown = (e: KeyboardEvent) => {
+    if (e.key === 'Escape') { e.preventDefault(); close(); return; }
+    if (e.key === 'ArrowLeft' && hasNavigation && navigation!.index > 0) { e.preventDefault(); navigation!.onPrev(); return; }
+    if (e.key === 'ArrowRight' && hasNavigation && navigation!.index < navigation!.total - 1) { e.preventDefault(); navigation!.onNext(); }
+  };
 
   // 2. 无原图引用（旧节点/旧历史 base64 直显）→ 直接完成（标注仅依赖 dims/info）
   const path = origin?.path;
@@ -725,6 +811,7 @@ export async function openImageModal(
   // 3. 按需加载原图：桥接取原图 base64，一次性替换，失败回退缩略图
   try {
     const res = await Backend.loadLocalImage(path);
+    if (request !== imageModalRequest) return;
     if (res.status === 'success' && res.data_url) {
       showedOriginal = true; // 先置位再换 src，onload 时用自然尺寸更新分辨率
       img.src = res.data_url;
@@ -732,9 +819,9 @@ export async function openImageModal(
       showToast('原图加载失败，已显示缩略图', false);
     }
   } catch {
-    showToast('原图加载失败，已显示缩略图', false);
+    if (request === imageModalRequest) showToast('原图加载失败，已显示缩略图', false);
   } finally {
-    if (loading) loading.style.display = 'none';
+    if (request === imageModalRequest && loading) loading.style.display = 'none';
   }
 }
 

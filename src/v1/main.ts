@@ -353,7 +353,7 @@ async function init(): Promise<void> {
   taskPanel.init();
   resultViewer.init();
 
-  // 资产索引（采纳/锁定单一数据源；X1 三处订阅）
+  // 资产库索引（单一数据源）
   assetStore.init();
 
   bindKeyboard();

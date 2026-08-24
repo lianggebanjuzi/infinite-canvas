@@ -7,7 +7,11 @@ import { DEFAULT_CHAT_MODEL_KEY } from './nodes/text-gen';
 
 function isModelReady(provider: BackendProvider, key: BackendProviderKey, model: BackendModel, kind: 'chat' | 'drawing' | 'video'): boolean {
   const url = kind === 'chat' ? (provider.text_api_url || provider.api_url) : provider.api_url;
-  const apiKey = model.api_key || provider.global_keys?.[kind] || key.api_key;
+  // 密钥按能力类型取值：模型专用 → 同类型全局 → 旧配置迁移来的同类型账户通道。
+  // 禁止直接回退 key.api_key，避免图像模型误用对话账户的通用 Key。
+  const channel = key.channels?.[kind];
+  const channelKey = channel?.enabled !== false ? channel?.api_key : '';
+  const apiKey = model.api_key || provider.global_keys?.[kind] || channelKey;
   return Boolean(url?.trim()) && Boolean(apiKey?.trim());
 }
 
@@ -247,7 +251,7 @@ export const Backend = {
     return (await API.loadHistory()) as BackendHistoryResult;
   },
 
-  // ── 可变资产索引（采纳/锁定/tags/category） ──
+  // ── 资产库索引（添加素材/tags/category） ──
   async saveAssets(records: ImageAssetRecord[]): Promise<BackendAssetsResult> {
     return (await API.saveAssets(records)) as BackendAssetsResult;
   },

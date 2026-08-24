@@ -136,7 +136,7 @@ interface BackendHistoryResult {
   entries?: HistoryEntry[];
 }
 
-/** save_assets / load_assets 返回（可变资产索引：采纳/锁定/tags/category） */
+/** save_assets / load_assets 返回（资产库：添加素材/tags/category） */
 interface BackendAssetsResult {
   status: string;            // success | empty | error
   degraded?: boolean;        // incremental-3：save_assets 降级写入 fallback 目录（未配置图片保存路径）

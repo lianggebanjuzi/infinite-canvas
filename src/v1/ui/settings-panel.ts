@@ -187,7 +187,7 @@ class SettingsPanel {
 
     const hint = document.createElement('div');
     hint.className = 'settings-hint';
-    hint.textContent = '生成图片与采纳的资产将保存到此目录。未设置时生成图仅临时可用、不落盘。';
+    hint.textContent = '生成图片与资产库素材将保存到此目录。未设置时生成图仅临时可用、不落盘。';
     wrap.appendChild(hint);
 
     // 选择文件夹：调 select_folder() 后回填输入框（P1）
@@ -382,7 +382,7 @@ class SettingsPanel {
       input.className = 'settings-input';
       input.type = 'password';
       input.value = globalKeys[kind];
-      input.placeholder = '未填写时使用模型单独 Key 或备用 Key';
+      input.placeholder = '留空时该类型模型需填写专用 Key';
       input.spellcheck = false;
       input.addEventListener('change', () => {
         globalKeys[kind] = input.value;
@@ -445,7 +445,7 @@ class SettingsPanel {
     const modelHint = document.createElement('div');
     modelHint.className = 'settings-hint';
     modelHint.textContent = fluxPortMode
-      ? 'URL 与全局 Key 在上方统一配置；模型可单独填写覆盖 Key；仅可选择常用模型。'
+      ? '图像、对话、视频 Key 严格分开；模型专用 Key 优先于同类型全局 Key。'
       : '模型可手动添加。未填写模型单独 Key 时，按图像、对话、视频使用上方对应全局 Key。';
     modelSection.appendChild(modelHint);
 
@@ -606,21 +606,22 @@ class SettingsPanel {
 
       const idEl = document.createElement('span');
       idEl.className = 'model-id';
-      if (key) {
-        const owner = key.name || 'key';
-        idEl.textContent = `${m.id} · ${owner}`;
-        idEl.title = `所属密钥组：${owner}`;
-      } else {
-        idEl.textContent = m.id;
-        idEl.title = m.id;
-      }
+      const kind = m.type === 'drawing' ? 'drawing' : (m.type === 'video' ? 'video' : 'chat');
+      const kindLabel = kind === 'drawing' ? '图像' : (kind === 'video' ? '视频' : '对话');
+      const channelKey = key?.channels?.[kind]?.api_key;
+      const keySource = m.api_key
+        ? `${kindLabel}专用 Key`
+        : (globalKeys[kind] ? `${kindLabel}全局 Key` : (channelKey ? `${kindLabel}账户 Key` : `未配置${kindLabel} Key`));
+      // 密钥组名称是账户备注，不是模型类型或协议；不再把诸如“gpt-对话”拼到图像模型 ID 后。
+      idEl.textContent = `${m.id} · ${keySource}`;
+      idEl.title = key ? `配置账户：${key.name || '未命名'}；实际使用：${keySource}` : `实际使用：${keySource}`;
 
       const modelKeyInput = document.createElement('input');
       modelKeyInput.className = 'settings-input model-key-input';
       modelKeyInput.type = 'password';
       modelKeyInput.value = m.api_key || '';
-      modelKeyInput.placeholder = '单独 Key（可选）';
-      modelKeyInput.title = '填写后优先于该类型的全局 Key';
+      modelKeyInput.placeholder = `${kindLabel}专用 Key（可选）`;
+      modelKeyInput.title = `仅供该${kindLabel}模型使用，优先于${kindLabel}全局 Key`;
       modelKeyInput.spellcheck = false;
       modelKeyInput.addEventListener('change', () => {
         const update = (models: BackendModel[]) => models.map(item => (

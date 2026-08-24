@@ -20,7 +20,7 @@ from unittest import mock
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from backend.api.provider_api import ProviderAPI
-from backend.api.unified_api import UnifiedAPIRouter
+from backend.api.unified_api import UnifiedAPIRouter, ModelType
 from backend.api.errors import AppError
 
 
@@ -195,6 +195,25 @@ def main():
         }
         write_file(providers_file, providers_new)
         ua = UnifiedAPIRouter(ProviderAPI(providers_file))
+
+        # ── 类型隔离：图像请求不得回退到同一账户的对话通用 Key ──
+        isolated_provider = {
+            'api_url': 'https://api.example.com/v1',
+            'global_keys': {'chat': 'sk-chat-only', 'drawing': '', 'video': ''},
+        }
+        isolated_key = {
+            'api_key': 'sk-chat-only',
+            'channels': {'drawing': {'enabled': True, 'api_key': ''}},
+            'models': [{'id': 'gpt-image-2', 'type': 'drawing', 'enabled': True}],
+        }
+        isolated = ua._get_connection(isolated_provider, isolated_key, ModelType.DRAWING, 'gpt-image-2')
+        check('图像模型不回退到对话通用 Key', isolated is None, str(isolated))
+        isolated_provider['global_keys']['drawing'] = 'sk-drawing-global'
+        isolated = ua._get_connection(isolated_provider, isolated_key, ModelType.DRAWING, 'gpt-image-2')
+        check('图像模型使用图像全局 Key', isolated and isolated.get('api_key') == 'sk-drawing-global', str(isolated))
+        isolated_key['models'][0]['api_key'] = 'sk-drawing-dedicated'
+        isolated = ua._get_connection(isolated_provider, isolated_key, ModelType.DRAWING, 'gpt-image-2')
+        check('图像专用 Key 优先于图像全局 Key', isolated and isolated.get('api_key') == 'sk-drawing-dedicated', str(isolated))
 
         # ── 三段精确：返回 (provider, key, entry) 且 key 正确 ──
         provider, key, entry = ua._resolve_drawing_model('provider_bbb:key_A:gemini-3-pro-image-preview')

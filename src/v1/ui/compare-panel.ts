@@ -1,6 +1,6 @@
 // src/v1/ui/compare-panel.ts
 // 对比面板（C1-C6）：多选成图 → 底部「对比(n)」→ 模态浮层并排对比（2/4/8 宫格）。
-// 每格：大图 + prompt 摘要 + 模型/比例/分辨率 + 采纳/锁定（同一 AssetStore，X1 三处同步之一）。
+// 每格：大图 + prompt 摘要 + 模型/比例/分辨率 + 添加到资产库。
 // C4 不污染主链：面板为纯评估瞬时态——关闭仅清瞬时态，不删节点、不改连线、不标 stale、不自动入库。
 // 面板挂 .overlay 类 → interactions.ts 已把 .overlay 排除在画布交互外，天然防冲突。
 
@@ -35,7 +35,7 @@ class ComparePanel {
       });
     });
 
-    // 订阅 AssetStore：面板内采纳/锁定 → 格内角标即时刷新（X1）
+    // 订阅 AssetStore：面板内添加后即时刷新。
     this.unsubscribeAsset = assetStore.subscribe(() => {
       if (this.state.open) this._render();
     });
@@ -103,8 +103,7 @@ class ComparePanel {
   private _buildCell(node: FlowNode): HTMLElement {
     const url = node.imageUrl as string;
     const p = node.params as unknown as StyleTransferParams;
-    const adopted = assetStore.isAdoptedByImageUrl(url);
-    const locked = assetStore.isLockedByImageUrl(url);
+    const added = assetStore.isAddedByImageUrl(url);
     const prompt = (p.prompt || '').trim();
 
     const cell = document.createElement('div');
@@ -116,38 +115,21 @@ class ComparePanel {
         <div class="compare-cell-params">${escapeHtml(p.aspectRatio || '3:4')} · ${escapeHtml((p.resolution || '2k').toUpperCase())} · ${escapeHtml(this._modelName(p.model || ''))}</div>
       </div>
       <div class="compare-cell-actions">
-        <button class="compare-act adopt${adopted ? ' on' : ''}" data-url="${escapeAttr(url)}" data-node="${node.id}">${adopted ? '已采纳' : '采纳'}</button>
-        <button class="compare-act lock${locked ? ' on' : ''}" data-url="${escapeAttr(url)}" data-node="${node.id}">${locked ? '已锁定' : '锁定'}</button>
+        <button class="compare-act add${added ? ' on' : ''}" data-url="${escapeAttr(url)}" data-node="${node.id}" ${added ? 'disabled' : ''}>${added ? '已添加' : '添加到资产库'}</button>
       </div>`;
 
-    const adoptBtn = cell.querySelector('.adopt') as HTMLElement | null;
-    const lockBtn = cell.querySelector('.lock') as HTMLElement | null;
-    adoptBtn?.addEventListener('click', () => this._cellAdopt(url, node.id));
-    lockBtn?.addEventListener('click', () => this._cellLock(url, node.id));
+    const addBtn = cell.querySelector('.add') as HTMLElement | null;
+    addBtn?.addEventListener('click', () => this._addToAssetLibrary(url, node.id));
     return cell;
   }
 
-  /** 格内采纳（C3：面板内采纳写入同一 AssetStore；X1 三处同步；采纳自动锁定） */
-  private _cellAdopt(url: string, nodeId: string): void {
-    flowHistory.record(); // 面板内采纳入撤销栈（X3）
-    if (assetStore.isAdoptedByImageUrl(url)) {
-      assetStore.unadoptByUrl(url);
-      showToast('已取消采纳');
-    } else {
-      // 采纳：展示图 URL + 原图引用一并写入资产记录（查看大图按需加载用）；
-      // R2：传 metaFromNode(node)（trace 优先 / params 兜底）→ 配方随记录落盘 assets.json（修复跨项目复现空白）
-      const node = flowState.getNode(nodeId);
-      assetStore.adoptByUrl(url, nodeId, assetStore.metaFromNode(node), node?.imageOrigin?.path);
-      showToast('已采纳（自动锁定）');
-    }
-  }
-
-  /** 格内锁定/解锁（C6 P1：复用图库锁定语义，同一数据源） */
-  private _cellLock(url: string, nodeId: string): void {
+  /** 格内添加：展示图 URL、原图引用和配方一并写入资产记录。 */
+  private _addToAssetLibrary(url: string, nodeId: string): void {
+    if (assetStore.isAddedByImageUrl(url)) return;
     flowHistory.record();
     const node = flowState.getNode(nodeId);
-    assetStore.setLockedByUrl(url, nodeId, !assetStore.isLockedByImageUrl(url), node?.imageOrigin?.path);
-    showToast(assetStore.isLockedByImageUrl(url) ? '已锁定' : '已解锁');
+    assetStore.addByUrl(url, nodeId, assetStore.metaFromNode(node), node?.imageOrigin?.path);
+    showToast('已添加到资产库');
   }
 
   private _syncGridButtons(): void {

@@ -342,7 +342,7 @@ class Persistence {
         this.syncProjectNameInput();
         flowHistory.clear(); // 跨项目：清空撤销栈，避免撤销回滚到旧项目快照
         void this._loadHistoryIntoDrawer();
-        void assetStore.loadFromBackend(); // 恢复采纳/锁定（AC-5：关闭重开后状态一致）
+        void assetStore.loadFromBackend(); // 恢复资产库（关闭重开后状态一致）
         showToast('项目已打开');
       }
     } else if (result.status !== 'cancelled') {

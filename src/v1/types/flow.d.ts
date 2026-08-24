@@ -275,20 +275,21 @@ type HistoryEntry =
       parentId?: string | null;
     };
 
-/** 资产索引记录（采纳/锁定单一数据源；键 = 图指纹 hashRef(展示图 URL)，冗余 nodeId 供保护回溯） */
+/** 资产库记录（键 = 图指纹 hashRef(展示图 URL)）。 */
 interface ImageAssetRecord {
   key: string;            // hashRef(展示图 URL) 图指纹主键（唯一定位「一张图」而非「一个节点」）
-  nodeId: string;         // 图当前所在节点（冗余；同一 nodeId 被重跑覆盖后旧图指纹不变，仍作用旧图）
-  imageUrl?: string;      // 展示图 URL（incremental-3 起采纳时写入，资产库独立显示用；旧记录缺失 → 占位）
+  nodeId: string;         // 图当前所在节点（仅溯源用）
+  imageUrl?: string;      // 展示图 URL（添加时写入，资产库独立显示用；旧记录缺失 → 占位）
   thumbnail?: string;     // 显式缩略图（=展示图 URL；新记录冗余写入，读侧 thumbnail||imageUrl 回退）
   originalPath?: string;  // 原图本地绝对路径（查看大图按需加载用；冗余写入，P1 可升级指纹键）
-  projectName: string[];  // 采纳过的项目名列表（A5：跨项目溯源；只追加去重，不删除；旧记录缺失 → []）
-  adopted: boolean;       // 已采纳（认可；采纳自动置 locked）
-  locked: boolean;        // 已锁定（保护：removeChildren 不删 / _writeBackToSelf 不覆盖）
+  projectName: string[];  // 添加过的项目名列表（跨项目溯源；只追加去重，不删除；旧记录缺失 → []）
+  added: boolean;         // 当前在资产库中
+  adopted?: boolean;      // 旧版兼容字段：false 表示已移除，加载时不再展示
+  locked?: boolean;       // 旧版兼容字段：加载时忽略
   tags: string[];         // 手动标签（B6 P1；搜索纳入）
   category: string;       // 分类预留（B8 P2；默认 '成图'，本期不渲染分类 UI）
   updatedAt: number;
-  // ── R2 资产配方持久化（全部可选；缺失 = undefined，不写 null；随采纳落盘 assets.json） ──
+  // ── 资产配方持久化（全部可选；缺失 = undefined，不写 null；随添加落盘 assets.json） ──
   prompt?: string;              // 生成提示词
   model?: string;               // "provider:key:model"
   aspectRatio?: string;         // '3:4' | '1:1' | '16:9' | 'Auto'
@@ -301,8 +302,8 @@ interface ImageAssetRecord {
 }
 
 /**
- * 采纳元数据（资产库复现/配方展示用）。
- * R2 起：adopt() 收到 meta 时会把配方字段合并写入 ImageAssetRecord 本体并随 assets.json 落盘
+ * 添加元数据（资产库复现/配方展示用）。
+ * 添加时会把配方字段合并写入 ImageAssetRecord 本体并随 assets.json 落盘
  * （持久化真相 = 记录本体）；metaByKey 仅作会话级快速缓存，重启后由记录配方合成恢复。
  * 缺失时经 historyDrawer.getEntryByImageUrl 反查兜底。
  */
@@ -318,7 +319,7 @@ interface AdoptMeta {
   createdAt?: number;
 }
 
-/** 资产库条目（getAdoptedAssets 输出：记录 + 可渲染 URL + 内存元数据） */
+/** 资产库条目（getAssets 输出：记录 + 可渲染 URL + 内存元数据） */
 interface AssetAsset {
   record: ImageAssetRecord;
   url: string;                 // 展示图 URL（兼容字段：thumbnailUrl || imageUrl 兜底）

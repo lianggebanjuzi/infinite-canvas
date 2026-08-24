@@ -2,7 +2,7 @@
 // 撤销/重做快照栈（HistoryStack）：在用户手势入口前 record() 一次全量快照，undo/redo 用 applySnapshot 回滚。
 // 快照携带 nodes/edges/projectName/dirty（不含 canvas 视口），回滚即恢复当时 dirty（AC-A13/R5.3 天然成立）。
 // 引擎运行期 suspend()/resume() 隔离：运行中状态/产出节点不入栈（R5.5）。
-// 增量（X3）：采纳/锁定入撤销栈 —— 并行 assets 快照（assetUndoStack/assetRedoStack），
+// 资产库变更入撤销栈 —— 并行 assets 快照（assetUndoStack/assetRedoStack），
 // record/undo/redo/clear 与 flow 快照同步存取；applySnapshot(assets) 后立即落盘回退索引文件。
 
 import { flowState } from './flow-state';

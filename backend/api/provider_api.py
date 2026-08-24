@@ -126,25 +126,15 @@ class ProviderAPI:
                 'models':  provider.get('models') or [],
             }]
         self._normalize_keys(provider)
-        # 新结构：三类模型各有一个全局 Key。此前版本的 channels 只用于把
-        # 已填的 Key 无感带到对应全局项，URL 继续沿用 provider 原字段。
+        # 新结构：三类模型各有独立全局 Key。旧 key.api_key 已在 _normalize_keys
+        # 中迁入每个 Key 的按能力 channels；这里不能再把它反向复制为全部类型的
+        # provider 全局 Key，否则图像请求会隐式借用对话 Key，破坏类型隔离。
         global_keys = provider.get('global_keys')
         if not isinstance(global_keys, dict):
             global_keys = {}
             provider['global_keys'] = global_keys
         for kind in ('chat', 'drawing', 'video'):
-            if kind in global_keys:
-                continue
-            migrated = ''
-            for key in provider.get('keys') or []:
-                channel = (key.get('channels') or {}).get(kind)
-                if isinstance(channel, dict) and channel.get('api_key'):
-                    migrated = channel['api_key']
-                    break
-                if key.get('api_key'):
-                    migrated = key['api_key']
-                    break
-            global_keys[kind] = migrated
+            global_keys.setdefault(kind, '')
 
     def _apply_provider_updates(self, provider, updates):
         """合并 updates 到 provider；顶层 api_key/models 兼容落到 keys[0]（不产生顶层冗余）"""

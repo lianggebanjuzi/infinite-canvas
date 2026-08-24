@@ -30,6 +30,8 @@ class CanvasView {
   canvasEl: HTMLElement | null = null;
   private _panning = false;
   private _panStart: { mx: number; my: number; vx: number; vy: number } | null = null;
+  /** 平移与浏览器绘制同频，避免高频 mousemove 对带图片画布重复提交 transform。 */
+  private _panFrame: number | null = null;
 
   /** 实时读取 flowState.canvas（避免 replaceAll 后引用过期） */
   get view(): FlowCanvasState { return flowState.canvas; }
@@ -104,9 +106,7 @@ class CanvasView {
       this.applyView();
     }, { passive: false });
 
-    // 平移 mousedown 语义统一在 interactions.ts 处理（中键平移），此处只挂全局 move/up
-    window.addEventListener('mousemove', (e: MouseEvent) => this._movePan(e));
-    window.addEventListener('mouseup', () => this._endPan());
+    // 平移的 mousedown/move/up 都由 interactions.ts 统一处理，避免同一 mousemove 重复 applyView。
   }
 
   /** 供 interactions 调用：中键拖动画布平移 */
@@ -178,13 +178,22 @@ class CanvasView {
     if (!this._panning || !this._panStart) return;
     this.view.panX = this._panStart.vx + (e.clientX - this._panStart.mx);
     this.view.panY = this._panStart.vy + (e.clientY - this._panStart.my);
-    this.applyView();
+    if (this._panFrame !== null) return;
+    this._panFrame = requestAnimationFrame(() => {
+      this._panFrame = null;
+      this.applyView();
+    });
   }
 
   private _endPan(): void {
     if (!this._panning) return;
     this._panning = false;
     this._panStart = null;
+    if (this._panFrame !== null) {
+      cancelAnimationFrame(this._panFrame);
+      this._panFrame = null;
+      this.applyView(); // 松手时立刻提交最后一次鼠标位置，不等待下一帧。
+    }
     if (this.wrap) this.wrap.style.cursor = '';
     flowState.updatedAt = Date.now();
     flowState.dirty = true;
