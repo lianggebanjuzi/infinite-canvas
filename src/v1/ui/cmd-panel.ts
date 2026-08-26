@@ -63,6 +63,8 @@ class CmdPanel {
   private promptPreview: HTMLElement | null = null;
   private modelOptions: Array<{ id: string; name: string }> = [];
   private chatModelOptions: Array<{ id: string; name: string }> = [];
+  /** 异步模型拉取序号：迟到的旧请求不得覆盖 pywebview 就绪后的新结果。 */
+  private modelLoadSeq = 0;
   /** 动态参考图缩略元素（随 refImages/上游增删重建） */
   private _multiRefs: HTMLElement[] = [];
   /** 提示词库弹窗 */
@@ -102,13 +104,26 @@ class CmdPanel {
       else this.el.appendChild(this.promptPreview);
     }
 
-    // 预取模型列表（绘图 + 对话，供 chip 菜单与默认模型回填）
-    void fetchImageModels().then(models => { this.modelOptions = models; });
-    void fetchChatModels().then(models => { this.chatModelOptions = models; });
+    // 预取模型列表（绘图 + 对话，供 chip 菜单与默认模型回填）。主入口会在
+    // pywebview 就绪后再次调用，避免启动竞态把空列表永久留在面板内。
+    void this.refreshModels();
     this.promptLibraryReady = this._loadPromptLibrary();
 
     this._bindEvents();
     flowState.subscribe(() => this.sync());
+  }
+
+  /** 在桥接就绪或供应商配置变更后刷新模型；完成后立即刷新当前卡片的显示名。 */
+  async refreshModels(): Promise<void> {
+    const seq = ++this.modelLoadSeq;
+    const [imageModels, chatModels] = await Promise.all([
+      fetchImageModels(),
+      fetchChatModels(),
+    ]);
+    if (seq !== this.modelLoadSeq) return;
+    this.modelOptions = imageModels.filter(model => Boolean(model.id));
+    this.chatModelOptions = chatModels.filter(model => Boolean(model.id));
+    this.sync();
   }
 
   private _bindEvents(): void {

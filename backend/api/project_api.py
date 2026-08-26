@@ -111,6 +111,42 @@ class ProjectAPI:
         """获取当前项目路径"""
         return {"path": self.current_project_path}
 
+    def _workflows_path(self):
+        """全局工作流库落点；与项目、历史和资产分开，未保存项目也可使用。"""
+        fallback = self.fallback_dir or os.path.expanduser('~')
+        return os.path.join(fallback, 'workflows.json')
+
+    def load_workflows(self):
+        """读取全局工作流库。文件不存在或个别记录损坏时按空库/跳过处理。"""
+        try:
+            path = self._workflows_path()
+            if not os.path.exists(path):
+                return {"status": "empty", "workflows": []}
+            with open(path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            workflows = data.get('workflows', []) if isinstance(data, dict) else []
+            return {"status": "success", "workflows": [w for w in workflows if isinstance(w, dict)]}
+        except Exception as e:
+            print(f"读取工作流库失败: {e}")
+            return {"status": "error", "message": str(e), "workflows": []}
+
+    def save_workflows(self, workflows):
+        """原子保存全局工作流库。前端已经剥离项目结果、历史和本地图片路径。"""
+        try:
+            path = self._workflows_path()
+            directory = os.path.dirname(path)
+            if directory:
+                os.makedirs(directory, exist_ok=True)
+            with self.lock:
+                atomic_write_json(path, {
+                    "version": 1,
+                    "workflows": workflows if isinstance(workflows, list) else []
+                })
+            return {"status": "success"}
+        except Exception as e:
+            print(f"保存工作流库失败: {e}")
+            return {"status": "error", "message": str(e)}
+
     def _history_path(self):
         """推导 history.jsonl 落点（逻辑集中在此一处，便于未来迁移到「项目目录/」布局）。
 

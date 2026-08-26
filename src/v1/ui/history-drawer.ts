@@ -182,6 +182,12 @@ class HistoryDrawer {
     this.render();
   }
 
+  /** 新建空项目/从工作流创建副本时清空旧项目的会话与落盘历史。 */
+  clear(): void {
+    this.items = [];
+    this.render();
+  }
+
   setTab(tab: 'image' | 'text'): void {
     if (this.tab === tab) return;
     this.tab = tab;

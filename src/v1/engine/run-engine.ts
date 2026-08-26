@@ -164,6 +164,65 @@ class RunEngine {
     return null;
   }
 
+  /**
+   * 图生图提交专用的参考图快照。
+   *
+   * 画布节点的 imageUrl 是轻量缩略图，不能直接拿来当下一轮的模型输入；
+   * 若上游结果已落盘，优先按 imageOrigin.path 读回原图。这样大图只在真正
+   * 发起图生图时短暂经过桥接，不会常驻在节点/DOM 中。旧项目、手动参考图
+   * 或原图读取失败时保留现有缩略图回退，避免阻断生成。
+   */
+  private async _resolveGenerationReferenceImages(nodeId: string): Promise<string[]> {
+    const node = flowState.getNode(nodeId);
+    if (!node) return [];
+
+    const sourceSeen = new Set<string>();
+    const result: string[] = [];
+
+    const originFor = (displayUrl: string): ImageOrigin | null | undefined => {
+      // 用户手动挂入的图也可能正好来自某个已有结果节点；命中时同样使用原图。
+      const owner = flowState.nodes.find(candidate => candidate.imageUrl === displayUrl);
+      return owner?.imageOrigin;
+    };
+
+    const append = async (displayUrl: string, origin?: ImageOrigin | null): Promise<void> => {
+      if (!displayUrl || sourceSeen.has(displayUrl)) return;
+      sourceSeen.add(displayUrl);
+
+      let requestUrl = displayUrl;
+      if (origin?.path) {
+        try {
+          const loaded = await withTimeout(
+            Backend.loadLocalImage(origin.path),
+            60000,
+            '原图参考读取超时',
+          );
+          if (loaded.status === 'success' && loaded.data_url) {
+            requestUrl = loaded.data_url;
+          }
+        } catch {
+          // 原图在移动/清理后不可读时，保持缩略图兼容旧项目与临时目录结果。
+        }
+      }
+      result.push(requestUrl);
+    };
+
+    // 保持既有顺序：节点主动挂载参考图在前，直接上游输出在后。
+    for (const url of node.refImages || []) {
+      await append(url, originFor(url));
+    }
+    for (const upstream of flowState.getUpstreams(nodeId)) {
+      if (upstream.imageUrl) {
+        await append(upstream.imageUrl, upstream.imageOrigin);
+      } else {
+        for (const url of upstream.refImages || []) {
+          await append(url, originFor(url));
+        }
+      }
+    }
+    return result;
+  }
+
   /** 是否存在运行中的节点（撤销/重做与关闭保护仍在运行期禁用）。 */
   isBusy(): boolean {
     return this.activeRuns.size > 0;
@@ -438,9 +497,11 @@ class RunEngine {
     const options = def.buildOptions(node, ctx);
     options.count = COUNT_MIN;
 
-    // 1.5 入口快照参考图：空 → 文生图；非空 → 图生图。
+    // 1.5 入口快照参考图：空 → 文生图；非空 → 图生图。展示层仍持有
+    // 缩略图，但提交给模型时优先读取上游原图，避免连续图生图损失色彩/细节。
     //     isTxt2Img 仅用于 outputType 标记（'txt2img'/'img2img'）与 trace 参考图透传，不再决定回写/清空分支（Q1）。
-    const refs = flowState.getReferenceImages(nodeId);
+    const refs = await this._resolveGenerationReferenceImages(nodeId);
+    options.referenceImages = refs;
     const isTxt2Img = refs.length === 0;
     if (!usesTextSplit && node.generatedImages?.length) {
       // 退出拆分模式后恢复普通图片节点的单图/批次行为。

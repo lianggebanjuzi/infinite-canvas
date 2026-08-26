@@ -446,6 +446,12 @@ class InfiniteCanvasAPI:
     def open_project_dialog(self):
         return self.project.open_project_dialog()
 
+    def load_workflows(self):
+        return self.project.load_workflows()
+
+    def save_workflows(self, workflows):
+        return self.project.save_workflows(workflows)
+
     def append_history(self, entry):
         """追加一条生成档案到 history.jsonl（前端构造 trace，后端 append 单行）"""
         return self.project.append_history(entry)

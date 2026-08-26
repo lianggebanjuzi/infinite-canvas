@@ -124,8 +124,16 @@ button:focus-visible, input[type="range"]:focus-visible, [tabindex]:focus-visibl
 .history-grid {
   padding:0 14px 14px; flex:1; min-height:0;
   display:grid; grid-template-columns:repeat(2, minmax(0, 1fr)); gap:10px;
-  overflow-x:hidden; overflow-y:auto;
+  /* 网格是抽屉中的 flex 子项：默认 align-content:stretch 会把剩余高度
+     平分到每一行，导致卡片被拉成大块空白、内容也无法自然溢出滚动。
+     按内容从顶部紧凑排列，超过可视区再交给自身纵向滚动。 */
+  align-content:start; align-items:start;
+  overflow-x:hidden; overflow-y:auto; scrollbar-gutter:stable;
 }
+.history-grid::-webkit-scrollbar { width:7px; }
+.history-grid::-webkit-scrollbar-track { background:transparent; }
+.history-grid::-webkit-scrollbar-thumb { background:var(--border-strong); border-radius:999px; }
+.history-grid::-webkit-scrollbar-thumb:hover { background:var(--accent); }
 /* 成图卡：图片完整显示不裁切（内嵌 <img> 按原比例自适应高度），底部按钮行常驻；无固定 aspect-ratio */
 .history-thumb {
   position:relative; display:flex; flex-direction:column;
@@ -1566,3 +1574,29 @@ button:focus-visible, input[type="range"]:focus-visible, [tabindex]:focus-visibl
 .rv-value.prompt { max-height:120px; overflow-y:auto; }
 .rv-actions { display:flex; flex-wrap:wrap; gap:7px; margin-top:4px; }
 .rv-btn { padding:6px 14px; font-size:12px; }
+
+/* ═══════════ 工作流库（全局模板，独立于项目保存） ═══════════ */
+.workflow-overlay { align-items:center; justify-content:center; padding:20px; }
+.workflow-panel { width:min(560px, 100%); max-height:min(680px, calc(100vh - 40px)); display:flex; flex-direction:column; overflow:hidden; border:1px solid var(--border); border-radius:var(--r-lg); background:var(--bg-panel); box-shadow:var(--shadow-bar); }
+.workflow-head { display:flex; align-items:flex-start; gap:14px; padding:18px 20px 14px; border-bottom:1px solid var(--border-soft); }
+.workflow-head > div { flex:1; }
+.workflow-head h2 { margin:0; font-size:16px; font-weight:650; color:var(--text-1); }
+.workflow-head p { margin:5px 0 0; font-size:11.5px; color:var(--text-3); }
+.workflow-close { width:28px; height:28px; border:1px solid var(--border); border-radius:8px; background:var(--bg-hover); color:var(--text-2); font-size:20px; line-height:1; cursor:pointer; }
+.workflow-close:hover { color:var(--st-fail); border-color:var(--st-fail); }
+.workflow-save-row { display:flex; gap:8px; padding:14px 20px 8px; }
+.workflow-name-input { flex:1; min-width:0; border:1px solid var(--border); border-radius:var(--r-sm); background:var(--bg-app); color:var(--text-1); padding:8px 10px; font:12.5px var(--font); outline:none; }
+.workflow-name-input:focus { border-color:var(--accent); box-shadow:0 0 0 2px var(--accent-dim); }
+.workflow-save-btn { flex:0 0 auto; padding:8px 13px; font-size:12px; }
+.workflow-hint { padding:0 20px 12px; font-size:10.5px; color:var(--text-3); }
+.workflow-list { min-height:180px; max-height:420px; overflow-y:auto; padding:0 20px 20px; display:flex; flex-direction:column; gap:8px; }
+.workflow-empty { display:flex; align-items:center; justify-content:center; min-height:150px; color:var(--text-3); font-size:12px; text-align:center; line-height:1.6; }
+.workflow-item { display:flex; align-items:center; gap:12px; padding:12px; border:1px solid var(--border-soft); border-radius:var(--r-md); background:var(--bg-app); }
+.workflow-item:hover { border-color:var(--border-strong); }
+.workflow-item-main { min-width:0; flex:1; }
+.workflow-item-title { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--text-1); font-size:13px; font-weight:600; }
+.workflow-item-meta { margin-top:4px; color:var(--text-3); font-size:10.5px; }
+.workflow-item-actions { display:flex; gap:6px; flex:0 0 auto; }
+.workflow-item-btn { padding:5px 9px; border:1px solid var(--border-strong); border-radius:var(--r-sm); background:var(--bg-hover); color:var(--text-2); font:11.5px var(--font); cursor:pointer; }
+.workflow-item-btn:hover { border-color:var(--accent); color:var(--accent); background:var(--accent-dim); }
+.workflow-item-btn.danger:hover { border-color:var(--st-fail); color:var(--st-fail); background:rgba(217,123,108,.1); }

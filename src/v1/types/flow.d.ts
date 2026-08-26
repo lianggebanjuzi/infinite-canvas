@@ -237,6 +237,20 @@ interface FlowSnapshot {
   dirty: boolean;
 }
 
+/** 可复用工作流：只保存节点编排和默认配置，绝不保存项目成图、历史、任务和本地文件引用。 */
+interface WorkflowTemplate {
+  id: string;
+  title: string;
+  description?: string;
+  version: 1;
+  canvas: FlowCanvasState;
+  modelDefaults?: Partial<Record<'drawing' | 'chat', string>>;
+  nodes: FlowNode[];
+  edges: FlowEdge[];
+  createdAt: number;
+  updatedAt: number;
+}
+
 /**
  * history.jsonl 单行条目（append-only 流水账，跨会话图库展示用）。
  * 用 kind 判别 image/text：text 行用精简字段（无 aspectRatio/resolution 等图片字段）。

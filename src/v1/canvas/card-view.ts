@@ -11,7 +11,7 @@ import { interactions } from './interactions';
 import { applyCardStatus } from '../ui/status-visuals';
 import { showToast } from '../ui/toast';
 import { assetStore } from '../asset-store';
-import { Backend } from '../api';
+import { Backend, localImageFileUrl } from '../api';
 
 const ICON_EXPAND = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></svg>';
 const ICON_ADD_ASSET = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12M6 9h12"/><path d="M5 15v4a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-4"/></svg>';
@@ -718,8 +718,8 @@ export function openNodeImageModal(nodeId: string, index?: number): void {
 /**
  * 大图查看（左右分栏：左信息栏 + 右大图；图片性能优化版）：
  * 先显示缩略图 src + loading（旧图 base64 直接显示）；
- * 有 origin.path → Backend.loadLocalImage 按需取原图（一次性，用完即弃不常驻）；
- * 成功替换为原图 data_url；失败/无 origin → 保持缩略图并 toast。
+ * 有 origin.path → 优先由浏览器直接读取本地原图；避免大 base64 穿过 pywebview 桥接。
+ * 本地直读被宿主拦截时才回退 Backend.loadLocalImage；失败/无 origin 保持缩略图并 toast。
  * dims：调用方已知的原图真实像素（可选；信息栏「分辨率」优先展示，原图加载后用 naturalWidth/Height 权威覆盖）。
  * info：生成档案信息（可选；信息栏展示 模型/时间/比例/分辨率/提示词）。
  */
@@ -751,7 +751,10 @@ export async function openImageModal(
     // 未加载原图：保留 dims/info 初值（下方设置），不因缩略图 onload 覆盖
   };
   img.onload = () => {
-    if (request === imageModalRequest) refreshMeta();
+    if (request === imageModalRequest) {
+      refreshMeta();
+      if (showedOriginal && loading) loading.style.display = 'none';
+    }
   };
 
   // 1. 先显示缩略图（几十 KB 秒开）+ loading
@@ -808,21 +811,34 @@ export async function openImageModal(
     return;
   }
 
-  // 3. 按需加载原图：桥接取原图 base64，一次性替换，失败回退缩略图
-  try {
-    const res = await Backend.loadLocalImage(path);
-    if (request !== imageModalRequest) return;
-    if (res.status === 'success' && res.data_url) {
-      showedOriginal = true; // 先置位再换 src，onload 时用自然尺寸更新分辨率
-      img.src = res.data_url;
-    } else {
+  // 3. 大图预览优先直读本地文件。这样浏览器可直接流式解码，避免把 4K 原图
+  // 编码成 data URL 后再跨 pywebview 回传。若宿主禁止 file://，再兼容回退旧桥接。
+  const loadThroughBridge = async (): Promise<void> => {
+    try {
+      const res = await Backend.loadLocalImage(path);
+      if (request !== imageModalRequest) return;
+      if (res.status === 'success' && res.data_url) {
+        showedOriginal = true;
+        img.onerror = null;
+        img.src = res.data_url;
+        return;
+      }
+    } catch {
+      // 下方统一提示并保留缩略图。
+    }
+    if (request === imageModalRequest) {
+      if (loading) loading.style.display = 'none';
       showToast('原图加载失败，已显示缩略图', false);
     }
-  } catch {
-    if (request === imageModalRequest) showToast('原图加载失败，已显示缩略图', false);
-  } finally {
-    if (request === imageModalRequest && loading) loading.style.display = 'none';
-  }
+  };
+
+  img.onerror = () => {
+    if (request !== imageModalRequest) return;
+    img.onerror = null; // 仅回退一次，避免失败图反复触发。
+    void loadThroughBridge();
+  };
+  showedOriginal = true;
+  img.src = localImageFileUrl(path, origin?.url);
 }
 
 /** 渲染大图信息栏字段行（缺失 → '—'）；返回「分辨率」value 元素（原图加载后更新真实像素用） */

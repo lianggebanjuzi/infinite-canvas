@@ -2,13 +2,13 @@
 // 结果查看器抽屉（C-2）：批次图片大图浏览（prev/next / 第 x/N 张）、提示词/模型/尺寸/参考图/任务时间、
 // 失败原因、下载/复制提示词/反推/再编辑/单项重试。
 // 数据源：节点结果（imageUrl/generatedImages）+ batch-store（Job 状态/失败原因/任务时间），
-// 大图按需加载原图（origin.path → Backend.loadLocalImage，复用 img-modal 思路）；不重复造轮子。
+// 大图按需加载原图（优先 file:// 直读，宿主拦截时才 Backend.loadLocalImage 回退）。
 
 import { flowState } from '../state/flow-state';
 import { batchStore } from '../state/batch-store';
 import { selection } from '../state/selection';
 import { runEngine } from '../engine/run-engine';
-import { Backend } from '../api';
+import { Backend, localImageFileUrl } from '../api';
 import { showToast } from './toast';
 
 /** 查看器条目：由节点 generatedImages（或单张 imageUrl）+ batch Job 合成 */
@@ -183,7 +183,7 @@ class ResultViewer {
     if (item.url) this._loadOriginal(item);
   }
 
-  /** 原图按需加载（复用 img-modal 思路：缩略图先显，origin.path → loadLocalImage 替换，失败回退） */
+  /** 原图按需加载：浏览器先直读文件，避免整张原图 base64 跨桥接；失败才兼容回退。 */
   private _loadOriginal(item: ViewerItem): void {
     const img = document.getElementById('rv-img') as HTMLImageElement | null;
     const loading = document.getElementById('rv-loading') as HTMLElement | null;
@@ -193,16 +193,30 @@ class ResultViewer {
       if (sizeEl && img.naturalWidth > 0 && img.naturalHeight > 0 && !(item.width)) {
         sizeEl.textContent = `${img.naturalWidth}×${img.naturalHeight}`;
       }
+      loading.style.display = 'none';
     };
     const path = item.origin?.path;
     if (!path) { loading.style.display = 'none'; return; }
     loading.style.display = 'flex';
-    void Backend.loadLocalImage(path).then(res => {
-      if (res.status === 'success' && res.data_url) img.src = res.data_url;
-      else showToast('原图加载失败，已显示缩略图', false);
-    }).catch(() => showToast('原图加载失败，已显示缩略图', false)).finally(() => {
+    const loadThroughBridge = async (): Promise<void> => {
+      try {
+        const res = await Backend.loadLocalImage(path);
+        if (res.status === 'success' && res.data_url) {
+          img.onerror = null;
+          img.src = res.data_url;
+          return;
+        }
+      } catch {
+        // 下方统一提示并保留缩略图。
+      }
       loading.style.display = 'none';
-    });
+      showToast('原图加载失败，已显示缩略图', false);
+    };
+    img.onerror = () => {
+      img.onerror = null;
+      void loadThroughBridge();
+    };
+    img.src = localImageFileUrl(path, item.origin?.url);
   }
 
   private _onClick(e: MouseEvent): void {

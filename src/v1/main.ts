@@ -35,6 +35,7 @@ import { settingsPanel } from './ui/settings-panel';
 import { outpaintPanel } from './ui/outpaint-panel';
 import { taskPanel } from './ui/task-panel';
 import { resultViewer } from './ui/result-viewer';
+import { workflowLibrary } from './ui/workflow-library';
 import { saveCoordinator } from './save-coordinator';
 import { closeGuard } from './close-guard';
 import { flowHistory } from './state/history';
@@ -137,6 +138,7 @@ function bindKeyboard(): void {
       outpaintPanel.close();
       comparePanel.close();
       resultViewer.close(); // C-2：结果查看器抽屉
+      workflowLibrary.close();
       assetDrawer.close(); // 资产库抽屉（可选，设计 §2 文件列表）
       document.getElementById('ctx-menu')?.classList.remove('show');
       document.getElementById('img-modal')?.classList.remove('show');
@@ -146,33 +148,39 @@ function bindKeyboard(): void {
 
 // ───────────────────────── 为生成节点回填项目内模型偏好 ─────────────────────────
 async function fillDefaultModels(): Promise<void> {
-  const needsChat = flowState.nodes.some(n => n.type === 'text-gen' && !(n.params.model as string | undefined));
-  const needsDraw = flowState.nodes.some(n => n.type === 'image-gen' && !(n.params.model as string | undefined));
+  const resolveRoute = (saved: string, models: Array<{ id: string }>): string => {
+    if (!saved) return '';
+    if (models.some(item => item.id === saved)) return saved;
+    // Key 被重建后，三段路由的中间 key id 会改变；模型 ID 仍唯一时迁移到
+    // 当前可用路由。多个同名模型时不猜，交由下方安全回退处理。
+    const bareId = saved.split(':').pop() || '';
+    const matches = models.filter(item => (item.id.split(':').pop() || '') === bareId);
+    return matches.length === 1 ? matches[0].id : '';
+  };
 
-  if (needsChat) {
-    const chatModels = await fetchChatModels();
-    const saved = flowState.getModelDefault('chat');
-    const chatModel = saved && chatModels.some(item => item.id === saved)
-      ? saved
-      : (chatModels.find(item => item.id)?.id || '');
-    if (chatModel) {
-      flowState.nodes
-        .filter(n => n.type === 'text-gen' && !(n.params.model as string | undefined))
-        .forEach(n => flowState.updateNodeParams(n.id, { model: chatModel }));
-    }
-  }
-  if (needsDraw) {
-    const drawModels = await fetchImageModels();
-    const saved = flowState.getModelDefault('drawing');
-    const drawModel = saved && drawModels.some(item => item.id === saved)
-      ? saved
-      : (drawModels.find(item => item.id)?.id || '');
-    if (drawModel) {
-      flowState.nodes
-        .filter(n => n.type === 'image-gen' && !(n.params.model as string | undefined))
-        .forEach(n => flowState.updateNodeParams(n.id, { model: drawModel }));
-    }
-  }
+  const reconcile = (
+    type: 'text-gen' | 'image-gen',
+    kind: 'chat' | 'drawing',
+    models: Array<{ id: string }>,
+  ): void => {
+    const available = models.filter(item => Boolean(item.id));
+    if (available.length === 0) return;
+    const preferred = resolveRoute(flowState.getModelDefault(kind), available);
+    const fallback = preferred || available[0].id;
+    if (flowState.getModelDefault(kind) !== fallback) flowState.setModelDefault(kind, fallback);
+    flowState.nodes
+      .filter(node => node.type === type)
+      .forEach(node => {
+        const saved = String(node.params.model || '');
+        const resolved = resolveRoute(saved, available);
+        const target = resolved || fallback;
+        if (target && target !== saved) flowState.updateNodeParams(node.id, { model: target });
+      });
+  };
+
+  const [chatModels, drawModels] = await Promise.all([fetchChatModels(), fetchImageModels()]);
+  reconcile('text-gen', 'chat', chatModels);
+  reconcile('image-gen', 'drawing', drawModels);
 }
 
 // ───────────────────────── 撤销/重做按钮状态 ─────────────────────────
@@ -352,9 +360,13 @@ async function init(): Promise<void> {
   // 批次 2：底部任务面板 + 右侧属性编辑器 + 结果查看器（编辑职责从 cmd-panel 迁入右侧栏）
   taskPanel.init();
   resultViewer.init();
+  workflowLibrary.init();
 
   // 资产库索引（单一数据源）
   assetStore.init();
+  // 资产库是跨项目的全局索引（<图片保存目录>/assets.json），不能等到
+  // “打开已有项目”才恢复；否则启动后直接新建项目会误显示为空。
+  await assetStore.loadFromBackend();
 
   bindKeyboard();
   bindWindowControls();
@@ -384,6 +396,7 @@ async function init(): Promise<void> {
     const maximized = readMaximized(r);
     if (maximized !== null) setWinMaxIcon(maximized);
   } catch { /* 后端不可用时静默（纯浏览器调试场景） */ }
+  await cmdPanel.refreshModels();
   void fillDefaultModels();
 }
 

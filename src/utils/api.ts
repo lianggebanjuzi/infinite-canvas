@@ -66,6 +66,8 @@ declare const pywebview: {
     save_project(data: unknown, path?: string): Promise<{ status: string }>;
     save_project_as(data: unknown): Promise<{ data?: unknown; filename?: string; filepath?: string }>;
     open_project_dialog(): Promise<{ data?: unknown; filename?: string; filepath?: string }>;
+    load_workflows(): Promise<{ status: string; workflows?: unknown[]; message?: string }>;
+    save_workflows(workflows: unknown[]): Promise<{ status: string; message?: string }>;
     load_project(file_path: string): Promise<{ data?: unknown }>;
     get_current_project_path(): Promise<{ path?: string }>;
     append_history(entry: unknown): Promise<{ status: string; message?: string }>;
@@ -194,6 +196,14 @@ export const API = {
 
     async openProject() {
         return await pywebview.api.open_project_dialog();
+    },
+
+    async loadWorkflows() {
+        return await pywebview.api.load_workflows();
+    },
+
+    async saveWorkflows(workflows: unknown[]) {
+        return await pywebview.api.save_workflows(workflows);
     },
 
     async loadProject(filePath: string) {

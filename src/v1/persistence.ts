@@ -230,6 +230,67 @@ class Persistence {
     };
   }
 
+  /**
+   * 将当前画布收敛为可复用工作流。模板保存编排与默认文本/参数，刻意丢弃结果图、来源图片、任务状态和历史，
+   * 因而从模板启动的永远是一份干净的新创作，不会意外引用用户过去的本地文件。
+   */
+  collectWorkflow(id: string, title: string): WorkflowTemplate {
+    const now = Date.now();
+    return {
+      id,
+      title,
+      version: 1,
+      canvas: { ...flowState.canvas },
+      modelDefaults: { ...flowState.modelDefaults },
+      nodes: flowState.nodes.map(node => ({
+        ...node,
+        status: 'idle' as NodeStatus,
+        imageUrl: null,
+        imageOrigin: null,
+        imageWidth: undefined,
+        imageHeight: undefined,
+        outputText: null,
+        generatedImages: [],
+        activeGeneratedIndex: 0,
+        textHistory: [],
+        refImages: [],
+        error: null,
+        lastRunAt: null,
+        parentId: null,
+        trace: null,
+        isAsset: undefined,
+        params: { ...(node.params || {}) },
+      })),
+      edges: flowState.edges.map(edge => ({ ...edge })),
+      createdAt: now,
+      updatedAt: now,
+    };
+  }
+
+  /** 用工作流开启新的未保存项目；调用方负责在此之前经过 closeGuard。 */
+  restoreWorkflow(workflow: WorkflowTemplate): boolean {
+    const ok = this.restore({
+      format: 'icv',
+      version: '3.4',
+      projectName: workflow.title,
+      canvas: workflow.canvas,
+      modelDefaults: workflow.modelDefaults,
+      nodes: workflow.nodes,
+      edges: workflow.edges,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+    if (!ok) return false;
+    this.lastPath = null;
+    flowState.dirty = true;
+    flowState.updatedAt = Date.now();
+    flowState.notify();
+    flowHistory.clear();
+    historyDrawer.clear();
+    this.syncProjectNameInput();
+    return true;
+  }
+
   /** 校验并恢复项目（format==='icv'；version 接受 3.4 与兼容读取 3.3/3.2；更旧版本不支持） */
   restore(raw: unknown): boolean {
     if (!raw || typeof raw !== 'object') {

@@ -157,6 +157,19 @@ export async function resolveDefaultChatModel(): Promise<string> {
   return fallback;
 }
 
+/**
+ * 本地原图的浏览器直读地址。
+ *
+ * 预览大图不能再先把数十 MB 原图编码成 base64、穿过 pywebview 桥接后才交给
+ * img 标签；WebView 与原图同为本地文件时，可直接让浏览器流式读取与解码。
+ * 读取被宿主策略拦截时，调用方仍会回退 loadLocalImage 的旧桥接路径。
+ */
+export function localImageFileUrl(filePath: string, preferredUrl?: string): string {
+  if (preferredUrl && preferredUrl.startsWith('file://')) return preferredUrl;
+  const normalized = filePath.replace(/\\/g, '/').replace(/^\/+/, '');
+  return encodeURI(`file:///${normalized}`);
+}
+
 export const Backend = {
   // ── 提示词库 ──
   /** 读取持久化提示词库（由桌面端写入 prompts_library.json，而非浏览器临时存储）。 */
@@ -241,6 +254,15 @@ export const Backend = {
 
   async openProject(): Promise<BackendProjectResult> {
     return (await API.openProject()) as BackendProjectResult;
+  },
+
+  // ── 全局工作流库（只存画布骨架，不属于任何单个项目） ──
+  async loadWorkflows(): Promise<{ status: string; workflows?: unknown[]; message?: string }> {
+    return await API.loadWorkflows();
+  },
+
+  async saveWorkflows(workflows: unknown[]): Promise<{ status: string; message?: string }> {
+    return await API.saveWorkflows(workflows);
   },
 
   async appendHistory(entry: unknown): Promise<BackendHistoryResult> {
