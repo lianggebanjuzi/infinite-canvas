@@ -1,0 +1,52 @@
+# Dependencies
+node_modules/
+.venv/
+
+# Build output
+gui/dist/
+dist/
+build/
+
+# Python cache
+*.pyc
+__pycache__/
+
+# Local app data and secrets
+/providers_data.json
+/settings.json
+/prompts_library.json
+/assets.json
+*.icproj
+
+# Editor and assistant state
+.idea/
+.cursor/
+.lingma/
+.reasonix/
+.codegraph/
+.agents/
+.cursorrules
+
+# WorkBuddy 本地状态：默认排除，但放行项目开发日志（跨设备同步）
+.workbuddy/*
+!.workbuddy/memory/
+!.workbuddy/memory/**
+
+# Local archives and generated logs
+*.rar
+*.zip
+*.7z
+*.log
+tsc-check.txt
+tsc-errors*.txt
+
+# 本地实验目录（含内嵌 git 仓库，禁止入库）
+/deepseek harness/
+
+# Smoke 测试编译产物（tsconfig.smoke.json 输出）
+.icv-smoke/
+# 规范 9.1 节 QA smoke 临时编译产物（tsconfig.smoke.json --outDir .icv-qa-current）
+.icv-qa-current/
+# QA 集成编译产物（tsconfig.qa-main.json 输出）
+.icv-main/
+.qa-verify/_filetest/

@@ -1,0 +1,456 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Infinite Canvas — 园艺视觉工作流</title>
+</head>
+<body>
+
+<!-- ═══════════ 顶部：极简 ═══════════ -->
+<!-- 顶栏拖动（B1）：不再使用 pywebview 官方 drag-region（最大化/还原后拖动失效的已知坑），
+     改由 main.ts bindWindowControls 自实现：mousedown 记增量 → 后端 win_move_relative 相对移动；
+     最大化状态下前端锁定 + 后端拒绝。因此本 header 不带 .pywebview-drag-region 类。 -->
+<header class="topbar">
+  <div class="logo">
+    <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><path d="M17.5 14v7M14 17.5h7"/></svg>
+    Infinite Canvas
+  </div>
+  <div class="project-wrap">
+    <button class="project-home-btn" id="btn-project-home" type="button" title="返回项目入口">项目</button>
+    <input class="project-name" id="project-name" value="未命名项目" spellcheck="false" title="项目名称">
+    <span class="save-status" id="save-status" data-status="saved">已保存</span>
+    <span class="save-dot" id="save-dot" title="有未保存的修改"></span>
+  </div>
+  <!-- 撤销/重做（信任层） -->
+  <div class="topbar-tools">
+    <button class="win-btn" id="btn-undo" title="撤销 (Ctrl+Z)" disabled>
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7v6h6"/><path d="M21 17a9 9 0 0 0-9-9 9 9 0 0 0-6 2.3L3 13"/></svg>
+    </button>
+    <button class="win-btn" id="btn-redo" title="重做 (Ctrl+Shift+Z)" disabled>
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 7v6h-6"/><path d="M3 17a9 9 0 0 1 9-9 9 9 0 0 1 6 2.3L21 13"/></svg>
+    </button>
+  </div>
+  <!-- 自绘窗口控制按钮（无边框窗口；.topbar-right 布局 CSS 早已预留，只补 HTML） -->
+  <div class="topbar-right">
+    <button class="win-btn" id="win-min" title="最小化">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M5 12h14"/></svg>
+    </button>
+    <button class="win-btn" id="win-max" title="最大化 / 还原">
+      <svg class="win-max-ico" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="5" y="5" width="14" height="14" rx="2"/></svg>
+      <svg class="win-restore-ico" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="9" width="10" height="10" rx="1.5"/><path d="M9 5v4h10v10h-4"/></svg>
+    </button>
+    <button class="win-btn win-close" id="win-close" title="关闭">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
+    </button>
+  </div>
+</header>
+
+<div class="main">
+  <!-- 左侧：统一资源抽屉（资源 / 历史 / 提示词 三个页签共享一个外壳，Phase 2） -->
+  <div class="left-drawer" id="left-drawer">
+    <button class="drawer-handle" id="drawer-handle" title="收起资源面板">
+      <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m9 6 6 6-6 6"/></svg>
+    </button>
+    <aside class="sidebar-left resource-sidebar" id="resource-sidebar">
+      <!-- 统一页签：资源 / 历史 / 提示词（页签状态由 left-capsule 编排） -->
+      <div class="resource-tabs" id="resource-tabs" role="tablist">
+        <button class="resource-tab active" data-tab="assets" role="tab" aria-selected="true">资源<span class="resource-tab-count" id="resource-count-assets"></span></button>
+        <button class="resource-tab" data-tab="history" role="tab" aria-selected="false">历史<span class="resource-tab-count" id="resource-count-history"></span></button>
+        <button class="resource-tab" data-tab="prompts" role="tab" aria-selected="false">提示词<span class="resource-tab-count" id="resource-count-prompts"></span></button>
+      </div>
+
+      <!-- 历史页签：原历史图库内容（history-drawer 渲染） -->
+      <section class="resource-panel" id="resource-panel-history" data-panel="history" role="tabpanel">
+        <div class="history-search" id="history-search-wrap">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
+          <input class="history-search-input" id="history-search" placeholder="搜 prompt / 模型 / 标签…" spellcheck="false">
+        </div>
+        <div class="history-tabs" id="history-tabs">
+          <button class="history-tab active" data-tab="image"><span class="history-tab-name">成图</span><span class="history-tab-count"></span></button>
+          <button class="history-tab" data-tab="text"><span class="history-tab-name">文本</span><span class="history-tab-count"></span></button>
+        </div>
+        <div class="history-grid" id="history-grid"></div>
+        <div class="history-empty" id="history-empty" style="display:none;"></div>
+      </section>
+
+      <!-- 资源页签：原资产库内容（asset-drawer 渲染） -->
+      <section class="resource-panel" id="resource-panel-assets" data-panel="assets" role="tabpanel">
+        <div class="side-head"><span>资产库</span><span class="asset-count" id="asset-count"></span></div>
+        <div class="history-search" id="asset-search-wrap">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
+          <input class="history-search-input" id="asset-search" placeholder="搜 prompt / 模型 / 标签…" spellcheck="false">
+        </div>
+        <div class="history-grid" id="asset-grid"></div>
+        <div class="history-empty" id="asset-empty" style="display:none;"></div>
+      </section>
+
+      <!-- 提示词页签（prompt-tab 渲染；数据源与指令面板提示词库共用） -->
+      <section class="resource-panel" id="resource-panel-prompts" data-panel="prompts" role="tabpanel">
+        <div class="history-search" id="prompt-search-wrap">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
+          <input class="history-search-input" id="prompt-search" placeholder="搜索已收藏的提示词…" spellcheck="false">
+        </div>
+        <div class="prompt-tab-list" id="prompt-tab-list"></div>
+        <div class="prompt-tab-empty" id="prompt-tab-empty" style="display:none;"></div>
+        <div class="prompt-tab-foot">
+          <button class="prompt-tab-save" id="prompt-tab-save" title="收藏当前输入框中的提示词">收藏当前输入</button>
+        </div>
+      </section>
+    </aside>
+  </div>
+
+  <!-- 左侧胶囊调（Phase 2）：统一资源入口；点图标抽屉滑出，再点收起（页签状态保留） -->
+  <div class="left-capsule" id="left-capsule">
+    <button class="capsule-btn" id="capsule-resources" title="资源面板">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><path d="M17.5 14v7M14 17.5h7"/></svg>
+    </button>
+  </div>
+
+    <!-- 画布 -->
+  <div class="canvas-wrap" id="canvas-wrap">
+    <!-- 顶部悬浮操作条（仅单选出现） -->
+    <div class="action-bar" id="action-bar">
+      <button class="act-btn" data-action="expand">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3H5a2 2 0 0 0-2 2v3M16 3h3a2 2 0 0 1 2 2v3M8 21H5a2 2 0 0 1-2-2v-3M16 21h3a2 2 0 0 0 2-2v-3"/></svg>
+        扩图
+      </button>
+      <div class="act-more-wrap">
+        <button class="act-btn" data-action="more" type="button">更多 ▾</button>
+        <div class="act-more-menu" id="act-more-menu" hidden>
+          <span>局部修改 · 即将推出</span>
+          <span>多角度 · 即将推出</span>
+        </div>
+      </div>
+      <div class="act-sep"></div>
+      <button class="act-btn" data-action="download" title="下载">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg>
+      </button>
+    </div>
+
+    <div class="canvas" id="canvas">
+      <svg id="link-layer">
+        <defs>
+          <linearGradient id="flowGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+            <stop offset="0%" stop-color="#7C9A72" stop-opacity=".3"/>
+            <stop offset="50%" stop-color="#7C9A72"/>
+            <stop offset="100%" stop-color="#7C9A72" stop-opacity=".3"/>
+          </linearGradient>
+        </defs>
+      </svg>
+    </div>
+    <div class="selection-box" id="selection-box"></div>
+
+    <!-- 视口导航：节点分散时快速回到全部内容或当前创作点。 -->
+    <div class="canvas-nav" aria-label="画布视图">
+      <button class="canvas-nav-btn" id="btn-fit-canvas" title="适配全部节点到视口" aria-label="适配全部节点到视口">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M8 3H5a2 2 0 0 0-2 2v3M16 3h3a2 2 0 0 1 2 2v3M8 21H5a2 2 0 0 1-2-2v-3M16 21h3a2 2 0 0 1 2 2v-3"/></svg>
+      </button>
+      <button class="canvas-nav-btn" id="btn-focus-selected" title="聚焦当前选中节点" aria-label="聚焦当前选中节点">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="7"/><circle cx="12" cy="12" r="2"/></svg>
+      </button>
+    </div>
+
+    <!-- 指令面板（贴卡片下沿，仅单选出现，空间不足自动翻到上方） -->
+    <div class="cmd-panel" id="cmd-panel">
+      <div class="cmd-context">
+        <span class="ctx-name" id="ctx-name">—</span>
+        <span class="ctx-hint" id="ctx-hint"></span>
+      </div>
+      <div class="cmd-refs" id="cmd-refs">
+        <div class="cmd-ref" id="cmd-ref-main"></div>
+        <button class="cmd-ref-add" id="cmd-ref-add" title="添加参考图">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+        </button>
+      </div>
+      <!-- 仅扩图节点显示：不要把“比例/摆放”藏在通用参数芯片里。 -->
+      <div class="outpaint-settings" id="outpaint-settings" hidden>
+        <div>
+          <span class="outpaint-settings-label">扩图画布</span>
+          <span class="outpaint-settings-hint" id="outpaint-settings-summary">1:1 · 原图居中、自动适配</span>
+        </div>
+        <button class="outpaint-settings-adjust" id="outpaint-settings-adjust" type="button">
+          <span id="outpaint-settings-ratio">1:1</span>
+          <span>调整画布</span>
+        </button>
+      </div>
+      <textarea class="cmd-input" id="cmd-input" placeholder="输入指令编辑这张图，如：把背景换成浅灰水泥墙，加一盆绿萝" spellcheck="false"></textarea>
+      <!-- 提示词库：入口负责浏览，旁侧收藏只保存当前输入，避免两种操作抢同一视觉层级。 -->
+      <div class="cmd-prompt-lib">
+        <button class="cmd-lib-btn cmd-lib-browse-btn" id="cmd-lib-btn" title="打开提示词库">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H20v20H6.5a2.5 2.5 0 0 1 0-5H20"/><path d="M8 7h8M8 11h6"/></svg>
+          <span>提示词库</span>
+        </button>
+        <button class="cmd-lib-btn cmd-lib-save-btn" id="cmd-lib-save" title="收藏当前提示词" aria-label="收藏当前提示词">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20.5s-7-4.4-7-10.2A4.1 4.1 0 0 1 12 7.4a4.1 4.1 0 0 1 7 2.9c0 5.8-7 10.2-7 10.2Z"/></svg>
+        </button>
+      </div>
+      <!-- text-gen 历史反推结果列表（仅选中文本反推节点时显示，JS 填充） -->
+      <div class="cmd-text-history" id="cmd-text-history"></div>
+      <div class="cmd-controls">
+        <button class="cmd-advanced-toggle" id="cmd-advanced-toggle" type="button" aria-expanded="false">更多设置 ▾</button>
+        <button class="cmd-chip" id="chip-model" title="选择模型">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><path d="M9 2v2M15 2v2M9 20v2M15 20v2M2 9h2M2 15h2M20 9h2M20 15h2"/></svg>
+          <span id="chip-model-label">选择模型</span> <span class="chev">▾</span>
+        </button>
+        <button class="cmd-chip" id="chip-ratio" title="画面比例">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="5" width="14" height="14" rx="2"/><path d="M17 9h4v12a2 2 0 0 1-2 2h-4"/></svg>
+          <span id="chip-ratio-label">3:4</span> <span class="chev">▾</span>
+        </button>
+        <button class="cmd-chip" id="chip-res" title="分辨率">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6"/></svg>
+          <span id="chip-res-label">2K</span> <span class="chev">▾</span>
+        </button>
+        <button class="cmd-chip" id="chip-count" title="生成张数">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+          <span id="chip-count-label">1张</span> <span class="chev">▾</span>
+        </button>
+        <button class="cmd-send" id="cmd-send" title="发送">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 底部胶囊条：打开 / 保存 / 主题 / 设置 / 运行选中 -->
+  <div class="bottom-bar" id="bottom-bar">
+    <button class="icon-btn" title="打开项目" id="btn-open">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 14 1.5-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.54 6a2 2 0 0 1-1.95 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H18a2 2 0 0 1 2 2v2"/></svg>
+    </button>
+    <button class="icon-btn" title="保存项目 (Ctrl+S)" id="btn-save">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2Z"/><path d="M17 21v-8H7v8"/><path d="M7 3v5h8"/></svg>
+    </button>
+    <button class="icon-btn" title="工作流库" id="btn-workflows">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="3" width="16" height="18" rx="2"/><path d="M8 8h8M8 12h8M8 16h5"/></svg>
+    </button>
+    <div class="bar-sep"></div>
+    <button class="icon-btn" id="btn-theme" title="切换主题">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M6.3 17.7l-1.4 1.4M19.1 4.9l-1.4 1.4"/></svg>
+    </button>
+    <button class="icon-btn" title="设置" id="btn-settings">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-1-1.74l.15-.09a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg>
+    </button>
+    <button class="icon-btn" title="任务面板" id="btn-task">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h16M4 12h16M4 18h10"/></svg>
+    </button>
+    <button class="run-btn" id="btn-run-selected" title="运行选中节点（单选=运行当前卡）">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 3l14 9-14 9V3Z"/></svg>
+      <span>运行选中</span>
+    </button>
+    <button class="run-btn" id="btn-compare" title="对比选中成图（至少 2 张）" disabled>
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/><rect x="14" y="16" width="7" height="5" rx="1.5"/></svg>
+      <span>对比</span>
+    </button>
+  </div>
+
+  <!-- 底部任务面板（B-4：批次 + 逐 Job 状态/缩略图/失败/重试；运行中自动展开，结束保留摘要可收起） -->
+  <div class="task-panel" id="task-panel"></div>
+
+  <!-- 空态引导（挂起：全新启动不再显示引导卡；代码保留便于恢复，恢复时取消注释并同步 main.ts 的 emptyState.init()） -->
+  <!--
+  <div class="empty-state" id="empty-state">
+    <div class="empty-guide">
+      <svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><path d="M17.5 14v7M14 17.5h7"/></svg>
+      <div class="empty-title">拖入图片或新建生成节点</div>
+      <div class="empty-desc">创建默认工作流：挂载产品图，AI 帮你换背景、调风格、出多角度图。<br>也可以直接拖入历史图片，或在画布上右键新建节点。</div>
+      <div class="empty-actions">
+        <button class="btn-primary" id="btn-create-template">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+          创建默认模板
+        </button>
+        <button class="btn-ghost" id="btn-empty-open">打开项目</button>
+      </div>
+    </div>
+  </div>
+  -->
+</div>
+
+<!-- Phase 5 项目入口：本地项目的明确起点；不读取或写入浏览器项目存储。 -->
+<div class="project-home" id="project-home" hidden>
+  <div class="project-home-card" role="dialog" aria-modal="true" aria-labelledby="project-home-title">
+    <div class="project-home-mark">Infinite Canvas</div>
+    <h1 id="project-home-title">开始一项视觉创作</h1>
+    <p>从一张图片、一句想法或已有本地项目继续。所有内容仍保存在本地 .icproj 项目中。</p>
+    <div class="project-home-actions">
+      <button class="btn-primary" id="project-home-new" type="button">新建创作项目</button>
+      <button class="btn-ghost" id="project-home-open" type="button">打开本地项目</button>
+    </div>
+    <section class="project-home-recent" aria-labelledby="project-home-recent-title">
+      <div class="project-home-section-head"><h2 id="project-home-recent-title">最近项目</h2><button type="button" id="project-home-clear-missing">清理失效记录</button></div>
+      <div id="project-home-recent-list" class="project-home-recent-list"></div>
+      <p id="project-home-recent-empty" class="project-home-recent-empty">保存或打开项目后，会在这里保留最近记录。</p>
+    </section>
+    <section class="project-home-themes" aria-labelledby="project-home-theme-title">
+      <h2 id="project-home-theme-title">工作台主题</h2>
+      <div id="project-home-theme-list" class="project-home-theme-list">
+        <button type="button" data-theme-choice="warm">暖白</button><button type="button" data-theme-choice="dark">深色</button><button type="button" data-theme-choice="ocean">海雾</button><button type="button" data-theme-choice="violet">靛紫</button><button type="button" data-theme-choice="copper">铜绿</button>
+      </div>
+    </section>
+    <div class="project-home-actions project-home-backup-actions" aria-label="本地备份">
+      <button class="btn-ghost" id="project-home-backup-export" type="button">导出个人备份</button>
+      <button class="btn-ghost" id="project-home-backup-import" type="button">恢复个人备份</button>
+    </div>
+    <small class="project-home-backup-note">备份不包含 API 密钥；恢复后请重新配置渠道。</small>
+    <button class="project-home-resume" id="project-home-resume" type="button">继续当前画布</button>
+  </div>
+</div>
+
+<!-- 右键菜单 -->
+<div class="ctx-menu" id="ctx-menu"></div>
+
+<!-- 设置面板 -->
+<div class="overlay" id="settings-overlay">
+  <div class="settings-panel">
+    <div class="settings-head">
+      <h2>设置 · 供应商 / 密钥组</h2>
+      <button class="settings-close" id="btn-close-settings" title="关闭">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
+      </button>
+    </div>
+    <div class="settings-body">
+      <div id="settings-provider-list"></div>
+      <div class="settings-add">
+        <input class="settings-input" id="settings-add-name" placeholder="供应商名称，如：bltcy.ai" spellcheck="false">
+        <button class="btn-primary" id="btn-add-provider" style="padding:8px 16px;font-size:12.5px;">添加</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- 大图查看（左右分栏：左信息栏 + 右大图；图片性能优化：先显示缩略图 + loading，再按需加载原图；信息栏字段由 JS 填充） -->
+<div class="img-modal" id="img-modal" tabindex="-1">
+  <div class="img-modal-panel" id="img-modal-panel">
+    <button class="img-modal-close" id="img-modal-close" title="关闭">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
+    </button>
+    <div class="img-modal-title">图片信息</div>
+    <div class="img-modal-fields" id="img-modal-fields"></div>
+  </div>
+  <div class="img-modal-stage" id="img-modal-stage">
+    <div class="img-modal-nav" aria-label="图片切换">
+      <button class="img-modal-nav-btn prev" id="img-modal-prev" title="上一张（←）" aria-label="上一张">‹</button>
+      <span class="img-modal-count" id="img-modal-count"></span>
+      <button class="img-modal-nav-btn next" id="img-modal-next" title="下一张（→）" aria-label="下一张">›</button>
+    </div>
+    <img id="img-modal-img" alt="">
+    <div class="img-modal-loading" id="img-modal-loading">加载原图中…</div>
+  </div>
+</div>
+
+<!-- 扩图弹层（image-gen 悬浮「扩图」入口；挂 .overlay 类 → interactions.ts 已把 .overlay 排除在画布交互外，天然防冲突） -->
+<div class="overlay outpaint-overlay" id="outpaint-overlay">
+  <div class="outpaint-panel">
+    <div class="outpaint-head">
+      <h2>扩图</h2>
+      <span class="outpaint-sub">白色区域将由 AI 补全</span>
+      <button class="outpaint-close" id="outpaint-close" title="关闭">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
+      </button>
+    </div>
+    <div class="outpaint-body">
+      <div class="outpaint-control-head">
+        <div class="outpaint-section-label">目标画布大小</div>
+        <span class="outpaint-control-value" id="outpaint-canvas-summary">4096 × 4096 px</span>
+      </div>
+      <div class="outpaint-ratios" id="outpaint-ratios">
+        <button class="outpaint-ratio" data-ratio="1:1">1:1</button>
+        <button class="outpaint-ratio" data-ratio="3:4">3:4</button>
+        <button class="outpaint-ratio" data-ratio="4:3">4:3</button>
+        <button class="outpaint-ratio" data-ratio="16:9">16:9</button>
+        <button class="outpaint-ratio" data-ratio="9:16">9:16</button>
+      </div>
+      <div class="outpaint-stage" id="outpaint-stage">
+        <div class="outpaint-stage-hint">白色区域将被补全<br>可拖动原图微调位置</div>
+        <img id="outpaint-img" alt="" draggable="false">
+      </div>
+      <div class="outpaint-placement">
+        <div class="outpaint-control-head">
+          <div class="outpaint-section-label">原图位置</div>
+          <span class="outpaint-control-value">也可直接拖动预览图</span>
+        </div>
+        <div class="outpaint-position-grid" id="outpaint-position-grid" aria-label="原图位置">
+          <button type="button" data-position="top-left" title="左上">↖</button>
+          <button type="button" data-position="top" title="上方">↑</button>
+          <button type="button" data-position="top-right" title="右上">↗</button>
+          <button type="button" data-position="left" title="左侧">←</button>
+          <button type="button" data-position="center" title="居中">●</button>
+          <button type="button" data-position="right" title="右侧">→</button>
+          <button type="button" data-position="bottom-left" title="左下">↙</button>
+          <button type="button" data-position="bottom" title="下方">↓</button>
+          <button type="button" data-position="bottom-right" title="右下">↘</button>
+        </div>
+      </div>
+      <div class="outpaint-zoom">
+        <span class="outpaint-zoom-label">原图大小</span>
+        <input type="range" id="outpaint-zoom" min="0.2" max="3" step="0.05" value="1">
+        <output id="outpaint-zoom-value">100%</output>
+      </div>
+      <div class="outpaint-desc">
+        <textarea id="outpaint-desc" placeholder="可选：补充希望扩展出的内容，如：花园里的白色绣球花、暖阳" spellcheck="false"></textarea>
+      </div>
+      <div class="outpaint-model" id="outpaint-model-label"></div>
+    </div>
+    <div class="outpaint-foot">
+      <button class="btn-ghost" id="outpaint-cancel">取消</button>
+      <button class="btn-primary" id="outpaint-confirm">开始扩图</button>
+    </div>
+  </div>
+</div>
+
+<!-- 对比面板（模态浮层；挂 .overlay 类 → interactions.ts 已把 .overlay 排除在画布交互外；C4 关闭仅清瞬时态） -->
+<div class="overlay compare-overlay" id="compare-overlay">
+  <div class="compare-panel">
+    <div class="compare-head">
+      <h2>对比 <span class="compare-count" id="compare-count"></span></h2>
+      <div class="compare-grid-switch">
+        <button class="compare-grid-btn" data-grid="2">2宫格</button>
+        <button class="compare-grid-btn" data-grid="4">4宫格</button>
+        <button class="compare-grid-btn" data-grid="8">8宫格</button>
+      </div>
+      <button class="compare-close" id="compare-close" title="关闭">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
+      </button>
+    </div>
+    <div class="compare-grid" id="compare-grid"></div>
+    <div class="compare-foot">淘汰的图留在图库，不污染画布主链</div>
+  </div>
+</div>
+
+<!-- 隐藏文件选择（追加参考图） -->
+<input type="file" id="file-input" accept="image/*" style="display:none;">
+
+<!-- 结果查看器抽屉（C-2：批次大图浏览/切换/失败/下载/复制/反推/再编辑/单项重试；从右侧滑出） -->
+<div class="result-viewer" id="result-viewer">
+  <div class="rv-head">
+    <h2>结果查看器</h2>
+    <span class="rv-count" id="rv-count"></span>
+    <button class="rv-close" id="rv-close" title="关闭">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
+    </button>
+  </div>
+  <div class="rv-body" id="rv-body"></div>
+</div>
+
+<!-- 工作流库：模板只保存画布骨架，创建时生成一份新项目副本。 -->
+<div class="overlay workflow-overlay" id="workflow-overlay">
+  <div class="workflow-panel">
+    <div class="workflow-head">
+      <div><h2>工作流库</h2><p>保存可复用的节点、连线与默认参数</p></div>
+      <button class="workflow-close" id="workflow-close" title="关闭">×</button>
+    </div>
+    <div class="workflow-save-row">
+      <input class="workflow-name-input" id="workflow-name" placeholder="例如：产品主视觉探索" maxlength="48" spellcheck="false">
+      <button class="btn-primary workflow-save-btn" id="workflow-save">保存当前画布</button>
+    </div>
+    <div class="workflow-hint">不会保存成图、历史记录、任务状态或本地图片。</div>
+    <div class="workflow-list" id="workflow-list"></div>
+  </div>
+</div>
+
+<!-- 提示 toast -->
+<div class="toast-hint" id="toast"></div>
+
+<!-- Vite 模块入口（放在 body 末尾，确保 DOM 已解析） -->
+<script type="module" src="./main.ts"></script>
+</body>
+</html>

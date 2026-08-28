@@ -1,0 +1,28 @@
+{
+  "providers": [
+    {
+      "id": "provider_example",
+      "name": "Example Provider",
+      "short_name": "Example",
+      "type": "OpenAI",
+      "enabled": false,
+      "api_key": "YOUR_API_KEY_HERE",
+      "api_url": "https://api.example.com",
+      "models": [
+        {
+          "id": "example-chat-model",
+          "name": "Example Chat Model",
+          "type": "chat",
+          "enabled": false
+        },
+        {
+          "id": "example-image-model",
+          "name": "Example Image Model",
+          "type": "drawing",
+          "enabled": false
+        }
+      ],
+      "use_proxy": false
+    }
+  ]
+}

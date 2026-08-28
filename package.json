@@ -1,0 +1,33 @@
+{
+  "name": "infinite-canvas",
+  "version": "2.1.0",
+  "description": "A local-first infinite canvas for AI-assisted creative workflows.",
+  "private": false,
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit",
+    "verify:migration": "npm run typecheck && node scripts/verify-migration.mjs",
+    "package:test": "python build_ts_test.py"
+  },
+  "keywords": [
+    "infinite-canvas",
+    "ai",
+    "creative-tools",
+    "workflow",
+    "pywebview",
+    "typescript"
+  ],
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^25.7.0",
+    "sass": "^1.99.0",
+    "typescript": "^6.0.3",
+    "vite": "^8.0.12"
+  },
+  "dependencies": {
+    "@fortawesome/fontawesome-free": "^7.2.0"
+  }
+}

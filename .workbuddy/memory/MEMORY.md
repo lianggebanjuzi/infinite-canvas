@@ -1,0 +1,40 @@
+# MEMORY
+
+## 项目长期信息
+
+- **2026-08-17 起主开发目录 = `D:\Infinite Canvas\Infinite Canvas 2.0`**（本机新建，复制自 1.0 含 git 历史；1.0 目录保留作归档不再开发）。2.0 与 1.0 同仓库 `github.com/lianggebanjuzi/infinite-canvas` 同 main 分支，历史延续；起步说明 `docs/2.0-起步说明.md`，产品方案 `docs/视觉实验台-产品方案v3.md`。
+- 2.0 当前基线（2026-08-16）：双卡模型（image-gen/text-gen）+ 信任层（原子保存/关闭保护/撤销重做）+ 资产评估层（复现按钮/成图库/对比面板）+ 资产库拆分（增量-3 已入库 42502a0）。剩余路线：批量变体对比、Agent、模板固化。
+- 2.0 构建坑：vite `emptyOutDir` 清 `gui/dist` 会被环境 trash 拦截——**先手动删 `gui/dist` 再单独跑 build**。
+- Infinite Canvas 2.2 是一个基于 pywebview + 原生 HTML/CSS/JavaScript 的无限画布创作工具，核心对象是卡片、连线、分组与 AI 工作流。
+- **过滤模型 Bug**：`src/v1/api.ts` 中过滤 key 名时，需同时检查中英文（如 `text` 和 `文本`），防止用户自定义中文名时过滤失效。
+- 现有界面基础风格是玻璃极简风、深色优先、支持浅色主题。
+- 2026-04-06 曾定 UI 方向为“Canvas Command Workspace”（已被 2026-08-11 重启方案取代，勿再沿用）。
+- 2026-08-11 最终 UI 决策（用户拍板）：**温馨园艺风**——暖米白底+鼠尾草绿点缀+大圆角+柔和暖阴影，深色为暖棕黑；否决玻璃拟态/冷色技术风。卡片形态为“图即卡片”（大图占满、标签悬浮左上、操作悬浮右上），选中卡片时操作条贴上沿、指令面板贴下沿；运行状态用流光连线+扫描光，不要文字日志；布局：顶部极简栏+左侧历史图库+中央画布。高保真原型在 `prototypes/ui-v2.html`（已迭代 3 版）。
+
+## 2026-08-11 项目重启决策（方向重大变更）
+
+- 用户决定重启 Infinite Canvas，**放弃"通用无限画布"定位**，改为**垂直工作流工具**：一条预设的电商视觉 AI 流水线（输入产品图→换风格→生成复现json→3D复现→场景合成/出图），面向用户自己的园艺产品三维电商视觉场景。
+- 核心交互：**参数化联动**——改上游输入（换图/改关键词），下游自动标"待重跑"，用户分段执行（跑一段看一段），保留连线但默认模板自动连好。
+- 痛点：Google AI Studio Flow 每周浪费 ≥3 小时且频繁"不让出图"（审核/额度/网络）。注意：**自动切供应商容错已在最终方案中砍掉（用户拍板）**——失败就节点红点、手动处理；多供应商能力靠复用 backend 的 UnifiedAPIRouter 保留，失败后的手动换源路径体验待定。
+- 复用资产：backend 全保留（UnifiedAPIRouter 多供应商兼容/错误分层）、PipelineEngine、供应商管理、.icproj 项目格式、历史图库；砍掉：自由画布从零搭建、七种卡片通用体系、激光切割等花活、自动容错、增量重跑缓存（第一版全量重跑）、移动端。技术栈不变：pywebview + TypeScript/Vite。
+- 第一版范围：2 步最小闭环（输入产品图→换风格）+ 改参联动（脏标记）+ 分段执行 + 选中运行；验收唯一标准——"上周出不了的图能出来、用户每周愿意主动打开几次"。
+- 权威文档：`重启方案总结-2026-08-11.md`（方向已定，待开发启动）。
+
+## 2026-08-13 节点模型收敛（架构重要变更，用户拍板）
+
+- 用户觉得三种节点（产品图输入/换风格/图片生成）太相似、区分度低，拍板**合并成单一「生成节点」**（NodeType 收敛为 `image-gen`）。
+- 保留连线流水线（上游 imageUrl 自动喂下游参考、改上游标 stale、分段执行）；用户另拍板两点：①**必须有提示词才能运行**；②参考图本期只做**追加+删除**（替换/排序 P2）。
+- 数据模型：`FlowNode` 新增 `refImages: string[]`（用户挂的参考图）与 `imageUrl`（本节点输出图）**分离**；`FlowState.getReferenceImages(id)` 是参考图合并唯一入口（本节点 refImages ∪ 上游 imageUrl，去重保序）。
+- 运行：canRun = 非空 prompt + 已选 model；删除 product-image「有图即完成不调 backend」分支。
+- 连线：canConnect 删 product-image 特例 + BFS 防环（`_wouldCycle`）。
+- 迁移：persistence `migrateNode` 三旧类型归一 image-gen（product-image → refImages=[imageUrl]/imageUrl=null/status=idle），version 3.1。
+- 边界（已知取舍）：迁移后旧产品图节点 imageUrl=null，须补提示词重跑才产生新输出图喂下游——是"强制提示词"拍板的直接结果，后续若觉得"扔图即图"更重要可加"参考图直达输出"轻量操作。
+- 已删文件：`src/v1/nodes/product-image.ts`、`style-transfer.ts`。
+
+## 跨电脑协作约定（2026-08-13 建立）
+
+- 项目已托管 GitHub：`github.com/lianggebanjuzi/infinite-canvas`，本机 git 已免密（代理 7890 / TLS openssl / credential store）。`.workbuddy/memory/` 开发日志已入库跨设备同步，其余 `.workbuddy` 本地状态仍排除。
+- **用户在别的电脑打开项目时的开场白**：先 git pull 拉最新代码 → 读 `.workbuddy/memory/` 日志 → 汇报项目状态/上次进度/待办 → 再继续干活。新电脑则先 git clone + 装依赖（pip install -r requirements.txt + npm install && npm run build）。
+- **收工固定动作**：把改动提交到 git（提交说明写人话：改了什么/为什么）→ push 到 GitHub → 在当日开发日志记一笔今天做了什么 → 告知提交号与状态。
+- 铁律：开工先 pull、收工必 push；完成一个功能就提交一次。换电脑不会丢进度，任何电脑 git log + memory 日志都是同一份历史。
+- ⚠️ **2026-08-15 用户纠偏（覆盖收工必 push 的默认）**：用户明确反感未经请求的 git 操作，原话"我没有让你上传git，你上传个毛啊"。**push（上传 GitHub）必须事先征得用户同意**；本地 commit 作为留档可做但要做完主动告知，用户不认可也可省。开工 pull 照旧。
