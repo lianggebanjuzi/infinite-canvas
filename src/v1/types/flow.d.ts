@@ -13,19 +13,8 @@ type NodeType = 'image-gen' | 'text-gen' | 'text-split' | 'video-gen' | 'audio-g
 type NodeStatus = 'idle' | 'queued' | 'submitting' | 'run' | 'done' | 'partial-failed' | 'fail' | 'stale';
 
 /**
- * 4.1-B 媒体任务（蒙版局改 / 多角度）本地状态机，持久化于节点 params.imageEditTask。
- * 远端受理（accepted，拿到 remote_task_id）后只查询原任务，禁止自动换 Key 重投（4.0 §3.2）。
- */
-interface ImageEditTask {
-  state: 'queued' | 'submitting' | 'accepted' | 'processing' | 'succeeded' | 'failed' | 'cancelled' | 'uncertain';
-  localTaskId?: string;   // 本地任务 id（轮询 get_task_result 用）
-  remoteTaskId?: string;  // 已获上游受理的唯一远端任务（查询/断网恢复不得换 Key 重投）
-  error?: string;
-}
-
-/**
- * 4.2 媒体任务（视频 / 音频）本地状态机，持久化于节点 params.videoTask / params.audioTask。
- * 与 ImageEditTask 同构：accepted 后只查询原任务，禁止自动换 Key 重投（4.0 §3.2）。
+ * 异步媒体任务（图像编辑 / 视频 / 音频）本地状态机，持久化于各节点 params。
+ * accepted 后只查询原任务，禁止自动换 Key 重投（4.0 §3.2）。
  */
 interface MediaTask {
   state: 'queued' | 'submitting' | 'accepted' | 'processing' | 'succeeded' | 'failed' | 'cancelled' | 'uncertain';
@@ -33,6 +22,9 @@ interface MediaTask {
   remoteTaskId?: string;  // 已获上游受理的唯一远端任务（查询/断网恢复不得换 Key 重投）
   error?: string;
 }
+
+/** 图像编辑复用统一媒体任务契约，持久化字段为 params.imageEditTask。 */
+type ImageEditTask = MediaTask;
 
 /** 端口数据类型（A-3 端口类型契约；五类型，见 docs/重构-增量架构设计 §3.3） */
 type PortType = 'Image' | 'ImageList' | 'Text' | 'TextList' | 'Video' | 'Audio' | 'GenerationConfig';

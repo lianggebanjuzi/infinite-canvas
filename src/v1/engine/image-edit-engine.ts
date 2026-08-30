@@ -8,6 +8,7 @@ import { flowHistory } from '../state/history';
 import { dirty } from '../state/dirty';
 import { CARD_W } from '../canvas/canvas-view';
 import { pollTask } from './poller';
+import { isMediaTaskTerminal, normalizeMediaTask } from './media-task';
 import { historyPersist } from '../history-persist';
 import { historyDrawer } from '../ui/history-drawer';
 import { showToast } from '../ui/toast';
@@ -98,8 +99,7 @@ class ImageEditEngine {
     const params = node?.params as Record<string, unknown> | undefined;
     const task = params?.imageEditTask as ImageEditTask | undefined;
     if (!node || !task?.localTaskId || this.active.has(nodeId)) return;
-    const terminal: ImageEditTask['state'][] = ['succeeded', 'failed', 'cancelled', 'uncertain'];
-    if (terminal.includes(task.state)) return;
+    if (isMediaTaskTerminal(task.state)) return;
     this.active.add(nodeId);
     flowState.updateNode(nodeId, { status: 'run', error: '查询恢复中：不会重新提交远端任务' });
     try {
@@ -115,8 +115,7 @@ class ImageEditEngine {
       const params = node?.params as Record<string, unknown> | undefined;
       const task = params?.imageEditTask as ImageEditTask | undefined;
       if (!task?.localTaskId) return;
-      const terminal: ImageEditTask['state'][] = ['succeeded', 'failed', 'cancelled', 'uncertain'];
-      if (terminal.includes(task.state)) return;
+      if (isMediaTaskTerminal(task.state)) return;
       void this.recover(node.id);
     });
   }
@@ -166,7 +165,7 @@ class ImageEditEngine {
         if (!node?.trace) return;
         if (remoteTaskId) node.trace.remoteTaskId = remoteTaskId;
         flowState.updateNodeParams(nodeId, {
-          imageEditTask: { state: this.normalizeState(status), localTaskId: taskId, remoteTaskId: remoteTaskId || node.trace.remoteTaskId },
+          imageEditTask: normalizeMediaTask(status, taskId, remoteTaskId || node.trace.remoteTaskId),
         });
         flowState.updateNode(nodeId, {
           status: status === 'queued' ? 'queued' : 'run',
@@ -224,16 +223,6 @@ class ImageEditEngine {
     });
     dirty.markUpstreamChanged(nodeId);
     showToast('图片编辑完成');
-  }
-
-  /** poller 的中间态字符串 → ImageEditTask.state 规范化（accepted 后只有原任务查询语义）。 */
-  private normalizeState(status: string): ImageEditTask['state'] {
-    if (status === 'queued' || status === 'pending') return 'queued';
-    if (status === 'processing' || status === 'in_progress') return 'processing';
-    if (status === 'recovering') return 'accepted';
-    if (status === 'done') return 'succeeded';
-    if (status === 'failed' || status === 'error') return 'failed';
-    return 'accepted';
   }
 
   private async sourceData(source: FlowNode): Promise<string[]> {
