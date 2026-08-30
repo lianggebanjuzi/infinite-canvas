@@ -52,3 +52,6 @@ tsc-errors*.txt
 .qa-verify/_filetest/
 # QA smoke 的本机文本输出（脚本本身仍纳入版本控制）
 .qa-verify/*.txt
+
+# 独立维护、独立远程仓库的 Web 概念站
+/infinite-canvas-web-concept/
