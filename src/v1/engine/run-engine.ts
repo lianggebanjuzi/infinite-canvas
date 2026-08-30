@@ -28,7 +28,7 @@ import { nodeRegistry } from '../nodes/node-registry';
 import { Backend, fetchImageModels, fetchVideoModels, fetchAudioModels } from '../api';
 import { pollTask, PollResult } from './poller';
 import { batchStore } from '../state/batch-store';
-import { batchQueue, readConcurrency, BatchCompleteFn, BatchJobCompleteFn, JobRunOutcome, RunJobFn } from './batch-queue';
+import { batchQueue, readConcurrency, BatchCompleteFn, BatchJobCompleteFn, RunJobFn } from './batch-queue';
 import { historyDrawer } from '../ui/history-drawer';
 import { historyPersist } from '../history-persist';
 import { linkView } from '../canvas/link-view';
@@ -37,6 +37,7 @@ import { showToast } from '../ui/toast';
 import { OUTPAINT_PROMPT_PREFIX, composeOutpaintDataUrl, loadOutpaintImage } from './outpaint-util';
 import { ActiveRun, MediaTaskRecoveryController } from './media-task-recovery';
 import { MediaGenerationController } from './media-generation';
+import { makeImageGenerationJob } from './image-generation-job';
 
 /** 节点定义执行上下文（供 canRun/buildOptions 使用） */
 const ctx: FlowContext = {
@@ -645,7 +646,11 @@ class RunEngine {
       prompts,
     });
     const outputType: Exclude<GenerationTrace['outputType'], 'video' | 'audio'> = isTxt2Img ? 'txt2img' : 'img2img';
-    const runJob = this._makeRunJob(options, () => { batchFlags.sawNotSavedToDisk = true; });
+    const runJob = makeImageGenerationJob(
+      { resolveDisplayUrl: result => this._resolveImageUrl(result) },
+      options,
+      () => { batchFlags.sawNotSavedToDisk = true; },
+    );
     // count=1 单图路径保持「第 1 张写回自身」；count>1 与文本拆分写回 generatedImages；
     const isSingleImage = !usesTextSplit && total === 1;
     const onJobComplete = this._makeBatchJobComplete(nodeId, allRefs, outputType, isSingleImage, createdCardIds);
@@ -685,54 +690,6 @@ class RunEngine {
       flowState.updateNode(nodeId, { status: 'fail', error: err });
       showToast(`生成失败：${err}`, false);
     }
-  }
-
-  /**
-   * 单个 Job 执行器（run-engine 注入 batch-queue）：创建任务 → 轮询 → 解析展示图 → 返回结果。
-   * 不负责状态流转（队列 markJobStatus）；在 await 间隙通过 hooks.isCancelled 感知取消，防止取消后继续写结果。
-   * 与旧 runOneWorker 的区别：不建子卡、不写回节点（写回统一在批次终态 onComplete 做，保证按 index 有序）。
-   */
-  private _makeRunJob(options: Record<string, unknown>, markNotSavedToDisk: () => void): RunJobFn {
-    return async (job, hooks): Promise<JobRunOutcome> => {
-      if (hooks.isCancelled()) return { success: false, error: '已取消' };
-      try {
-        const created = await withTimeout(
-          Backend.generateImage(job.prompt, { ...options, count: COUNT_MIN }),
-          TASK_CREATE_TIMEOUT_MS,
-          '任务创建超时',
-        );
-        if (hooks.isCancelled()) return { success: false, error: '已取消' };
-        if (!created || !created.task_id) {
-          throw new Error('任务创建失败，未返回 task_id');
-        }
-        hooks.onRunning(created.task_id);
-        const result = await pollTask(created.task_id);
-        if (hooks.isCancelled()) return { success: false, error: '已取消' };
-        if (!result.success) throw new Error(result.error || '生成失败');
-        // 展示图解析：缩略图优先；为空且有 originalPath → loadLocalImage 按路径取图（治本：大图不进轮询响应）
-        const displayUrl = await this._resolveImageUrl(result);
-        if (hooks.isCancelled()) return { success: false, error: '已取消' };
-        if (!displayUrl) throw new Error(result.error || '生成成功但未返回图片数据');
-        // P3：该张图未落盘到用户配置目录（tempfile 兜底）→ 标记，批次结束统一 toast
-        if (result.savedToDisk === false) markNotSavedToDisk();
-        // 原图引用（图片性能优化：卡片主视觉=缩略图，大图按需加载用）
-        const origin: ImageOrigin | null = result.originalPath
-          ? { path: result.originalPath, url: result.originalUrl }
-          : null;
-        return {
-          success: true,
-          image: {
-            url: displayUrl,
-            originalPath: origin?.path,
-            originalUrl: origin?.url,
-            width: result.width,
-            height: result.height,
-          },
-        };
-      } catch (e) {
-        return { success: false, error: (e as Error).message || '生成失败' };
-      }
-    };
   }
 
   /**
