@@ -29,7 +29,7 @@ class VideoViewer {
     const mediaUrl = videoUrl(video);
     const render = (mediaUnavailable: boolean): void => {
       const playable = !!mediaUrl && !mediaUnavailable;
-      const added = playable && assetStore.isAddedByImageUrl(mediaUrl);
+      const added = playable && assetStore.isAddedByUrl(mediaUrl);
       const recoverHtml = playable
         ? ''
         : `<div class="video-viewer-recover">
@@ -82,7 +82,7 @@ class VideoViewer {
     if (!video?.originalPath) return;
     const url = videoUrl(video);
     if (!url) return;
-    if (assetStore.isAddedByImageUrl(url)) { showToast('已在资产库'); return; }
+    if (assetStore.isAddedByUrl(url)) { showToast('已在资产库'); return; }
     flowHistory.record();
     assetStore.addByMediaUrl(url, node.id, 'video', video.originalPath, assetStore.metaFromNode(node), {
       duration: video.duration, mimeType: video.mimeType, sizeBytes: video.sizeBytes,

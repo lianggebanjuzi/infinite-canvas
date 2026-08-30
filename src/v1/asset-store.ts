@@ -158,17 +158,17 @@ class AssetStore {
     });
   }
 
-  /** 按图 URL 从资产库移除。 */
+  /** 按媒体 URL 从资产库移除。 */
   removeByUrl(url: string): void {
     if (!url) return;
-    const rec = this.getByImageUrl(url);
+    const rec = this.getByUrl(url);
     if (rec) this.remove(rec.key);
   }
 
-  /** 按图 URL 追加标签 */
+  /** 按媒体 URL 追加标签 */
   addTagsByUrl(url: string, tags: string[]): void {
     if (!url) return;
-    const rec = this.getByImageUrl(url);
+    const rec = this.getByUrl(url);
     if (rec) this.addTags(rec.key, tags);
   }
 
@@ -237,16 +237,28 @@ class AssetStore {
 
   // ───────────────────────── 查询（UI 判定一律走这里） ─────────────────────────
 
-  isAddedByImageUrl(url: string): boolean {
-    return !!this.getByImageUrl(url);
+  /** 按媒体 URL 判断是否已加入资产库。 */
+  isAddedByUrl(url: string): boolean {
+    return !!this.getByUrl(url);
   }
 
-  getByImageUrl(url: string): MediaAssetRecord | null {
+  /** 按媒体 URL 读取资产记录。 */
+  getByUrl(url: string): MediaAssetRecord | null {
     if (!url) return null;
     const key = this._keyOf(url);
     const rec = this.records.get(key);
     if (rec) this.urlByKey.set(key, url); // 读路径反哺内存缓存：旧记录无 imageUrl 时资产库仍可显示
     return rec ?? null;
+  }
+
+  /** @deprecated 使用 isAddedByUrl；保留图片调用方兼容。 */
+  isAddedByImageUrl(url: string): boolean {
+    return this.isAddedByUrl(url);
+  }
+
+  /** @deprecated 使用 getByUrl；保留图片调用方兼容。 */
+  getByImageUrl(url: string): MediaAssetRecord | null {
+    return this.getByUrl(url);
   }
 
   /** 资产列表（按 updatedAt 倒序）；url 优先级 = record.imageUrl → urlByKey 缓存；

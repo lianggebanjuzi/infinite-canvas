@@ -23,7 +23,7 @@ class AudioViewer {
     el.className = 'video-viewer-overlay';
     const prompt = node.trace?.prompt || (node.params as unknown as AudioGenParams).prompt || '';
     const validUrl = audio.url || fileUrlFromPath(audio.originalPath);
-    const added = !!validUrl && assetStore.isAddedByImageUrl(validUrl);
+    const added = !!validUrl && assetStore.isAddedByUrl(validUrl);
     el.innerHTML = `<section class="video-viewer-panel" role="dialog" aria-modal="true" aria-label="音频查看器">
       <header><strong>音频查看器</strong><button data-act="close" title="关闭">×</button></header>
       <div class="audio-viewer-visual">
@@ -57,7 +57,7 @@ class AudioViewer {
     if (!audio?.originalPath) return;
     const url = audio.url || fileUrlFromPath(audio.originalPath);
     if (!url) return;
-    if (assetStore.isAddedByImageUrl(url)) { showToast('已在资产库'); return; }
+    if (assetStore.isAddedByUrl(url)) { showToast('已在资产库'); return; }
     flowHistory.record();
     assetStore.addByMediaUrl(url, node.id, 'audio', audio.originalPath, assetStore.metaFromNode(node), {
       duration: audio.duration, mimeType: audio.mimeType, sizeBytes: audio.sizeBytes,
