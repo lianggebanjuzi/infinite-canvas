@@ -18,7 +18,7 @@
 // 文本走线 / 反推归位（增量）：
 //   - prompt 合成唯一入口 composeImagePrompt：上游文本（getUpstreamTextPrompts 连线序拼接）+ 自身 params.prompt（非空追加在后）
 //   - 文本变化三处联动（运行成功/就地编辑/历史回填）统一 = 写 outputText + dirty.markUpstreamChanged；旁路覆盖下游 prompt 的旧函数已删除
-//   - 文本节点 runTextGen 接入上游图（data:image 过滤 + 前置校验「图片格式不支持反推」），反推归位到文本节点自身
+//   - 文本节点由 textGeneration 接入上游图（data:image 过滤 + 前置校验「图片格式不支持反推」），反推归位到文本节点自身
 //   - 素材节点（isAsset）不可运行：run() 静默跳过（不 toast、不设运行态），canRun 亦拒绝
 
 import { flowState } from '../state/flow-state';
@@ -38,6 +38,7 @@ import { OUTPAINT_PROMPT_PREFIX, composeOutpaintDataUrl, loadOutpaintImage } fro
 import { ActiveRun, MediaTaskRecoveryController } from './media-task-recovery';
 import { MediaGenerationController } from './media-generation';
 import { makeImageGenerationJob } from './image-generation-job';
+import { TextGenerationController } from './text-generation';
 
 /** 节点定义执行上下文（供 canRun/buildOptions 使用） */
 const ctx: FlowContext = {
@@ -128,6 +129,11 @@ class RunEngine {
     isActive: active => this._isActive(active),
     resolveReferenceImages: nodeId => this._resolveGenerationReferenceImages(nodeId),
     composePrompt: nodeId => this.composeImagePrompt(nodeId),
+  });
+  /** 文本的新任务执行（活动运行表与撤销历史仍由 RunEngine 所有）。 */
+  private readonly textGeneration = new TextGenerationController({
+    context: ctx,
+    isActive: active => this._isActive(active),
   });
 
   /** 执行中批次处理器注册表（batchId → runJob/onComplete；供逐条/全部重试复用，新批次开始时清理同节点旧条目） */
@@ -335,7 +341,7 @@ class RunEngine {
     flowHistory.suspend(); // 引擎内部状态/产出变更不入撤销栈（R5.5）
     try {
       if (node.type === 'text-gen') {
-        await this.runTextGen(nodeId, active);
+        await this.textGeneration.run(nodeId, active);
       } else if (node.type === 'video-gen') {
         await this.mediaGeneration.runVideo(nodeId, active);
       } else if (node.type === 'audio-gen') {
@@ -490,71 +496,6 @@ class RunEngine {
         active.historySuspended = false;
       }
       if (this.activeRuns.get(nodeId) === active) this.activeRuns.delete(nodeId);
-    }
-  }
-
-  /**
-   * 文本处理执行（text-gen 专用）：命令驱动，同步调 chat_v2，无批次/无轮询/无产出节点。
-   * 反推归位：文本节点有图片上游（素材/自建 imageUrl）时，chatV2 附带该图（data:image 约束沿用，W2-1）；
-   *   上游图存在但无 data:image → 前置校验 fail「图片格式不支持反推」（W2-4，不静默丢图）；无图片上游 → 普通文本处理。
-   * 输入：当前 outputText（可能空）+ 命令（instruction）+ 文本模型。
-   * 成功分支：写 outputText → pushTextHistory → dirty.markUpstreamChanged（全下游标 stale，旁路已删除：不覆盖下游 prompt）→ toast。
-   * 失败/空文本：fail + error，不写历史。
-   * 前置：canRun 已通过；该节点已注册为运行中。
-   */
-  private async runTextGen(nodeId: string, active: ActiveRun): Promise<void> {
-    const node = flowState.getNode(nodeId);
-    if (!node) return;
-
-    // 1. 启动时快照命令与当前输出文本（buildOptions 只取一次，仅含 model）
-    const params = node.params as unknown as TextGenParams;
-    const command = (params.instruction || '').trim();
-    const currentText = (node.outputText || '').trim();
-    const def = nodeRegistry.get(node.type);
-    const options = def.buildOptions(node, ctx);
-
-    // 1.5 反推归位：接入上游图（getReferenceImages 取直接上游 imageUrl 一层；data:image 过滤 + 前置校验 W2-4）
-    const refs = flowState.getReferenceImages(nodeId);
-    if (refs.length > 0) {
-      const dataImages = refs.filter(u => u.startsWith('data:image'));
-      if (dataImages.length === 0) {
-        flowState.updateNode(nodeId, { status: 'fail', error: '图片格式不支持反推' });
-        showToast('图片格式不支持反推', false);
-        return;
-      }
-      options.images = dataImages;
-    }
-
-    // 2. 置 run + 上游连线流光
-    flowState.updateNode(nodeId, { status: 'run', error: null });
-    linkView.setNodeFlowing(nodeId, true);
-
-    try {
-      // 3. 同步阻塞调用 chat_v2：system 固定文案，user 按「有无原文」拼装
-      const system = '你是电商视觉文案处理助手，只输出处理后的文本，不要解释、不要引号';
-      const user = currentText ? `原文：\n${currentText}\n\n指令：${command}` : command;
-      const res = await Backend.chatV2(user, { ...options, metaPrompt: system });
-      if (!this._isActive(active)) return;
-      const text = (res.text || '').trim();
-      if (!text) throw new Error('处理结果为空');
-
-      // 4. 成功：写回输出文本 + 历史 + 标下游 stale（旁路已删除：不再覆盖下游 prompt，W3-1）
-      flowState.updateNode(nodeId, { status: 'done', outputText: text, error: null, lastRunAt: Date.now() });
-      flowState.pushTextHistory(nodeId, text);
-      dirty.markUpstreamChanged(nodeId);
-      // 文本 trace：node.trace 恒 null（类型定义如此），但仍追加一条 kind:'text' 流水
-      void historyPersist.appendTrace(historyPersist.buildTextTrace(node));
-      showToast('已完成');
-    } catch (e) {
-      if (!this._isActive(active)) return;
-      // 5. 失败：fail + 原因；不写历史
-      const message = (e as Error).message || '处理失败';
-      flowState.updateNode(nodeId, { status: 'fail', error: message });
-      showToast(message, false);
-    } finally {
-      if (!this._isActive(active)) return;
-      linkView.setNodeFlowing(nodeId, false);
-      // 保留文本命令：无论成功还是失败，用户都可直接修改后重试。
     }
   }
 
