@@ -1,52 +1,43 @@
-// 视频任务轮询：只查询创建时拿到的本地任务，不会在网络异常或超时后重新提交。
+// 视频任务适配层：复用已受理媒体任务轮询，只保留视频结果字段解析。
 import { Backend } from '../api';
+import { pollAcceptedMediaTask, type MediaTaskPollResult } from './media-task-poller';
 
-export interface VideoPollResult {
-  success: boolean;
+export interface VideoPollResult extends MediaTaskPollResult<VideoMedia> {
   video?: VideoMedia;
-  remoteTaskId?: string;
-  uncertain?: boolean;
-  error?: string;
 }
 
-const delay = (ms: number): Promise<void> => new Promise(resolve => setTimeout(resolve, ms));
-
-export async function pollVideoTask(taskId: string, onTick?: (status: string, remoteTaskId?: string) => void): Promise<VideoPollResult> {
-  // VideoAPI 正在代理远端轮询；20 分钟后转为 uncertain，不另投请求。
-  const deadline = Date.now() + 20 * 60 * 1000;
-  let remoteTaskId: string | undefined;
-  while (Date.now() < deadline) {
-    try {
-      const response = await Backend.getVideoTaskResult(taskId);
-      remoteTaskId = response.remote_task_id || remoteTaskId;
-      if (response.status === 'not_found') return { success: false, remoteTaskId, error: '视频任务结果已过期，请重新生成' };
-      if (response.status !== 'done') {
-        onTick?.(response.status || 'pending', remoteTaskId);
-        await delay(response.status === 'pending_confirmation' ? 15000 : 2000);
-        continue;
-      }
-      const result = response.result;
-      if (result?.success && typeof result.video_path === 'string' && result.video_path) {
-        return {
-          success: true,
-          remoteTaskId: typeof result.task_id === 'string' ? result.task_id : remoteTaskId,
-          video: {
-            originalPath: result.video_path,
-            url: typeof result.video_url === 'string' ? result.video_url : undefined,
-            duration: typeof result.duration === 'number' ? result.duration : undefined,
-            width: typeof result.width === 'number' ? result.width : undefined,
-            height: typeof result.height === 'number' ? result.height : undefined,
-            sizeBytes: typeof result.size_bytes === 'number' ? result.size_bytes : undefined,
-            remoteTaskId: typeof result.task_id === 'string' ? result.task_id : remoteTaskId,
-          },
-        };
-      }
-      return { success: false, remoteTaskId, error: result?.message || result?.error || '视频生成失败' };
-    } catch {
-      // 桥接查询的短暂错误不应该伪装成密钥失败，更不能换 key 重投。
-      onTick?.('recovering', remoteTaskId);
-      await delay(3000);
-    }
+function parseVideoResult(result: unknown, fallbackRemoteTaskId?: string): { video?: VideoMedia; remoteTaskId?: string; error?: string } {
+  const data = result as Record<string, unknown> | null | undefined;
+  const remoteTaskId = typeof data?.task_id === 'string' ? data.task_id : fallbackRemoteTaskId;
+  if (data?.success && typeof data.video_path === 'string' && data.video_path) {
+    return {
+      remoteTaskId,
+      video: {
+        originalPath: data.video_path,
+        url: typeof data.video_url === 'string' ? data.video_url : undefined,
+        duration: typeof data.duration === 'number' ? data.duration : undefined,
+        width: typeof data.width === 'number' ? data.width : undefined,
+        height: typeof data.height === 'number' ? data.height : undefined,
+        sizeBytes: typeof data.size_bytes === 'number' ? data.size_bytes : undefined,
+        remoteTaskId,
+      },
+    };
   }
-  return { success: false, remoteTaskId, uncertain: true, error: '已提交，等待恢复查询' };
+  return { remoteTaskId, error: typeof data?.message === 'string' ? data.message : typeof data?.error === 'string' ? data.error : undefined };
+}
+
+/** VideoAPI 的远端轮询；20 分钟后转为 uncertain，不另投请求。 */
+export async function pollVideoTask(taskId: string, onTick?: (status: string, remoteTaskId?: string) => void): Promise<VideoPollResult> {
+  const result = await pollAcceptedMediaTask<VideoMedia>({
+    taskId,
+    readTask: id => Backend.getVideoTaskResult(id),
+    parseResult: (raw, remoteTaskId) => {
+      const parsed = parseVideoResult(raw, remoteTaskId);
+      return { media: parsed.video, remoteTaskId: parsed.remoteTaskId, error: parsed.error };
+    },
+    expiredMessage: '视频任务结果已过期，请重新生成',
+    failureMessage: '视频生成失败',
+    onTick,
+  });
+  return { ...result, video: result.media };
 }
