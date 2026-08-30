@@ -37,6 +37,7 @@ import { showToast } from '../ui/toast';
 import { OUTPAINT_PROMPT_PREFIX, composeOutpaintDataUrl, loadOutpaintImage } from './outpaint-util';
 import { pollVideoTask, VideoPollResult } from './video-poller';
 import { pollAudioTask, AudioPollResult } from './audio-poller';
+import { isMediaTaskTerminal, normalizeMediaTask } from './media-task';
 import { getVideoModelCapabilities } from '../nodes/model-config';
 
 /** 节点定义执行上下文（供 canRun/buildOptions 使用） */
@@ -389,7 +390,7 @@ class RunEngine {
         const current = flowState.getNode(nodeId);
         if (!current) return;
         const existing = current.video || null;
-        const task = this._normalizeMediaState(status, created.task_id, remoteTaskId);
+        const task = normalizeMediaTask(status, created.task_id, remoteTaskId);
         flowState.updateNodeParams(nodeId, { videoTask: task });
         flowState.updateNode(nodeId, {
           status: status === 'queued' ? 'queued' : 'run',
@@ -491,7 +492,7 @@ class RunEngine {
         const current = flowState.getNode(nodeId);
         if (!current) return;
         const existing = current.audio || null;
-        const task = this._normalizeMediaState(status, created.task_id, remoteTaskId);
+        const task = normalizeMediaTask(status, created.task_id, remoteTaskId);
         flowState.updateNodeParams(nodeId, { audioTask: task });
         flowState.updateNode(nodeId, {
           status: status === 'queued' ? 'queued' : 'run',
@@ -569,18 +570,6 @@ class RunEngine {
     }
   }
 
-  /** poller 中间态字符串 → MediaTask.state 规范化（accepted 后只有原任务查询语义）。 */
-  private _normalizeMediaState(status: string, localTaskId: string, remoteTaskId?: string): MediaTask {
-    let state: MediaTask['state'] = 'accepted';
-    if (status === 'queued' || status === 'pending') state = 'queued';
-    else if (status === 'processing' || status === 'in_progress') state = 'processing';
-    else if (status === 'pending_confirmation') state = 'processing';
-    else if (status === 'recovering') state = 'accepted';
-    else if (status === 'done') state = 'succeeded';
-    else if (status === 'failed' || status === 'error') state = 'failed';
-    return { state, localTaskId, ...(remoteTaskId ? { remoteTaskId } : {}) };
-  }
-
   /** 是否存在运行中/待恢复的媒体任务（视频/音频；含跨会话可恢复的 params.videoTask/audioTask）。 */
   mediaTasksInProgress(): { nodeId: string; kind: 'video' | 'audio'; remoteTaskId?: string }[] {
     const result: { nodeId: string; kind: 'video' | 'audio'; remoteTaskId?: string }[] = [];
@@ -591,12 +580,12 @@ class RunEngine {
       }
       if (node.type === 'video-gen') {
         const task = (node.params as Record<string, unknown> | undefined)?.videoTask as MediaTask | undefined;
-        if (task && !this.isMediaTaskTerminal(task.state)) {
+        if (task && !isMediaTaskTerminal(task.state)) {
           result.push({ nodeId: node.id, kind: 'video', remoteTaskId: task.remoteTaskId });
         }
       } else if (node.type === 'audio-gen') {
         const task = (node.params as Record<string, unknown> | undefined)?.audioTask as MediaTask | undefined;
-        if (task && !this.isMediaTaskTerminal(task.state)) {
+        if (task && !isMediaTaskTerminal(task.state)) {
           result.push({ nodeId: node.id, kind: 'audio', remoteTaskId: task.remoteTaskId });
         }
       }
@@ -604,21 +593,17 @@ class RunEngine {
     return result;
   }
 
-  private isMediaTaskTerminal(state: MediaTask['state']): boolean {
-    return state === 'succeeded' || state === 'failed' || state === 'cancelled' || state === 'uncertain';
-  }
-
   /** 项目打开后恢复进行中的视频/音频任务：accepted/processing 只查询原任务，不重投（4.0 §3.2）。 */
   recoverMediaTasks(): void {
     flowState.nodes.forEach(node => {
       if (node.type === 'video-gen') {
         const task = (node.params as Record<string, unknown> | undefined)?.videoTask as MediaTask | undefined;
-        if (task?.localTaskId && !this.isMediaTaskTerminal(task.state) && !this.activeRuns.has(node.id)) {
+        if (task?.localTaskId && !isMediaTaskTerminal(task.state) && !this.activeRuns.has(node.id)) {
           void this.recoverMediaNode(node.id, 'video', task);
         }
       } else if (node.type === 'audio-gen') {
         const task = (node.params as Record<string, unknown> | undefined)?.audioTask as MediaTask | undefined;
-        if (task?.localTaskId && !this.isMediaTaskTerminal(task.state) && !this.activeRuns.has(node.id)) {
+        if (task?.localTaskId && !isMediaTaskTerminal(task.state) && !this.activeRuns.has(node.id)) {
           void this.recoverMediaNode(node.id, 'audio', task);
         }
       }
@@ -635,14 +620,14 @@ class RunEngine {
             if (!this._isActive(active)) return;
             const current = flowState.getNode(nodeId);
             if (!current) return;
-            flowState.updateNodeParams(nodeId, { videoTask: this._normalizeMediaState(status, task.localTaskId!, remoteTaskId) });
+            flowState.updateNodeParams(nodeId, { videoTask: normalizeMediaTask(status, task.localTaskId!, remoteTaskId) });
             flowState.updateNode(nodeId, { status: status === 'queued' ? 'queued' : 'run', error: status === 'recovering' ? '查询恢复中：远端任务仍会保留' : null });
           })
         : await pollAudioTask(task.localTaskId!, (status, remoteTaskId) => {
             if (!this._isActive(active)) return;
             const current = flowState.getNode(nodeId);
             if (!current) return;
-            flowState.updateNodeParams(nodeId, { audioTask: this._normalizeMediaState(status, task.localTaskId!, remoteTaskId) });
+            flowState.updateNodeParams(nodeId, { audioTask: normalizeMediaTask(status, task.localTaskId!, remoteTaskId) });
             flowState.updateNode(nodeId, { status: status === 'queued' ? 'queued' : 'run', error: status === 'recovering' ? '查询恢复中：远端任务仍会保留' : null });
           });
       if (!this._isActive(active)) return;
