@@ -35,9 +35,10 @@ import { linkView } from '../canvas/link-view';
 import { CARD_W, imageCardHeight } from '../canvas/canvas-view';
 import { showToast } from '../ui/toast';
 import { OUTPAINT_PROMPT_PREFIX, composeOutpaintDataUrl, loadOutpaintImage } from './outpaint-util';
-import { pollVideoTask, VideoPollResult } from './video-poller';
-import { pollAudioTask, AudioPollResult } from './audio-poller';
-import { isMediaTaskTerminal, normalizeMediaTask } from './media-task';
+import { pollVideoTask } from './video-poller';
+import { pollAudioTask } from './audio-poller';
+import { normalizeMediaTask } from './media-task';
+import { ActiveRun, MediaTaskRecoveryController } from './media-task-recovery';
 import { getVideoModelCapabilities } from '../nodes/model-config';
 
 /** 节点定义执行上下文（供 canRun/buildOptions 使用） */
@@ -56,12 +57,6 @@ interface BatchRunner {
   runJob: RunJobFn;
   onJobComplete: BatchJobCompleteFn;
   onComplete: BatchCompleteFn;
-}
-
-interface ActiveRun {
-  nodeId: string;
-  cancelled: boolean;
-  historySuspended: boolean;
 }
 
 /** 生成请求并发数上限/下限 */
@@ -127,6 +122,8 @@ function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
 class RunEngine {
   /** 按节点维护活动任务：不同节点可并行，同一节点仍由 status='run' 防重复启动。 */
   private activeRuns = new Map<string, ActiveRun>();
+  /** 项目重开后的媒体任务查询恢复（不创建新任务）。 */
+  private readonly mediaTaskRecovery = new MediaTaskRecoveryController(this.activeRuns, active => this._isActive(active));
 
   /** 执行中批次处理器注册表（batchId → runJob/onComplete；供逐条/全部重试复用，新批次开始时清理同节点旧条目） */
   private _batchRunners = new Map<string, BatchRunner>();
@@ -572,130 +569,12 @@ class RunEngine {
 
   /** 是否存在运行中/待恢复的媒体任务（视频/音频；含跨会话可恢复的 params.videoTask/audioTask）。 */
   mediaTasksInProgress(): { nodeId: string; kind: 'video' | 'audio'; remoteTaskId?: string }[] {
-    const result: { nodeId: string; kind: 'video' | 'audio'; remoteTaskId?: string }[] = [];
-    flowState.nodes.forEach(node => {
-      if (this.activeRuns.has(node.id) && (node.type === 'video-gen' || node.type === 'audio-gen')) {
-        result.push({ nodeId: node.id, kind: node.type === 'video-gen' ? 'video' : 'audio' });
-        return;
-      }
-      if (node.type === 'video-gen') {
-        const task = (node.params as Record<string, unknown> | undefined)?.videoTask as MediaTask | undefined;
-        if (task && !isMediaTaskTerminal(task.state)) {
-          result.push({ nodeId: node.id, kind: 'video', remoteTaskId: task.remoteTaskId });
-        }
-      } else if (node.type === 'audio-gen') {
-        const task = (node.params as Record<string, unknown> | undefined)?.audioTask as MediaTask | undefined;
-        if (task && !isMediaTaskTerminal(task.state)) {
-          result.push({ nodeId: node.id, kind: 'audio', remoteTaskId: task.remoteTaskId });
-        }
-      }
-    });
-    return result;
+    return this.mediaTaskRecovery.inProgress();
   }
 
   /** 项目打开后恢复进行中的视频/音频任务：accepted/processing 只查询原任务，不重投（4.0 §3.2）。 */
   recoverMediaTasks(): void {
-    flowState.nodes.forEach(node => {
-      if (node.type === 'video-gen') {
-        const task = (node.params as Record<string, unknown> | undefined)?.videoTask as MediaTask | undefined;
-        if (task?.localTaskId && !isMediaTaskTerminal(task.state) && !this.activeRuns.has(node.id)) {
-          void this.recoverMediaNode(node.id, 'video', task);
-        }
-      } else if (node.type === 'audio-gen') {
-        const task = (node.params as Record<string, unknown> | undefined)?.audioTask as MediaTask | undefined;
-        if (task?.localTaskId && !isMediaTaskTerminal(task.state) && !this.activeRuns.has(node.id)) {
-          void this.recoverMediaNode(node.id, 'audio', task);
-        }
-      }
-    });
-  }
-
-  private async recoverMediaNode(nodeId: string, kind: 'video' | 'audio', task: MediaTask): Promise<void> {
-    const active: ActiveRun = { nodeId, cancelled: false, historySuspended: true };
-    this.activeRuns.set(nodeId, active);
-    flowState.updateNode(nodeId, { status: 'run', error: '查询恢复中：不会重新提交远端任务' });
-    try {
-      const result = kind === 'video'
-        ? await pollVideoTask(task.localTaskId!, (status, remoteTaskId) => {
-            if (!this._isActive(active)) return;
-            const current = flowState.getNode(nodeId);
-            if (!current) return;
-            flowState.updateNodeParams(nodeId, { videoTask: normalizeMediaTask(status, task.localTaskId!, remoteTaskId) });
-            flowState.updateNode(nodeId, { status: status === 'queued' ? 'queued' : 'run', error: status === 'recovering' ? '查询恢复中：远端任务仍会保留' : null });
-          })
-        : await pollAudioTask(task.localTaskId!, (status, remoteTaskId) => {
-            if (!this._isActive(active)) return;
-            const current = flowState.getNode(nodeId);
-            if (!current) return;
-            flowState.updateNodeParams(nodeId, { audioTask: normalizeMediaTask(status, task.localTaskId!, remoteTaskId) });
-            flowState.updateNode(nodeId, { status: status === 'queued' ? 'queued' : 'run', error: status === 'recovering' ? '查询恢复中：远端任务仍会保留' : null });
-          });
-      if (!this._isActive(active)) return;
-      const node = flowState.getNode(nodeId);
-      if (!node) return;
-      // 分别窄化轮询结果类型（video/audio 各自返回不同结构）
-      if (kind === 'video') {
-        const vr = result as VideoPollResult;
-        if (!vr.success || !vr.video) {
-          const suffix = vr.remoteTaskId ? `（远端任务：${vr.remoteTaskId}）` : '';
-          const errorText = `${vr.error || '视频生成失败'}${suffix}`;
-          flowState.updateNodeParams(nodeId, {
-            videoTask: { state: vr.uncertain ? 'uncertain' : 'failed', localTaskId: task.localTaskId, remoteTaskId: vr.remoteTaskId, error: errorText },
-          });
-          flowState.updateNode(nodeId, { status: vr.uncertain ? 'stale' : 'fail', error: errorText });
-          return;
-        }
-        const vMedia = { ...vr.video, remoteTaskId: vr.remoteTaskId || vr.video.remoteTaskId };
-        const vTrace: GenerationTrace = {
-          prompt: node.trace?.prompt || ((node.params as Record<string, unknown>).prompt as string) || '',
-          model: node.trace?.model || '', aspectRatio: '', resolution: '', count: 1,
-          refImageHashes: node.trace?.refImageHashes || [], refImageUrls: node.trace?.refImageUrls || [], seed: null,
-          createdAt: node.trace?.createdAt || Date.now(), parentId: node.parentId ?? node.id, outputType: 'video',
-        };
-        flowState.updateNodeParams(nodeId, {
-          videoTask: { state: 'succeeded', localTaskId: task.localTaskId, remoteTaskId: vMedia.remoteTaskId },
-        });
-        flowState.updateNode(nodeId, {
-          status: 'done', error: null, lastRunAt: Date.now(), video: vMedia,
-          trace: node.trace ? { ...node.trace, remoteTaskId: vMedia.remoteTaskId } : vTrace,
-        });
-        showToast('视频任务已恢复');
-        return;
-      }
-      const ar = result as AudioPollResult;
-      if (!ar.success || !ar.audio) {
-        const suffix = ar.remoteTaskId ? `（远端任务：${ar.remoteTaskId}）` : '';
-        const errorText = `${ar.error || '音频生成失败'}${suffix}`;
-        flowState.updateNodeParams(nodeId, {
-          audioTask: { state: ar.uncertain ? 'uncertain' : 'failed', localTaskId: task.localTaskId, remoteTaskId: ar.remoteTaskId, error: errorText },
-        });
-        flowState.updateNode(nodeId, { status: ar.uncertain ? 'stale' : 'fail', error: errorText });
-        return;
-      }
-      const aMedia = { ...ar.audio, remoteTaskId: ar.remoteTaskId || ar.audio.remoteTaskId };
-      const aTrace: GenerationTrace = {
-        prompt: node.trace?.prompt || ((node.params as Record<string, unknown>).prompt as string) || '',
-        model: node.trace?.model || '', aspectRatio: '', resolution: '', count: 1,
-        refImageHashes: node.trace?.refImageHashes || [], refImageUrls: node.trace?.refImageUrls || [], seed: null,
-        createdAt: node.trace?.createdAt || Date.now(), parentId: node.parentId ?? node.id, outputType: 'audio',
-      };
-      flowState.updateNodeParams(nodeId, {
-        audioTask: { state: 'succeeded', localTaskId: task.localTaskId, remoteTaskId: aMedia.remoteTaskId },
-      });
-      flowState.updateNode(nodeId, {
-        status: 'done', error: null, lastRunAt: Date.now(), audio: aMedia,
-        trace: node.trace ? { ...node.trace, remoteTaskId: aMedia.remoteTaskId } : aTrace,
-      });
-      showToast('音频任务已恢复');
-    } catch (e) {
-      if (this._isActive(active)) {
-        const message = (e as Error).message || '任务恢复失败';
-        flowState.updateNode(nodeId, { status: 'fail', error: message });
-      }
-    } finally {
-      if (active.historySuspended) { flowHistory.resume(); active.historySuspended = false; }
-      if (this.activeRuns.get(nodeId) === active) this.activeRuns.delete(nodeId);
-    }
+    this.mediaTaskRecovery.recoverAll();
   }
 
   /** 运行已保存在画布中的扩图步骤（含节点参数的比例、提示词和可选摆放）。 */
