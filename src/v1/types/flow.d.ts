@@ -3,17 +3,39 @@
 // 与架构文档「四、数据结构与接口」保持一致
 
 /** 统一「生成节点」：多图参考（0~N）→ 生成 N 张新图（每张一个可编辑 image-gen 产出节点；文生图第 1 张写回自身），注册式扩展 */
-type NodeType = 'image-gen' | 'text-gen' | 'text-split' | 'video-gen';
+type NodeType = 'image-gen' | 'text-gen' | 'text-split' | 'video-gen' | 'audio-gen';
 
 /**
- * 节点状态机七态（B-5：由五态扩展，新增 queued / partial-failed）。
- * 持久化只存五态（idle/run/done/stale/fail）：queued→idle、partial-failed→done 由 persistence.collect 归一（共享约定 6）。
+ * 节点状态机八态（B-5：由五态扩展，新增 queued / partial-failed；4.1-B 再增 submitting）。
+ * 持久化只存五态（idle/run/done/stale/fail）：queued→idle、submitting→run、partial-failed→done 由 persistence.collect 归一（共享约定 6）。
  * 七态派生唯一出口 = BatchStore.nodeStatus(nodeId)（无批次时回退节点自身终态）。
  */
-type NodeStatus = 'idle' | 'queued' | 'run' | 'done' | 'partial-failed' | 'fail' | 'stale';
+type NodeStatus = 'idle' | 'queued' | 'submitting' | 'run' | 'done' | 'partial-failed' | 'fail' | 'stale';
+
+/**
+ * 4.1-B 媒体任务（蒙版局改 / 多角度）本地状态机，持久化于节点 params.imageEditTask。
+ * 远端受理（accepted，拿到 remote_task_id）后只查询原任务，禁止自动换 Key 重投（4.0 §3.2）。
+ */
+interface ImageEditTask {
+  state: 'queued' | 'submitting' | 'accepted' | 'processing' | 'succeeded' | 'failed' | 'cancelled' | 'uncertain';
+  localTaskId?: string;   // 本地任务 id（轮询 get_task_result 用）
+  remoteTaskId?: string;  // 已获上游受理的唯一远端任务（查询/断网恢复不得换 Key 重投）
+  error?: string;
+}
+
+/**
+ * 4.2 媒体任务（视频 / 音频）本地状态机，持久化于节点 params.videoTask / params.audioTask。
+ * 与 ImageEditTask 同构：accepted 后只查询原任务，禁止自动换 Key 重投（4.0 §3.2）。
+ */
+interface MediaTask {
+  state: 'queued' | 'submitting' | 'accepted' | 'processing' | 'succeeded' | 'failed' | 'cancelled' | 'uncertain';
+  localTaskId?: string;   // 本地任务 id（轮询 get_video_task_result / get_audio_task_result 用）
+  remoteTaskId?: string;  // 已获上游受理的唯一远端任务（查询/断网恢复不得换 Key 重投）
+  error?: string;
+}
 
 /** 端口数据类型（A-3 端口类型契约；五类型，见 docs/重构-增量架构设计 §3.3） */
-type PortType = 'Image' | 'ImageList' | 'Text' | 'TextList' | 'Video' | 'GenerationConfig';
+type PortType = 'Image' | 'ImageList' | 'Text' | 'TextList' | 'Video' | 'Audio' | 'GenerationConfig';
 
 /** text-gen 参数：命令（临时，发送后清空）+ 文本模型 */
 interface TextGenParams {
@@ -67,6 +89,28 @@ interface VideoGenParams {
   aspectRatio: string;
   resolution: string;
   audio: boolean;
+  /** 4.2-A：首帧/尾帧（仅模型 capability supportsStartEndFrame 时显示；成对传后端，缺一半整体不传） */
+  startFrame?: string;
+  endFrame?: string;
+}
+
+/** 音频文件只保留本地路径及轻量元数据，禁止把整段音频 base64 放进项目 JSON（4.2-B）。 */
+interface AudioMedia {
+  originalPath: string;
+  url?: string;
+  thumbnail?: string;
+  duration?: number;
+  mimeType?: string;
+  sizeBytes?: number;
+  remoteTaskId?: string;
+}
+
+/** 音频生成节点参数：prompt + 模型；时长/格式仅模型 capability 支持时开放。 */
+interface AudioGenParams {
+  prompt: string;
+  model: string;
+  seconds?: number;
+  format?: 'mp3' | 'wav' | 'ogg';
 }
 
 /** 节点级文本历史条目（text-gen 专属；不存图片信息，见架构决策） */
@@ -91,9 +135,9 @@ interface GenerationTrace {
   seed?: string | null;      // 官方/中转站支持 seed 时记录；否则 null
   createdAt: number;
   parentId?: string | null;  // 生成源节点（手建节点自身生成时即自己 id）
-  outputType: 'txt2img' | 'img2img' | 'outpaint' | 'image-edit' | 'video';
+  outputType: 'txt2img' | 'img2img' | 'outpaint' | 'image-edit' | 'video' | 'audio';
   /** 4.1-A/B 本地或远端图片编辑的可追溯信息；旧生成记录保持缺省。 */
-  editKind?: 'crop' | 'split' | 'mask-edit' | 'angle';
+  editKind?: 'crop' | 'split' | 'mask-edit' | 'annotation' | 'angle';
   sourceNodeId?: string;
   crop?: { x: number; y: number; width: number; height: number; rotation?: number };
   split?: { rows: number; cols: number; index: number; row?: number; column?: number; gutter?: number };
@@ -105,6 +149,8 @@ interface GenerationTrace {
   imageHeight?: number;      // 原图真实像素高
   batchId?: string;          // B-6 追溯：所属批次（R3 同格式 `${nodeId}_${Date.now()}`；旧 trace 缺失 → 读侧回退单图）
   jobId?: string;            // B-6 追溯：任务编号（`${batchId}_j${index}`；可反查「来自第几条拆分文本」= index+1）
+  /** 4.4 导演台回传溯源：记录 director 工程/镜头/相机/时间点；不暴露内部绝对路径。 */
+  director?: { projectId: string; shotId?: string; cameraId: string; time: number };
 }
 
 /**
@@ -179,6 +225,8 @@ interface FlowNode {
   imageHeight?: number;      // 原图真实像素高
   /** video-gen 输出；大文件仅以本地路径保存。 */
   video?: VideoMedia | null;
+  /** audio-gen 输出；大文件仅以本地路径保存。 */
+  audio?: AudioMedia | null;
   outputText: string | null; // 新增：text-gen 输出文本；其余类型恒 null
   generatedImages?: GeneratedImageItem[]; // 仅 text-split 上游驱动的 image-gen 使用，按拆分槽位顺序保存
   activeGeneratedIndex?: number; // 卡内当前浏览的批量结果下标
@@ -198,6 +246,8 @@ interface FlowEdge {
   id: string;
   from: string;              // 上游节点 id
   to: string;                // 下游节点 id
+  /** 4.2-C：连线关系类型。audio-ref = 视频节点的音频输入（音轨/配音参考）。 */
+  kind?: 'audio-ref';
 }
 
 /** 画布视口状态 */
@@ -214,7 +264,7 @@ interface FlowProject {
   projectName: string;
   canvas: FlowCanvasState;
   /** 项目内最近一次由用户选择的模型；新建同类节点时优先沿用。 */
-  modelDefaults?: Partial<Record<'drawing' | 'chat' | 'video', string>>;
+  modelDefaults?: Partial<Record<'drawing' | 'chat' | 'video' | 'audio', string>>;
   nodes: FlowNode[];
   edges: FlowEdge[];
   createdAt: number;
@@ -228,6 +278,7 @@ interface FlowContext {
   getReferenceImages(nodeId: string): string[]; // refImages ∪ 上游可作参考图的图（imageUrl 优先，无则回退其 refImages；去重保序）
   getImageModels(): Promise<Array<{ id: string; name: string }>>;
   getVideoModels(): Promise<Array<{ id: string; name: string }>>;
+  getAudioModels(): Promise<Array<{ id: string; name: string }>>;
 }
 
 /** 注册式节点定义（新增节点 = 注册一个 NodeDefinition） */
@@ -273,8 +324,10 @@ interface OutpaintOptions {
   prompt: string;            // 组装后的完整提示词（固定前缀「白色区域是待补全区域…」+ 可选用户描述）
   referenceImages: string[]; // 合成底图（PNG dataURL，白底不透明 + 原图，长边 ≤4096）
   aspectRatio: string;       // 目标比例 '1:1' | '3:4' | '4:3' | '16:9' | '9:16'
-  model: string;             // 自动解析的 gemini/nano-banana/seedream 系绘图模型（"provider:key:model"）
+  model: string;             // 用户选择的 gemini/nano-banana/seedream 系绘图模型（"provider:key:model"）
   resolution: string;        // '4k'（不暴露分辨率选项，模型自动出图最高 4K）
+  /** 由图片操作条发起时，将结果直接回写当前图片节点。 */
+  replaceNode?: boolean;
 }
 
 /**
@@ -285,7 +338,7 @@ interface FlowSnapshot {
   nodes: FlowNode[];
   edges: FlowEdge[];
   projectName: string;
-  modelDefaults: Record<'drawing' | 'chat' | 'video', string>;
+  modelDefaults: Record<'drawing' | 'chat' | 'video' | 'audio', string>;
   dirty: boolean;
 }
 
@@ -296,7 +349,7 @@ interface WorkflowTemplate {
   description?: string;
   version: 1;
   canvas: FlowCanvasState;
-  modelDefaults?: Partial<Record<'drawing' | 'chat' | 'video', string>>;
+  modelDefaults?: Partial<Record<'drawing' | 'chat' | 'video' | 'audio', string>>;
   nodes: FlowNode[];
   edges: FlowEdge[];
   createdAt: number;
@@ -330,6 +383,7 @@ type HistoryEntry =
       jobId?: string;          // B-6 追溯：与 batchId 并列，写 history.jsonl 行（旧行缺失 → 读侧回退，不报错）
       imageWidth?: number;     // 原图真实像素宽（PIL im.size；旧行缺失 → 展示回退 params）
       imageHeight?: number;    // 原图真实像素高
+      director?: { projectId: string; shotId?: string; cameraId: string; time: number };  // 4.4 导演台回传溯源
     }
   | {
       kind: 'text';
@@ -354,15 +408,49 @@ type HistoryEntry =
       originalPath?: string;
       videoUrl?: string;
       duration?: number;
+      /** 4.2：媒体任务状态（succeeded / failed / uncertain…），历史抽屉展示用。 */
+      taskState?: string;
+    }
+  | {
+      kind: 'audio';
+      nodeId: string;
+      prompt: string;
+      model: string;
+      seconds?: number;
+      format?: string;
+      references: string[];
+      createdAt: number;
+      remoteTaskId?: string;
+      originalPath?: string;
+      audioUrl?: string;
+      duration?: number;
+      mimeType?: string;
+      taskState?: string;
     };
 
-/** 资产库记录（键 = 图指纹 hashRef(展示图 URL)）。 */
-interface ImageAssetRecord {
+/**
+ * 资产库记录（键 = 图指纹 hashRef(展示图 URL)；4.2-C 起支持视频/音频，kind 区分媒体类型）。
+ * 图片沿用 imageUrl/thumbnail/originalPath；视频/音频使用 mediaUrl/mediaPath/duration/mimeType/sizeBytes。
+ * 旧 assets.json 无 kind → 归一为 'image'，字段全部兼容。
+ */
+interface MediaAssetRecord {
   key: string;            // hashRef(展示图 URL) 图指纹主键（唯一定位「一张图」而非「一个节点」）
+  /** 4.2-C：媒体类型；旧记录缺失 → 'image' */
+  kind: 'image' | 'video' | 'audio';
   nodeId: string;         // 图当前所在节点（仅溯源用）
   imageUrl?: string;      // 展示图 URL（添加时写入，资产库独立显示用；旧记录缺失 → 占位）
   thumbnail?: string;     // 显式缩略图（=展示图 URL；新记录冗余写入，读侧 thumbnail||imageUrl 回退）
+  /** 4.2-C：视频/音频播放地址（file:// 或 data URL） */
+  mediaUrl?: string;
+  /** 4.2-C：视频/音频本地绝对路径（播放/重新定位用） */
+  mediaPath?: string;
   originalPath?: string;  // 原图本地绝对路径（查看大图按需加载用；冗余写入，P1 可升级指纹键）
+  duration?: number;      // 4.2-C：视频/音频时长（秒）
+  mimeType?: string;      // 4.2-C：audio/mpeg 等
+  sizeBytes?: number;     // 4.2-C：文件大小（字节）
+  width?: number;         // 4.2-C：视频宽（适用时）
+  height?: number;        // 4.2-C：视频高（适用时）
+  remoteTaskId?: string;  // 4.2-C：远端任务 id（溯源用）
   projectName: string[];  // 添加过的项目名列表（跨项目溯源；只追加去重，不删除；旧记录缺失 → []）
   added: boolean;         // 当前在资产库中
   adopted?: boolean;      // 旧版兼容字段：false 表示已移除，加载时不再展示
@@ -381,6 +469,9 @@ interface ImageAssetRecord {
   outputType?: string;          // 'txt2img' | 'img2img' | 'outpaint'
   createdAt?: number;           // 生成完成时间戳（trace.createdAt）
 }
+
+/** 旧别名：图片资产记录 = 通用媒体资产记录（旧代码 / 旧 assets.json 数据兼容，不改写调用方）。 */
+type ImageAssetRecord = MediaAssetRecord;
 
 /**
  * 添加元数据（资产库复现/配方展示用）。
@@ -402,16 +493,19 @@ interface AdoptMeta {
 
 /** 资产库条目（getAssets 输出：记录 + 可渲染 URL + 内存元数据） */
 interface AssetAsset {
-  record: ImageAssetRecord;
+  record: MediaAssetRecord;
   url: string;                 // 展示图 URL（兼容字段：thumbnailUrl || imageUrl 兜底）
   thumbnailUrl?: string;       // 缩略图 URL（图片性能优化：资产库卡片主视觉）
   originalPath?: string;       // 原图本地绝对路径（查看大图按需加载用）
+  mediaUrl?: string;           // 4.2-C：视频/音频播放地址
+  mediaPath?: string;          // 4.2-C：视频/音频本地路径
+  kind: 'image' | 'video' | 'audio';
   meta?: AdoptMeta;
 }
 
 /** 资产快照（HistoryStack 并行撤销栈用） */
 interface AssetSnapshot {
-  records: ImageAssetRecord[];
+  records: MediaAssetRecord[];
 }
 
 /** 对比面板瞬时状态（不持久化；关闭仅清瞬时态，不污染画布主链） */

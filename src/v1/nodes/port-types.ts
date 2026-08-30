@@ -15,12 +15,18 @@ export const PORT_TYPES: Record<NodeType, PortDecl> = {
   'image-gen':  { inputs: ['Text', 'TextList', 'Image', 'ImageList'], outputs: ['Image', 'ImageList'] },
   'text-gen':   { inputs: ['Image', 'Text'],                          outputs: ['Text'] },
   'text-split': { inputs: ['Text'],                                   outputs: ['TextList'] },
-  'video-gen':  { inputs: ['Text', 'Image', 'ImageList'],             outputs: ['Video'] },
+  // 4.2-C：video-gen 可显式接收音频节点（音轨/配音参考）；是否消费由模型 capability 门控（run-engine 运行前校验）
+  'video-gen':  { inputs: ['Text', 'Image', 'ImageList', 'Audio'],    outputs: ['Video'] },
+  'audio-gen':  { inputs: ['Text', 'Image'],                          outputs: ['Audio'] },
 };
 
-/** 输出类型解析：素材节点（isAsset image-gen）只有 Image 输出（链首数据） */
+/** 输出类型解析：素材节点（isAsset image-gen/audio-gen/video-gen）只有对应单一媒体输出（链首数据） */
 export function outputTypesOf(node: FlowNode): PortType[] {
-  if (node.isAsset === true) return ['Image'];
+  if (node.isAsset === true) {
+    if (node.type === 'audio-gen') return ['Audio'];
+    if (node.type === 'video-gen') return ['Video'];
+    return ['Image'];
+  }
   return PORT_TYPES[node.type]?.outputs ?? [];
 }
 

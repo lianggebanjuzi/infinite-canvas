@@ -14,6 +14,7 @@ import time
 import zipfile
 
 from backend.api.utils import atomic_write_json, get_tk_root
+from backend.api.model_rules import validate_capability_schema, normalize_capability_schema
 from tkinter import filedialog
 
 MAX_ARCHIVE_BYTES = 2 * 1024 * 1024 * 1024
@@ -44,11 +45,18 @@ def _without_secrets(value):
 
 
 class BackupAPI:
-    def __init__(self, app_dir, project_api, settings_api, providers_file):
+    def __init__(self, app_dir, project_api, settings_api, providers_file, schemas_file=None):
         self.app_dir = app_dir
         self.project_api = project_api
         self.settings_api = settings_api
         self.providers_file = providers_file
+        # 4.3-D：capability_schemas.json 随设置备份（不含 Key）
+        if schemas_file:
+            self.schemas_file = schemas_file
+        else:
+            self.schemas_file = os.path.join(
+                os.path.dirname(os.path.abspath(providers_file)), 'capability_schemas.json'
+            )
 
     def _assets_index_path(self):
         return self.project_api._assets_path()
@@ -123,6 +131,7 @@ class BackupAPI:
             workflows = self._read_json(self._workflow_path(), {"version": 1, "workflows": []})
             settings = _without_secrets(self._read_json(self.settings_api.settings_file, {}))
             prompts = self._read_json(self.settings_api.prompts_library_file, {})
+            schemas = _without_secrets(self._read_json(self.schemas_file, {"schemas": []}))
             media = set()
             source_docs = []
             for path in projects:
@@ -147,6 +156,7 @@ class BackupAPI:
                 archive.writestr('prompt-library.json', json.dumps(prompts, ensure_ascii=False, indent=2))
                 archive.writestr('workflows.json', json.dumps(workflows, ensure_ascii=False, indent=2))
                 archive.writestr('settings.json', json.dumps(settings, ensure_ascii=False, indent=2))
+                archive.writestr('capability_schemas.json', json.dumps(schemas, ensure_ascii=False, indent=2))
                 archive.writestr('manifest.json', json.dumps(manifest, ensure_ascii=False, indent=2))
             os.replace(temp_path, destination)
             return {'status': 'success', 'path': destination, 'manifest': {'projects': len(projects), 'assets': len(manifest['assets']), 'includes_media': include_media}}
@@ -192,6 +202,10 @@ class BackupAPI:
                 workflow_data = self._read_json(os.path.join(staging, 'workflows.json'), {})
                 self.settings_api.save_prompts_library(prompt_data)
                 atomic_write_json(self._workflow_path(), workflow_data)
+                # 4.3-D：能力 schema 随设置备份（不含 Key）；逐条校验，非法条目跳过。
+                schema_data = self._read_json(os.path.join(staging, 'capability_schemas.json'), None)
+                if isinstance(schema_data, dict):
+                    self._restore_capability_schemas(schema_data)
             return {'status': 'success', 'projects': imported, 'message': '已恢复备份；请重新配置 API 渠道和密钥'}
         except Exception as exc:
             print(f'恢复备份失败: {exc}')
@@ -219,8 +233,28 @@ class BackupAPI:
                 if not mimetypes.guess_type(item['path'])[0]: raise ValueError('unknown media type')
             for name in ('prompt-library.json', 'workflows.json', 'settings.json'):
                 if name not in archive.namelist() or not isinstance(json.loads(archive.read(name).decode('utf-8')), dict): raise ValueError('bad metadata')
+            if 'capability_schemas.json' in archive.namelist():
+                schema_value = json.loads(archive.read('capability_schemas.json').decode('utf-8'))
+                if not isinstance(schema_value, dict): raise ValueError('bad schema metadata')
             archive.extractall(staging)
         return manifest
+
+    def _restore_capability_schemas(self, data):
+        """恢复 capability_schemas.json：逐条校验并落盘；非法条目跳过，不阻塞整体恢复。"""
+        raw_list = data.get('schemas', []) if isinstance(data, dict) else []
+        schemas = []
+        for raw in raw_list:
+            ok, _errors = validate_capability_schema(raw)
+            if ok:
+                schemas.append(normalize_capability_schema(raw))
+        if not schemas and raw_list:
+            print('[BackupAPI] 备份中的能力 schema 全部未通过校验，已跳过')
+        try:
+            directory = os.path.dirname(os.path.abspath(self.schemas_file))
+            os.makedirs(directory, exist_ok=True)
+            atomic_write_json(self.schemas_file, {"schemas": schemas})
+        except Exception as exc:
+            print(f'[BackupAPI] 恢复能力 schema 失败: {exc}')
 
     @staticmethod
     def _atomic_copy(source, destination):

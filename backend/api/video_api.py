@@ -36,6 +36,22 @@ from backend.api.gemini_compat import resolve_image_api_base
 _video_tasks = {}
 _video_tasks_lock = threading.Lock()
 
+# 视频默认每 provider/key 并发 1（4.0 规范 §6；对齐 unified_api._IMAGE_TASKS_PER_KEY 模式）。
+_VIDEO_TASKS_PER_KEY = 1
+_video_task_slots = {}
+_video_task_slots_lock = threading.Lock()
+
+
+def _video_task_slot(provider, key):
+    """返回指定供应商 Key 的并发闸门；不以 API Key 明文作为内存索引或日志内容。"""
+    slot_key = (str(provider.get('id') or ''), str(key.get('id') or ''))
+    with _video_task_slots_lock:
+        slot = _video_task_slots.get(slot_key)
+        if slot is None:
+            slot = threading.BoundedSemaphore(_VIDEO_TASKS_PER_KEY)
+            _video_task_slots[slot_key] = slot
+        return slot
+
 # Content-Type 子类型 / URL 后缀 → 文件扩展名
 _VIDEO_EXT_MAP = {
     'mp4': 'mp4', 'quicktime': 'mov', 'webm': 'webm',
@@ -135,10 +151,29 @@ class VideoAPI:
         if not provider:
             raise AppError(503, "没有可用的视频模型，请先在设置中配置")
 
+        runtime_gate = getattr(self.unified, '_assert_runtime_adapter_supported', None)
+        if callable(runtime_gate):
+            runtime_gate(model_entry.id)
+
         connection = self.unified._get_connection(provider, key, model_entry.type, model_entry.id)
         if not connection:
             raise AppError(503, f"供应商「{provider.get('name', '')}」的视频生成未启用或尚未填写 URL / API Key，请到设置中补充后再生成")
 
+        # 按 Key 限流（视频默认 1；对齐 unified_api._IMAGE_TASKS_PER_KEY 模式，防止误连点重复扣费）
+        slot = _video_task_slot(provider, key)
+        if not slot.acquire(blocking=False):
+            print(f"[VideoAPI] 视频任务排队 | provider={provider.get('name', '-')} | "
+                  f"model={model_entry.id} | 单 Key 并发上限={_VIDEO_TASKS_PER_KEY}")
+            slot.acquire()
+        try:
+            return self._generate_video_inner(prompt, options, provider, key, model_entry,
+                                              connection, _progress_task_id)
+        finally:
+            slot.release()
+
+    def _generate_video_inner(self, prompt, options, provider, key, model_entry,
+                              connection, _progress_task_id=None):
+        """视频请求全链路（POST → 轮询 → 下载落盘）；由 generate_video 持有并发闸门调用。"""
         api_url   = connection['api_url'].rstrip('/')
         api_key   = connection['api_key']
         use_proxy = provider.get('use_proxy', False)

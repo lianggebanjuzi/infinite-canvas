@@ -11,8 +11,13 @@ from backend.api.model_rules import (
     MODEL_TYPE_DRAWING,
     MODEL_TYPE_CHAT,
     MODEL_TYPE_VIDEO,
+    MODEL_TYPE_AUDIO,
     detect_model_type,
+    validate_capability_schema,
+    normalize_capability_schema,
+    build_custom_adapter_preview,
 )
+from backend.api.utils import atomic_write_json
 import json
 import os
 import uuid
@@ -33,8 +38,15 @@ def _match_drawing_model(model_id: str):
 
 class ProviderAPI:
 
-    def __init__(self, providers_file):
+    def __init__(self, providers_file, schemas_file=None):
         self.providers_file = providers_file
+        # 4.3-D：用户能力 schema 存储（capability_schemas.json，随设置备份、不含 Key）
+        if schemas_file:
+            self.schemas_file = schemas_file
+        else:
+            self.schemas_file = os.path.join(
+                os.path.dirname(os.path.abspath(providers_file)), 'capability_schemas.json'
+            )
 
     # ─────────────────────────────────────────
     # 多 Key 结构：读时归一化 + 写时新结构
@@ -54,6 +66,7 @@ class ProviderAPI:
                     'chat': {'enabled': False, 'api_url': '', 'api_key': ''},
                     'drawing': {'enabled': False, 'api_url': '', 'api_key': ''},
                     'video': {'enabled': False, 'api_url': '', 'api_key': ''},
+                    'audio': {'enabled': False, 'api_url': '', 'api_key': ''},
                 },
             }]
 
@@ -133,7 +146,7 @@ class ProviderAPI:
         if not isinstance(global_keys, dict):
             global_keys = {}
             provider['global_keys'] = global_keys
-        for kind in ('chat', 'drawing', 'video'):
+        for kind in ('chat', 'drawing', 'video', 'audio'):
             global_keys.setdefault(kind, '')
 
     def _apply_provider_updates(self, provider, updates):
@@ -205,7 +218,7 @@ class ProviderAPI:
                 'type':       provider_type,
                 'enabled':    True,
                 'api_url':    '',
-                'global_keys': {'chat': '', 'drawing': '', 'video': ''},
+                'global_keys': {'chat': '', 'drawing': '', 'video': '', 'audio': ''},
                 'use_proxy':  False,
                 'keys':       [{
                     'id':      f"key_{uuid.uuid4().hex[:8]}",
@@ -217,6 +230,7 @@ class ProviderAPI:
                     'chat': {'enabled': False, 'api_url': '', 'api_key': ''},
                     'drawing': {'enabled': False, 'api_url': '', 'api_key': ''},
                     'video': {'enabled': False, 'api_url': '', 'api_key': ''},
+                    'audio': {'enabled': False, 'api_url': '', 'api_key': ''},
                 },
             }],
             }
@@ -295,6 +309,7 @@ class ProviderAPI:
                     'chat': {'enabled': False, 'api_url': '', 'api_key': ''},
                     'drawing': {'enabled': False, 'api_url': '', 'api_key': ''},
                     'video': {'enabled': False, 'api_url': '', 'api_key': ''},
+                    'audio': {'enabled': False, 'api_url': '', 'api_key': ''},
                 },
             }
             target['keys'].append(new_key)
@@ -415,6 +430,7 @@ class ProviderAPI:
                 all_drawing = []
                 all_chat    = []
                 all_video   = []
+                all_audio   = []
                 seen_ids    = set()
 
                 if 'data' in data:
@@ -446,6 +462,14 @@ class ProviderAPI:
                                 'enabled': True
                             })
                             print(f"匹配到视频模型: {model_id}")
+                        elif m_type == MODEL_TYPE_AUDIO:
+                            all_audio.append({
+                                'id':      model_id,
+                                'name':    model_id,
+                                'type':    MODEL_TYPE_AUDIO,
+                                'enabled': True
+                            })
+                            print(f"匹配到音频模型: {model_id}")
                         else:
                             # 对话模型没有显示名规则，name 直接用模型 ID（前端可再加工）
                             all_chat.append({
@@ -478,11 +502,12 @@ class ProviderAPI:
                     else:
                         print(f"去重跳过: {mid} (已有 [{name}] 的代表)")
 
-                # 对话/视频模型按 ID 去重已在第一步完成，无需再处理
-                print(f"共 {len(deduped_drawing)} 个绘图模型、{len(all_chat)} 个对话模型、{len(all_video)} 个视频模型")
+                # 对话/视频/音频模型按 ID 去重已在第一步完成，无需再处理
+                print(f"共 {len(deduped_drawing)} 个绘图模型、{len(all_chat)} 个对话模型、"
+                      f"{len(all_video)} 个视频模型、{len(all_audio)} 个音频模型")
                 return {
                     "status": "success",
-                    "models": deduped_drawing + all_chat + all_video
+                    "models": deduped_drawing + all_chat + all_video + all_audio
                 }
             else:
                 error_msg = f"HTTP {response.status_code}: {response.text}"
@@ -622,3 +647,198 @@ class ProviderAPI:
         if 'vision'    in model_id_lower: badges.append('vision')
         if 'embedding' in model_id_lower: badges.append('embedding')
         return badges
+
+    # ─────────────────────────────────────────
+    # 4.3-D 模型能力 schema（capability_* 前缀桥接）
+    # 存储到 capability_schemas.json（随设置备份、不含 Key）；内置规则保留，
+    # 用户 schema 只允许通过 validate_capability_schema 校验后落盘。
+    # ─────────────────────────────────────────
+
+    def load_capability_schemas(self):
+        """读取用户能力 schema 列表（读时归一化，非法条目跳过）。"""
+        try:
+            if not os.path.exists(self.schemas_file):
+                return {"status": "success", "schemas": []}
+            with open(self.schemas_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            raw_list = data.get('schemas', []) if isinstance(data, dict) else []
+            schemas = []
+            for raw in raw_list:
+                ok, _errors = validate_capability_schema(raw)
+                if ok:
+                    schemas.append(normalize_capability_schema(raw))
+            return {"status": "success", "schemas": schemas}
+        except Exception as e:
+            print(f"[ProviderAPI] 加载能力 schema 失败: {e}")
+            return {"status": "error", "message": "加载能力 schema 失败", "schemas": []}
+
+    def _write_capability_schemas(self, schemas):
+        """原子写 capability_schemas.json；父目录不存在时创建。"""
+        directory = os.path.dirname(os.path.abspath(self.schemas_file))
+        os.makedirs(directory, exist_ok=True)
+        atomic_write_json(self.schemas_file, {"schemas": schemas})
+
+    def save_capability_schema(self, schema):
+        """保存/覆盖一个用户能力 schema（按 modelId 精确匹配替换）。校验失败不可保存。"""
+        if not isinstance(schema, dict):
+            return {"status": "error", "message": "schema 必须是对象"}
+        ok, errors = validate_capability_schema(schema)
+        if not ok:
+            return {"status": "error", "message": "schema 校验失败：\n" + "\n".join(errors)}
+        normalized = normalize_capability_schema(schema)
+        try:
+            current = self.load_capability_schemas().get('schemas', [])
+            model_id = normalized.get('modelId', '')
+            current = [s for s in current if s.get('modelId') != model_id]
+            current.append(normalized)
+            self._write_capability_schemas(current)
+            print(f"[ProviderAPI] 能力 schema 已保存: {model_id}")
+            return {"status": "success", "message": f"模型「{model_id}」能力 schema 已保存"}
+        except Exception as e:
+            print(f"[ProviderAPI] 保存能力 schema 失败: {e}")
+            return {"status": "error", "message": f"保存能力 schema 失败：{e}"}
+
+    def delete_capability_schema(self, model_id):
+        """删除一个用户能力 schema（按 modelId 精确匹配）。"""
+        if not isinstance(model_id, str) or not model_id.strip():
+            return {"status": "error", "message": "modelId 无效"}
+        try:
+            current = self.load_capability_schemas().get('schemas', [])
+            bare = model_id.strip()
+            before = len(current)
+            current = [s for s in current if s.get('modelId') != bare]
+            if len(current) == before:
+                return {"status": "error", "message": f"未找到模型「{bare}」的用户 schema"}
+            self._write_capability_schemas(current)
+            return {"status": "success", "message": f"模型「{bare}」的用户 schema 已删除（回退内置规则）"}
+        except Exception as e:
+            print(f"[ProviderAPI] 删除能力 schema 失败: {e}")
+            return {"status": "error", "message": f"删除能力 schema 失败：{e}"}
+
+    def test_custom_adapter(self, model_id, options=None):
+        """
+        custom-declarative 受限测试：
+        - mode='connection'（默认）：仅发送「测试连接/模型列表」请求（GET /models，无媒体费用）；
+        - mode='preview'：返回请求结构预览（URL path/字段映射/状态字段/结果字段白名单），不发网络请求；
+        - mode='generate'：当前不支持。custom-declarative 尚未接入执行器，
+          绝不能把预览误报为可运行生成。
+        """
+        options = options or {}
+        mode = options.get('mode') or 'connection'
+        bare = (model_id or '').split(':')[-1].strip()
+        schemas = self.load_capability_schemas().get('schemas', [])
+        spec = next((s for s in schemas if s.get('modelId') == bare), None)
+        if not spec:
+            return {"status": "error", "message": f"未找到模型「{bare}」的能力 schema，请先保存 schema"}
+        if spec.get('requestAdapter') != 'custom-declarative':
+            return {"status": "error", "message": "仅 custom-declarative adapter 支持受限测试"}
+
+        if mode == 'preview':
+            return {"status": "success", "mode": "preview", "preview": build_custom_adapter_preview(spec)}
+
+        if mode == 'generate':
+            return {
+                "status": "error",
+                "mode": "generate",
+                "message": "custom-declarative 当前仅支持请求预览和连接测试，尚未接入实际生成。",
+                "preview": build_custom_adapter_preview(spec),
+            }
+
+        # connection：仅发送「测试连接/模型列表」请求（无媒体费用）
+        resolved = self._resolve_route_connection(model_id)
+        if resolved is None:
+            return {"status": "error", "mode": "connection",
+                    "message": "无法解析模型路由，请确认该模型已添加到供应商模型列表并配置 Key"}
+        _provider, _key, _model, api_url, api_key, _kind = resolved
+        try:
+            base_url = resolve_chat_api_base(api_url).rstrip('/')
+            if not base_url.endswith('/v1'):
+                base_url = base_url + '/v1'
+            models_url = f"{base_url}/models"
+            headers = {
+                'Authorization': f'Bearer {api_key}',
+                'Content-Type':  'application/json'
+            }
+            response = requests.get(models_url, headers=headers, timeout=10)
+            if response.status_code == 200:
+                data = response.json()
+                count = len(data.get('data', [])) if isinstance(data, dict) else 0
+                return {"status": "success", "mode": "connection",
+                        "message": f"连接成功，模型列表 {count} 项（未发起媒体生成）", "model_count": count}
+            return {"status": "error", "mode": "connection",
+                    "message": f"连接失败: HTTP {response.status_code}"}
+        except requests.exceptions.Timeout:
+            return {"status": "error", "mode": "connection", "message": "连接超时"}
+        except requests.exceptions.ConnectionError:
+            return {"status": "error", "mode": "connection", "message": "无法连接到服务器"}
+        except Exception as e:
+            print(f"[ProviderAPI] custom adapter 连接测试异常: {e}")
+            return {"status": "error", "mode": "connection", "message": f"连接测试失败：{e}"}
+
+    def _resolve_route_connection(self, model_id):
+        """
+        解析模型路由（provider:key:model / provider:model / 裸 model）为连接信息。
+        返回 (provider, key, model, api_url, api_key, kind)；无法唯一解析返回 None。
+        解析逻辑与前端 isModelReady 对齐：模型专用 Key → 同类全局 Key → 账户通道 Key。
+        """
+        if not isinstance(model_id, str) or not model_id.strip():
+            return None
+        parts = model_id.split(':')
+        data = self.load_providers()
+        providers = data.get('providers', [])
+
+        provider = key = model = None
+        if len(parts) >= 3:
+            provider_id, key_id, mid = parts[0], parts[1], ':'.join(parts[2:])
+            provider = next((p for p in providers if p.get('id') == provider_id), None)
+            if not provider:
+                return None
+            key = next((k for k in (provider.get('keys') or []) if k.get('id') == key_id), None)
+            if not key:
+                return None
+            model = next((m for m in (key.get('models') or []) if m.get('id') == mid), None)
+            if not model:
+                return None
+        elif len(parts) == 2:
+            provider_id, mid = parts
+            provider = next((p for p in providers if p.get('id') == provider_id), None)
+            if not provider:
+                return None
+            key = next((k for k in (provider.get('keys') or []) if k.get('enabled') is not False), None)
+            if key is None:
+                key = (provider.get('keys') or [None])[0]
+            if key is None:
+                return None
+            model = next((m for m in (key.get('models') or []) if m.get('id') == mid), None)
+            if not model:
+                return None
+        else:
+            mid = parts[0]
+            found = None
+            for p in providers:
+                for k in (p.get('keys') or []):
+                    for m in (k.get('models') or []):
+                        if m.get('id') == mid:
+                            if found is not None:
+                                return None  # 有歧义，不猜
+                            found = (p, k, m)
+            if found is None:
+                return None
+            provider, key, model = found
+
+        kind = model.get('type') or detect_model_type(model.get('id') or '')
+        if kind == MODEL_TYPE_CHAT:
+            api_url = (provider.get('text_api_url') or provider.get('api_url') or '').strip()
+        else:
+            api_url = (provider.get('api_url') or '').strip()
+        channel = (key.get('channels') or {}).get(kind) or {}
+        channel_key = channel.get('api_key') if channel.get('enabled') is not False else ''
+        api_key = (
+            model.get('api_key')
+            or (provider.get('global_keys') or {}).get(kind)
+            or channel_key
+            or ''
+        ).strip()
+        if not api_url or not api_key:
+            return None
+        return provider, key, model, api_url, api_key, kind

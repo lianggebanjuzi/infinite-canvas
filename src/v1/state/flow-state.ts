@@ -18,7 +18,7 @@ export class FlowState {
   canvas: FlowCanvasState = { scale: 1, panX: 60, panY: 40 };
   projectName = '未命名项目';
   /** 当前项目最近一次人工选择的模型；不使用跨项目 localStorage。 */
-  modelDefaults: Record<'drawing' | 'chat' | 'video', string> = { drawing: '', chat: '', video: '' };
+  modelDefaults: Record<'drawing' | 'chat' | 'video' | 'audio', string> = { drawing: '', chat: '', video: '', audio: '' };
   dirty = false;
   /** 画布是否曾经有过节点（addNode/replaceAll 置 true；用于区分"首次启动空画布"与"用户主动删空"） */
   everHadNodes = false;
@@ -270,11 +270,11 @@ export class FlowState {
     this.notify();
   }
 
-  getModelDefault(kind: 'drawing' | 'chat' | 'video'): string {
+  getModelDefault(kind: 'drawing' | 'chat' | 'video' | 'audio'): string {
     return this.modelDefaults[kind] || '';
   }
 
-  setModelDefault(kind: 'drawing' | 'chat' | 'video', model: string): void {
+  setModelDefault(kind: 'drawing' | 'chat' | 'video' | 'audio', model: string): void {
     if (!model || this.modelDefaults[kind] === model) return;
     this.modelDefaults[kind] = model;
     this.updatedAt = Date.now();
@@ -345,7 +345,13 @@ export class FlowState {
   addEdge(from: string, to: string, opts: { suppressStale?: boolean } = {}): FlowEdge | null {
     if (from === to) return null;
     if (this.edges.some(e => e.from === from && e.to === to)) return null;
-    const edge: FlowEdge = { id: uid('edge'), from, to };
+    const fromNode = this.getNode(from);
+    const toNode = this.getNode(to);
+    // 4.2-C：音频节点 → 视频节点 = 音轨/配音参考（连线关系类型，供渲染标签与运行前门控）
+    const kind: 'audio-ref' | undefined = fromNode?.type === 'audio-gen' && toNode?.type === 'video-gen'
+      ? 'audio-ref'
+      : undefined;
+    const edge: FlowEdge = kind ? { id: uid('edge'), from, to, kind } : { id: uid('edge'), from, to };
     this.edges.push(edge);
 
     // 连线后数据流已变化：to 及其所有下游子孙的结果不可信 → 标 stale（与 removeEdge 口径一致：
@@ -523,6 +529,7 @@ export class FlowState {
       drawing: typeof savedDefaults.drawing === 'string' ? savedDefaults.drawing : lastModel('image-gen'),
       chat: typeof savedDefaults.chat === 'string' ? savedDefaults.chat : lastModel('text-gen'),
       video: typeof savedDefaults.video === 'string' ? savedDefaults.video : lastModel('video-gen'),
+      audio: typeof savedDefaults.audio === 'string' ? savedDefaults.audio : lastModel('audio-gen'),
     };
     this.createdAt = project.createdAt || Date.now();
     this.updatedAt = project.updatedAt || Date.now();
@@ -548,7 +555,7 @@ export class FlowState {
     this.nodes = (snap.nodes || []).map(n => this._cloneNode(n));
     this.edges = (snap.edges || []).map(e => ({ ...e }));
     this.projectName = snap.projectName || '未命名项目';
-    this.modelDefaults = { drawing: snap.modelDefaults?.drawing || '', chat: snap.modelDefaults?.chat || '', video: snap.modelDefaults?.video || '' };
+    this.modelDefaults = { drawing: snap.modelDefaults?.drawing || '', chat: snap.modelDefaults?.chat || '', video: snap.modelDefaults?.video || '', audio: snap.modelDefaults?.audio || '' };
     this.selectedIds.clear();
     this.dirty = snap.dirty;
     this.updatedAt = Date.now();

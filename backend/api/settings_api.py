@@ -136,6 +136,17 @@ class SettingsAPI:
                 item['name'] = name.strip()[:120]; settings['recent_projects'] = records; return self.save_settings(settings)
         return {"status": "error", "message": "最近项目记录不存在"}
 
+    def check_recent_project_path(self, path):
+        """4.3-C 失效检测：返回路径是否真实存在（前端标红 / 清理失效记录用）。
+        只读检查，绝不删除或改写任何文件；异常（非法路径等）按不存在处理。
+        """
+        try:
+            if not isinstance(path, str) or not path.strip():
+                return {"status": "success", "exists": False}
+            return {"status": "success", "exists": os.path.exists(os.path.abspath(path))}
+        except Exception:
+            return {"status": "success", "exists": False}
+
     @staticmethod
     def _normalize_recent_projects(value):
         if not isinstance(value, list): return []

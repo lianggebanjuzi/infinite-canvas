@@ -9,7 +9,7 @@ interface BackendProviderKey {
   enabled: boolean;
   models: BackendModel[];
   /** 旧版按能力连接配置，仅用于迁移兼容。 */
-  channels?: Partial<Record<'chat' | 'drawing' | 'video', BackendProviderChannel>>;
+  channels?: Partial<Record<'chat' | 'drawing' | 'video' | 'audio', BackendProviderChannel>>;
 }
 
 interface BackendProviderChannel {
@@ -27,8 +27,8 @@ interface BackendProvider {
   enabled: boolean;
   api_url?: string;
   text_api_url?: string;  // 可选：文本对话 URL（留空则与 api_url 共用；对话/拉模型/测连接优先走此 URL）
-  /** 图像 / 文本 / 视频三类模型的默认 API Key。 */
-  global_keys?: Partial<Record<'chat' | 'drawing' | 'video', string>>;
+  /** 图像 / 文本 / 视频 / 音频四类模型的默认 API Key。 */
+  global_keys?: Partial<Record<'chat' | 'drawing' | 'video' | 'audio', string>>;
   use_proxy?: boolean;
   keys?: BackendProviderKey[];   // 新结构（load_providers 归一化后必有）
   api_key?: string;              // legacy：读兼容，新代码不写
@@ -110,6 +110,32 @@ interface BackendVideoTaskResult {
   };
 }
 
+/** 音频任务创建响应（unified_generate_audio / generate_audio_async）——4.2-B */
+interface BackendAudioTaskCreate {
+  success?: boolean;
+  task_id: string; // 本地 uuid（轮询 get_audio_task_result 用）
+}
+
+/** 音频任务查询结果（unified_get_audio_task_result）——4.2-B */
+interface BackendAudioTaskResult {
+  status: string;            // not_found | pending | queued | processing | in_progress | pending_confirmation | done
+  remote_task_id?: string;
+  result?: {
+    success?: boolean;
+    audio_url?: string;      // 本地播放地址 file:/// 绝对路径
+    audio_path?: string;     // 本地绝对路径（正斜杠）
+    original_url?: string;   // 远端下载地址（信息性，可能过期）
+    saved_to_disk?: boolean; // 未配置保存路径时 false
+    task_id?: string;        // 上游任务 id
+    duration?: number | null;
+    size_bytes?: number | null;
+    mime_type?: string | null;
+    error?: string;
+    error_code?: number;
+    message?: string;
+  };
+}
+
 /** 保存/打开项目通用结果 */
 interface BackendProjectResult {
   status: string;            // success | need_save_as | cancelled | error
@@ -151,5 +177,5 @@ interface BackendAssetsResult {
   status: string;            // success | empty | error
   degraded?: boolean;        // incremental-3：save_assets 降级写入 fallback 目录（未配置图片保存路径）
   message?: string;          // 人话提示（降级/错误时透传，如「请先在设置中配置图片保存路径」）
-  records?: ImageAssetRecord[];
+  records?: MediaAssetRecord[];
 }

@@ -15,11 +15,11 @@ import { showToast } from './toast';
 import { Backend } from '../api';
 
 const THEME_KEY = 'infinite_canvas_theme';
-export const WORKSPACE_THEMES = ['warm', 'dark', 'ocean', 'violet', 'copper'] as const;
+export const WORKSPACE_THEMES = ['light', 'dark'] as const;
 export type WorkspaceTheme = typeof WORKSPACE_THEMES[number];
 
 export function normalizeWorkspaceTheme(value: unknown): WorkspaceTheme {
-  return WORKSPACE_THEMES.includes(value as WorkspaceTheme) ? value as WorkspaceTheme : 'warm';
+  return WORKSPACE_THEMES.includes(value as WorkspaceTheme) ? value as WorkspaceTheme : 'light';
 }
 
 /** 主题是全局设置而非项目字段，切换不会污染 .icproj。 */
@@ -77,7 +77,7 @@ class BottomBar {
 
     // 主题初始化
     const saved = localStorage.getItem(THEME_KEY);
-    void Backend.loadSettings().then(settings => void applyWorkspaceTheme(settings.workspace_theme || saved || 'warm', false)).catch(() => void applyWorkspaceTheme(saved || 'warm', false));
+    void Backend.loadSettings().then(settings => void applyWorkspaceTheme(settings.workspace_theme || saved || 'light', false)).catch(() => void applyWorkspaceTheme(saved || 'light', false));
 
     flowState.subscribe(() => this._sync());
     this._sync();

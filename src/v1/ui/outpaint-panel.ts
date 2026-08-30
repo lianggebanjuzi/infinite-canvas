@@ -1,15 +1,13 @@
 // src/v1/ui/outpaint-panel.ts
-// 扩图调节弹层（画布内“扩图”节点的「调整扩图」入口）：
-//   选目标比例 → 原图拖放/缩放 → 将配置持久化到节点 → canvas 合成白底底图
-//   → runEngine.runOutpaint（banana 系列模型带图补全 → 新建结果节点连右侧）
-// 不暴露分辨率选项（模型自动出图，最高 4K）；不暴露模型选择（自动解析 gemini/nano-banana/seedream 系 drawing 模型）。
+// 扩图调节弹层：选目标比例、模型和原图摆放 → canvas 合成白底底图
+// → runEngine.runOutpaint（支持扩图的图像模型带图补全并回写当前节点）。
 // 弹层挂 .overlay 类：interactions.ts 已把 .overlay 排除在画布交互外，天然防冲突；
 // 弹层内 pointer 事件独立处理，不侵入画布。
 
 import { flowState } from '../state/flow-state';
 import { runEngine } from '../engine/run-engine';
 import { showToast } from './toast';
-import { resolveOutpaintModel } from '../api';
+import { Backend, fetchOutpaintModels, localImageFileUrl } from '../api';
 import { RATIO_CANVAS, OUTPAINT_PROMPT_PREFIX, composeOutpaintDataUrl, defaultOutpaintPlacement, loadOutpaintImage } from '../engine/outpaint-util';
 import { flowHistory } from '../state/history';
 
@@ -21,7 +19,7 @@ interface OutpaintPanelState {
   posX: number;    // 原图中心相对画布中心的偏移（画布像素，可负）
   posY: number;
   scale: number;   // 缩放倍率（1 = 原图自然尺寸）
-  model: string;   // 自动解析出的扩图模型（"provider:model"）
+  model: string;   // 用户选择的扩图模型（"provider:key:model"）
   ready: boolean;  // 图片加载完成且模型可用
 }
 
@@ -31,6 +29,7 @@ class OutpaintPanel {
   private imgEl: HTMLImageElement | null = null;
   private zoomInput: HTMLInputElement | null = null;
   private confirmBtn: HTMLButtonElement | null = null;
+  private modelSelect: HTMLSelectElement | null = null;
   private modelLabel: HTMLElement | null = null;
   private descInput: HTMLTextAreaElement | null = null;
   private ratioWrap: HTMLElement | null = null;
@@ -51,6 +50,7 @@ class OutpaintPanel {
     this.imgEl = document.getElementById('outpaint-img') as HTMLImageElement | null;
     this.zoomInput = document.getElementById('outpaint-zoom') as HTMLInputElement | null;
     this.confirmBtn = document.getElementById('outpaint-confirm') as HTMLButtonElement | null;
+    this.modelSelect = document.getElementById('outpaint-model-select') as HTMLSelectElement | null;
     this.modelLabel = document.getElementById('outpaint-model-label');
     this.descInput = document.getElementById('outpaint-desc') as HTMLTextAreaElement | null;
     this.ratioWrap = document.getElementById('outpaint-ratios');
@@ -64,6 +64,11 @@ class OutpaintPanel {
       if (e.target === this.overlay) this.close();
     });
     this.confirmBtn?.addEventListener('click', () => void this._confirm());
+    this.modelSelect?.addEventListener('change', () => {
+      this.state.model = this.modelSelect?.value || '';
+      if (this.modelLabel) this.modelLabel.textContent = this.state.model ? '仅显示支持扩图的模型' : '请选择扩图模型';
+      this._setConfirmDisabled(!this.state.model || !this.state.img);
+    });
 
     // 比例 chips
     this.ratioWrap?.querySelectorAll('.outpaint-ratio').forEach(btn => {
@@ -94,7 +99,7 @@ class OutpaintPanel {
     });
   }
 
-  /** 打开扩图调节弹层：异步加载已连接源图 + 自动解析模型 */
+  /** 打开扩图调节弹层：异步加载当前图片和可用扩图模型。 */
   async open(nodeId: string): Promise<void> {
     if (!this.overlay) return;
     const node = flowState.getNode(nodeId);
@@ -112,19 +117,25 @@ class OutpaintPanel {
     };
     this.overlay.classList.add('show');
     this._setConfirmDisabled(true);
-    if (this.modelLabel) this.modelLabel.textContent = '正在解析扩图模型…';
+    if (this.modelSelect) {
+      this.modelSelect.replaceChildren();
+      const option = document.createElement('option');
+      option.textContent = '正在加载可用模型…';
+      this.modelSelect.appendChild(option);
+      this.modelSelect.disabled = true;
+    }
+    if (this.modelLabel) this.modelLabel.textContent = '正在加载可用模型…';
     if (this.descInput) this.descInput.value = p.prompt || '';
     if (this.zoomInput) this.zoomInput.value = String(this.state.scale);
     if (this.imgEl) { this.imgEl.src = ''; this.imgEl.style.display = 'none'; } // 清空旧图，避免复用上次 src
 
-    // 并行：加载原图 + 解析模型（解析顺序：节点当前 model（属 banana 系）→ 第一个可用扩图模型）
-    const [img, model] = await Promise.all([
-      loadOutpaintImage(src),
-      resolveOutpaintModel(node),
-    ]);
+    // 原图预览不应等待模型解析。模型未配置或解析失败时，用户仍需能看到并调整要扩展的图片。
+    const imagePromise = this._loadSourceImage(node, src);
+    const modelsPromise = fetchOutpaintModels().catch(() => []);
+    const img = await imagePromise;
 
-    // 打开期间可能已被关闭（Escape/点遮罩）
-    if (!this.overlay.classList.contains('show')) return;
+    // 打开期间可能已被关闭，或已切换到另一张图。
+    if (!this.overlay.classList.contains('show') || this.state.nodeId !== nodeId) return;
 
     if (!img) {
       this._setConfirmDisabled(true);
@@ -133,23 +144,6 @@ class OutpaintPanel {
       return;
     }
     this.state.img = img;
-    this.state.model = model;
-    if (!model) {
-      this._setConfirmDisabled(true);
-      if (this.modelLabel) this.modelLabel.textContent = '未找到可用的 Nano Banana 系列模型，请先在设置中配置';
-      showToast('请先在设置中配置 Nano Banana 系列模型', false);
-      return;
-    }
-    // 创建扩图步骤后即使用户先关闭弹层，已解析的可用模型也要留在节点上：
-    // 这样它仍是一个可直接运行、可保存和可重跑的完整步骤，而不是空壳配置。
-    const current = flowState.getNode(nodeId);
-    if (current && (current.params as unknown as StyleTransferParams).mode === 'outpaint'
-      && (current.params as unknown as StyleTransferParams).model !== model) {
-      flowState.updateNodeParams(nodeId, { model });
-    }
-    this.state.ready = true;
-    this._setConfirmDisabled(false);
-    if (this.modelLabel) this.modelLabel.textContent = `扩图模型：${this._shortModelName(model)}`;
     if (this.imgEl) this.imgEl.src = img.src; // 显示层绑定本次原图（后续只改 style，不重复设 src）
 
     // 初始布局：原图居中，高度占画布 80%（等比缩放，不超宽），可拖动可缩放微调。
@@ -163,12 +157,65 @@ class OutpaintPanel {
     this._render();
     this._syncRatioChips();
     this._syncPositionButtons(this._currentPositionPreset());
+
+    const models = await modelsPromise;
+    if (!this.overlay.classList.contains('show') || this.state.nodeId !== nodeId) return;
+    const model = models.some(item => item.id === p.model) ? p.model : (models[0]?.id || '');
+    this.state.model = model;
+    this._setModelOptions(models, model);
+    if (!model) {
+      this._setConfirmDisabled(true);
+      if (this.modelLabel) this.modelLabel.textContent = '未找到支持扩图的模型，请先在设置中配置';
+      showToast('请先在设置中配置支持扩图的模型', false);
+      return;
+    }
+    this.state.ready = true;
+    this._setConfirmDisabled(false);
+    if (this.modelLabel) this.modelLabel.textContent = '仅显示支持扩图的模型';
   }
 
   close(): void {
     this.overlay?.classList.remove('show');
     this.state = { nodeId: '', img: null, ratio: '1:1', posX: 0, posY: 0, scale: 1, model: '', ready: false };
     this._dragging = false;
+  }
+
+  private _setModelOptions(models: Array<{ id: string; name: string }>, selected: string): void {
+    if (!this.modelSelect) return;
+    this.modelSelect.replaceChildren();
+    if (models.length === 0) {
+      const option = document.createElement('option');
+      option.textContent = '未找到可用模型';
+      option.value = '';
+      this.modelSelect.appendChild(option);
+      this.modelSelect.disabled = true;
+      return;
+    }
+    models.forEach(model => {
+      const option = document.createElement('option');
+      option.value = model.id;
+      option.textContent = model.name || this._shortModelName(model.id);
+      option.selected = model.id === selected;
+      this.modelSelect!.appendChild(option);
+    });
+    this.modelSelect.disabled = false;
+    this.modelSelect.value = selected;
+  }
+
+  /** 与裁剪器使用同一份本地原图回退，避免 file URL 在嵌入式 WebView 中无法直接显示。 */
+  private async _loadSourceImage(node: FlowNode, src: string): Promise<HTMLImageElement | null> {
+    const direct = await loadOutpaintImage(src);
+    if (direct) return direct;
+    const sourceNode = node.imageOrigin?.path
+      ? node
+      : flowState.getUpstreams(node.id).find(item => item.imageUrl === src && item.imageOrigin?.path);
+    const origin = sourceNode?.imageOrigin;
+    if (!origin?.path) return null;
+    const local = localImageFileUrl(origin.path, origin.url);
+    const localImage = await loadOutpaintImage(local);
+    if (localImage) return localImage;
+    const loaded = await Backend.loadLocalImage(origin.path);
+    return loaded.status === 'success' && loaded.data_url ? loadOutpaintImage(loaded.data_url) : null;
   }
 
   // ───────────────────────── 交互：拖放 / 缩放 ─────────────────────────
@@ -323,7 +370,10 @@ class OutpaintPanel {
     this._constrainPlacement();
     const { w: cw, h: ch } = RATIO_CANVAS[this.state.ratio] || RATIO_CANVAS['1:1'];
     const parentW = this.stage.parentElement?.clientWidth || 560;
-    const stageW = Math.min(560, Math.max(280, parentW - 40));
+    const widthLimit = Math.min(560, Math.max(220, parentW - 16));
+    // 竖版比例优先收窄预览，而不是把右侧控制或底部按钮推到弹层外。
+    const heightLimit = Math.max(260, Math.min(520, window.innerHeight - 250));
+    const stageW = Math.min(widthLimit, (heightLimit * cw) / ch);
     const stageH = Math.round((stageW * ch) / cw);
     this.stage.style.width = stageW + 'px';
     this.stage.style.height = stageH + 'px';
@@ -380,9 +430,9 @@ class OutpaintPanel {
     const ratio = this.state.ratio;
     const model = this.state.model;
     const placement = { posX: this.state.posX, posY: this.state.posY, scale: this.state.scale };
-    // 操作结果写回扩图节点，使提示词、比例和摆放在项目保存后仍可编辑和重跑。
+    // 保存本次扩图参数，并在成功后将结果回写到当前图片节点。
     flowHistory.record();
-    flowState.updateNodeParams(nodeId, { mode: 'outpaint', prompt: userDesc, aspectRatio: ratio, model, resolution: '4k', count: 1, outpaintPlacement: placement });
+    flowState.updateNodeParams(nodeId, { prompt: userDesc, aspectRatio: ratio, model, resolution: '4k', count: 1, outpaintPlacement: placement });
     this.close();
     await runEngine.runOutpaint(nodeId, {
       prompt,
@@ -390,6 +440,7 @@ class OutpaintPanel {
       aspectRatio: ratio,
       model,
       resolution: '4k',
+      replaceNode: true,
     });
   }
 

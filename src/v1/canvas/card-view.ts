@@ -146,6 +146,13 @@ class CardView {
 
   private _bindGalleryEvents(el: HTMLElement, nodeId: string): void {
     el.addEventListener('click', (e: MouseEvent) => {
+      // 4.2-B：点击音频卡主体 → 打开音频查看器
+      const audioOpen = (e.target as Element).closest('.pcard-audio') as HTMLElement | null;
+      if (audioOpen) {
+        e.preventDefault(); e.stopPropagation();
+        window.dispatchEvent(new CustomEvent('icv:open-audio', { detail: { nodeId } }));
+        return;
+      }
       // 点击右侧露出的折叠叠图：展开所有结果（不额外放「多图」按钮）。
       const expandBtn = (e.target as Element).closest('.stack-layer') as HTMLElement | null;
       if (expandBtn) {
@@ -310,15 +317,17 @@ class CardView {
     const isTextGen = node.type === 'text-gen';
     const isTextSplit = node.type === 'text-split';
     const isVideo = node.type === 'video-gen';
-    const isOutpaint = !isTextGen && !isTextSplit && !isVideo && (node.params as unknown as StyleTransferParams).mode === 'outpaint';
+    const isAudio = node.type === 'audio-gen';
+    const isOutpaint = !isTextGen && !isTextSplit && !isVideo && !isAudio && (node.params as unknown as StyleTransferParams).mode === 'outpaint';
     const isAsset = flowState.isAssetNode(node); // 素材态：整卡显图 + 角标「素材」（判分支 #9）
-    const isTallImage = !isTextGen && !isTextSplit && CARD_W / (node.ratio > 0 ? node.ratio : 4 / 3) > IMAGE_CARD_MAX_H;
+    const isTallImage = !isTextGen && !isTextSplit && !isAudio && CARD_W / (node.ratio > 0 ? node.ratio : 4 / 3) > IMAGE_CARD_MAX_H;
     // C-3 统一批次展示：count>1 与文本拆分驱动的成功图都写在 generatedImages，卡内统一浏览
     const galleryImages = (node.generatedImages || []);
     const galleryIndex = Math.min(Math.max(0, node.activeGeneratedIndex || 0), Math.max(0, galleryImages.length - 1));
     const galleryImage = galleryImages[galleryIndex];
     const videoUrl = isVideo ? (node.video?.url || '') : '';
-    const mainSrc = (isTextGen || isTextSplit)
+    const audioUrl = isAudio ? (node.audio?.url || '') : '';
+    const mainSrc = (isTextGen || isTextSplit || isAudio)
       ? ''
       : (galleryImage?.url || node.imageUrl || (ownRefs.length > 0 ? ownRefs[0] : ''));
 
@@ -347,7 +356,7 @@ class CardView {
     const provenance = this._provenanceLabel(node);
     const splitState = isTextSplit ? JSON.stringify({ params: node.params, segments: flowState.getTextSplitSegments(node.id) }) : '';
     const galleryState = JSON.stringify({ images: node.generatedImages || [], index: node.activeGeneratedIndex || 0 });
-    const fp = { mainSrc: isVideo ? videoUrl : mainSrc, refStrip, title, status: node.status, error: node.error || '', text, assetState, isAsset: isAsset ? '1' : '0', isOutpaint: isOutpaint ? '1' : '0', emptyHint, sizeLabel, layoutLabel, provenance, splitState, galleryState };
+    const fp = { mainSrc: isVideo ? videoUrl : (isAudio ? audioUrl : mainSrc), refStrip, title, status: node.status, error: node.error || '', text, assetState, isAsset: isAsset ? '1' : '0', isOutpaint: isOutpaint ? '1' : '0', emptyHint, sizeLabel, layoutLabel, provenance, splitState, galleryState };
     const prev = this._contentFingerprint.get(node.id);
     const changed = !prev
       || prev.mainSrc !== fp.mainSrc
@@ -401,6 +410,14 @@ class CardView {
           const duration = typeof node.video?.duration === 'number' ? `${Math.round(node.video.duration)} 秒` : '时长未知';
           const ratio = (node.params as unknown as VideoGenParams).aspectRatio || '—';
           img.innerHTML = `<video class="pcard-video" src="${escapeUrl(videoUrl)}" muted preload="metadata" playsinline></video><div class="pcard-video-meta">▶ ${escapeHtml(duration)} · ${escapeHtml(ratio)}</div>${refStrip}`;
+        } else if (isAudio && audioUrl) {
+          // 4.2-B：音频卡（标题/时长/播放控制/离线抽样波形占位；点击打开查看器）
+          const duration = typeof node.audio?.duration === 'number' ? `${Math.round(node.audio.duration)} 秒` : '时长未知';
+          const size = typeof node.audio?.sizeBytes === 'number' ? ` · ${(node.audio.sizeBytes / 1024 / 1024).toFixed(1)} MB` : '';
+          img.innerHTML = `<div class="pcard-audio" data-audio-open="${node.id}">
+              <div class="pcard-audio-wave">${audioWaveHtml(28)}</div>
+              <div class="pcard-audio-meta">▶ ${escapeHtml(duration)}${escapeHtml(size)}</div>
+            </div>${refStrip}`;
         } else if (mainSrc) {
           // 素材节点保留整卡显图和边框区分；类型由左上角标题胶囊呈现，无需重复角标。
           // C-3：批次卡显示「第 x/N 张」+ 批次摘要（成功 x/y，仅部分失败时提示）+ 上下切换
@@ -438,7 +455,7 @@ class CardView {
         : '';
     }
 
-    el.classList.toggle('empty', !mainSrc && !videoUrl && !isTextGen && !isTextSplit);
+    el.classList.toggle('empty', !mainSrc && !videoUrl && !audioUrl && !isTextGen && !isTextSplit);
     el.classList.toggle('selected', selection.isSelected(node.id));
     el.classList.toggle('pcard-asset', isAsset); // 素材态：细边框视觉（判分支 #9）
     el.classList.toggle('pcard-outpaint', isOutpaint);
@@ -465,6 +482,7 @@ class CardView {
       act.onclick = (e: MouseEvent) => {
         e.stopPropagation();
         if (isVideo && videoUrl) window.dispatchEvent(new CustomEvent('icv:open-video', { detail: { nodeId: node.id } }));
+        else if (isAudio && audioUrl) window.dispatchEvent(new CustomEvent('icv:open-audio', { detail: { nodeId: node.id } }));
         else if (mainSrc) window.dispatchEvent(new CustomEvent('icv:open-results', { detail: { nodeId: node.id, index: node.activeGeneratedIndex || 0 } }));
       };
     }
@@ -704,6 +722,18 @@ class CardView {
 function emptyContent(label?: string): string {
   const plus = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>';
   return `${plus}<span>${escapeHtml(label || '拖入图片或写提示词').replace(/\n/g, '<br>')}</span>`;
+}
+
+/** 4.2-B：音频卡离线抽样波形占位（固定条高，不要求实时频谱）。 */
+function audioWaveHtml(bars: number): string {
+  let html = '';
+  let seed = 11;
+  const next = (): number => { seed = (seed * 1103515245 + 12345) % 2147483648; return seed / 2147483648; };
+  for (let i = 0; i < bars; i++) {
+    const h = Math.round(18 + next() * 64);
+    html += `<i style="height:${h}%"></i>`;
+  }
+  return html;
 }
 
 function escapeUrl(url: string): string {

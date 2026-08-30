@@ -12,14 +12,16 @@
 import { flowHistory } from '../state/history';
 import { assetStore } from '../asset-store';
 import { historyDrawer } from './history-drawer';
-import { insertImageAsAsset } from './resource-insert';
+import { insertImageAsAsset, insertMediaAsAsset } from './resource-insert';
 import { openImageModal } from '../canvas/card-view';
 import { showToast } from './toast';
 
 /** 空态文案（共享知识 3：人话常量，禁止改字面量） */
-const EMPTY_TEXT = '还没有素材。可在画布或对比面板中添加图片到资产库。';
+const EMPTY_TEXT = '还没有素材。可在画布或对比面板中添加图片/视频/音频到资产库。';
 /** 搜索无结果文案（共享知识 3） */
 const NO_MATCH_TEXT = '无匹配资产';
+
+type MediaFilter = 'all' | 'image' | 'video' | 'audio';
 
 class AssetDrawer {
   private query = '';
@@ -29,6 +31,8 @@ class AssetDrawer {
   private countEl: HTMLElement | null = null;
   private unsubscribeAsset: (() => void) | null = null;
   private tabOpenRequest: ((tab: 'assets') => void) | null = null;
+  /** 4.2-C：媒体类型筛选 */
+  private mediaFilter: MediaFilter = 'all';
   /** 渲染批次序号：分批渲染在途期间若发起新渲染，旧批次据序号作废（防重复插入） */
   private renderSeq = 0;
 
@@ -42,6 +46,27 @@ class AssetDrawer {
       this.query = (this.searchInput?.value || '').trim().toLowerCase();
       this.render();
     });
+
+    // 4.2-C：类型筛选条（动态创建：全部 / 图片 / 视频 / 音频）
+    if (this.grid && !document.getElementById('asset-filter-bar')) {
+      const bar = document.createElement('div');
+      bar.className = 'asset-filter-bar';
+      bar.id = 'asset-filter-bar';
+      (['all', 'image', 'video', 'audio'] as const).forEach(kind => {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'asset-filter-btn' + (kind === 'all' ? ' active' : '');
+        btn.dataset.filter = kind;
+        btn.textContent = kind === 'all' ? '全部' : kind === 'image' ? '图片' : kind === 'video' ? '视频' : '音频';
+        btn.addEventListener('click', () => {
+          this.mediaFilter = kind;
+          bar.querySelectorAll('.asset-filter-btn').forEach(b => b.classList.toggle('active', b === btn));
+          this.render();
+        });
+        bar.appendChild(btn);
+      });
+      this.grid.parentElement?.insertBefore(bar, this.grid);
+    }
 
     // 订阅 AssetStore：添加、移除或标签变更后即时刷新。
     this.unsubscribeAsset = assetStore.subscribe(() => this.render());
@@ -108,27 +133,30 @@ class AssetDrawer {
     }
   }
 
-  /** 按 prompt / model / tags 过滤资产。 */
+  /** 按类型 + prompt / model / tags 过滤资产（4.2-C：支持视频/音频）。 */
   private _filtered(all: AssetAsset[]): AssetAsset[] {
     const q = this.query;
-    if (!q) return all;
-    return all.filter(item => {
+    const byKind = this.mediaFilter === 'all' ? all : all.filter(item => item.kind === this.mediaFilter);
+    if (!q) return byKind;
+    return byKind.filter(item => {
       const entry = this._toEntry(item);
       if ((entry.prompt || '').toLowerCase().includes(q)) return true;
       if ((entry.model || '').toLowerCase().includes(q)) return true;
       if (item.record.tags.some(t => t.toLowerCase().includes(q))) return true;
+      if ((item.record.remoteTaskId || '').toLowerCase().includes(q)) return true;
       return false;
     });
   }
 
-  /** 卡片：缩略图 + 配方信息区 / 动作（移除·查看·复制配方）/ 拖入手势。 */
+  /** 卡片：缩略图/媒体占位 + 配方信息区 / 动作（移除·查看/播放·复制配方）/ 拖入手势。 */
   private _renderCard(item: AssetAsset): void {
     if (!this.grid) return;
     const div = document.createElement('div');
     div.className = 'history-thumb asset-thumb';
     // 图片性能优化：卡片主视觉 = 缩略图（thumbnailUrl 优先，旧记录回退 url 原 base64）
     const thumbUrl = item.thumbnailUrl || item.url;
-    const hasUrl = !!thumbUrl;
+    const kind = item.kind || 'image';
+    const hasUrl = kind === 'image' ? !!thumbUrl : !!(item.mediaUrl || item.mediaPath);
     if (hasUrl) {
       div.draggable = true;
     } else {
@@ -140,23 +168,46 @@ class AssetDrawer {
     const recipeMeta = this._recipeMeta(item);
     const recipeHtml = this._recipeHtml(recipeMeta);
     const hasRecipe = !!recipeMeta && typeof recipeMeta.prompt === 'string' && recipeMeta.prompt.trim() !== '';
+    const mediaMeta = kind === 'image'
+      ? ''
+      : this._mediaMetaHtml(item);
+    const mediaBody = kind === 'image'
+      ? `<div class="asset-card-img${hasUrl ? '' : ' no-img'}"${hasUrl ? ` style="background-image:url('${thumbUrl.replace(/'/g, "\\'")}')"` : ''}>
+          ${hasUrl ? '' : '<div class="asset-placeholder">图源缺失</div>'}
+        </div>`
+      : `<div class="asset-card-img asset-card-media${hasUrl ? '' : ' no-img'}">
+          ${kind === 'video' ? '<video class="asset-media-video" muted preload="metadata" playsinline></video><span class="asset-media-badge">视频</span>' : '<div class="asset-media-wave"></div><span class="asset-media-badge">音频</span>'}
+        </div>`;
     div.innerHTML = `
-      <div class="asset-card-img${hasUrl ? '' : ' no-img'}"${hasUrl ? ` style="background-image:url('${thumbUrl.replace(/'/g, "\\'")}')"` : ''}>
-        ${hasUrl ? '' : '<div class="asset-placeholder">图源缺失</div>'}
-      </div>
+      ${mediaBody}
+      ${mediaMeta}
       ${recipeHtml}
       <div class="ht-actions asset-actions">
         <button class="ht-act" data-act="place">放到画布</button>
         <button class="ht-act" data-act="remove">移除</button>
-        <button class="ht-act" data-act="view">查看</button>
+        <button class="ht-act" data-act="view">${kind === 'image' ? '查看' : '播放'}</button>
         <button class="ht-act" data-act="copy"${hasRecipe ? '' : ' disabled title="配方缺失"'}>复制配方</button>
       </div>`;
+
+    // 媒体卡：设置 video src（预加载元数据用于时长展示）
+    if (kind === 'video' && hasUrl) {
+      const vEl = div.querySelector('.asset-media-video') as HTMLVideoElement | null;
+      if (vEl) vEl.src = item.mediaUrl || fileUrlFromPath(item.mediaPath || '');
+    }
 
     // 拖入手势（复用 history-image 拖拽语义；拖入画布传递缩略图 data URL，构图参考足够；无 URL 的占位卡不可拖）
     if (hasUrl) {
       div.addEventListener('dragstart', (e: DragEvent) => {
-        e.dataTransfer!.setData('application/history-image', thumbUrl);
-        e.dataTransfer!.setData('text/plain', thumbUrl);
+        if (kind === 'image') {
+          e.dataTransfer!.setData('application/history-image', thumbUrl);
+          e.dataTransfer!.setData('text/plain', thumbUrl);
+        } else {
+          e.dataTransfer!.setData('application/history-media', JSON.stringify({
+            kind, mediaUrl: item.mediaUrl || '', mediaPath: item.mediaPath || '', duration: item.record.duration,
+            mimeType: item.record.mimeType,
+          }));
+          e.dataTransfer!.setData('text/plain', item.mediaUrl || '');
+        }
         div.style.opacity = '0.6';
       });
       div.addEventListener('dragend', () => { div.style.opacity = ''; });
@@ -170,10 +221,15 @@ class AssetDrawer {
       e.stopPropagation();
       const act = btn.dataset.act || '';
       if (act === 'place') {
-        // 放到画布：以当前视口中心创建素材节点（统一 resource-insert；不触发生成）
+        // 放到画布：以当前视口中心创建素材/媒体节点（统一 resource-insert；不触发生成）
         if (hasUrl) {
           flowHistory.record();
-          const node = insertImageAsAsset(thumbUrl, item.originalPath ? { path: item.originalPath } : null);
+          const node = kind === 'image'
+            ? insertImageAsAsset(thumbUrl, item.originalPath ? { path: item.originalPath } : null)
+            : insertMediaAsAsset(kind, item.mediaUrl || '', item.mediaPath || undefined, {
+                duration: item.record.duration, mimeType: item.record.mimeType,
+                remoteTaskId: item.record.remoteTaskId,
+              });
           if (node) showToast('已放到画布');
         }
       } else if (act === 'remove') {
@@ -181,8 +237,11 @@ class AssetDrawer {
         assetStore.remove(item.record.key);
         showToast('已从资产库移除');
       } else if (act === 'view') {
-        // 查看大图：缩略图先显示 + 按需加载原图（有 originalPath 时桥接取原图，失败回退缩略图）
-        if (hasUrl) this._viewImage(thumbUrl, item);
+        // 查看/播放：图片走大图弹窗；视频/音频走对应查看器（无对应节点 → 历史兜底播放）
+        if (hasUrl) {
+          if (kind === 'image') this._viewImage(thumbUrl, item);
+          else this._playMedia(item);
+        }
       } else if (act === 'copy') {
         // R2：复制配方（prompt 全文；无配方按钮已置灰）
         const meta = this._recipeMeta(item);
@@ -191,6 +250,35 @@ class AssetDrawer {
     });
 
     this.grid.appendChild(div);
+  }
+
+  /** 媒体卡元信息行：时长 / 类型 / 远端任务。 */
+  private _mediaMetaHtml(item: AssetAsset): string {
+    const rec = item.record;
+    const duration = typeof rec.duration === 'number' ? `${Math.round(rec.duration)} 秒` : '';
+    const mime = typeof rec.mimeType === 'string' && rec.mimeType ? rec.mimeType : '';
+    const remote = typeof rec.remoteTaskId === 'string' && rec.remoteTaskId ? `远端 ${rec.remoteTaskId.slice(0, 10)}…` : '';
+    const parts = [duration, mime, remote].filter(Boolean);
+    return parts.length ? `<div class="asset-media-meta">${escapeHtml(parts.join(' · '))}</div>` : '';
+  }
+
+  /** 播放媒体：无对应节点时用资产记录字段直接播放。 */
+  private _playMedia(item: AssetAsset): void {
+    const url = item.mediaUrl || fileUrlFromPath(item.mediaPath || '');
+    if (!url) { showToast('媒体文件不可用', false); return; }
+    const isVideo = item.kind === 'video';
+    const modal = document.createElement('div');
+    modal.className = 'video-viewer-overlay';
+    modal.innerHTML = `<section class="video-viewer-panel" role="dialog" aria-modal="true">
+      <header><strong>${isVideo ? '视频' : '音频'}查看器</strong><button data-act="close" title="关闭">×</button></header>
+      ${isVideo ? `<video class="video-viewer-media" src="${escapeAttr(url)}" controls playsinline></video>` : `<audio class="video-viewer-media" src="${escapeAttr(url)}" controls playsinline></audio>`}
+      <div class="video-viewer-meta">${escapeHtml(item.record.prompt || item.record.model || '')}</div>
+    </section>`;
+    modal.addEventListener('click', e => {
+      const t = e.target as HTMLElement;
+      if (t === modal || t.dataset.act === 'close') modal.remove();
+    });
+    document.body.appendChild(modal);
   }
 
   /** 查看大图（复用 #img-modal；origin.path = 原图本地路径，按需加载；携带信息栏配方） */
@@ -308,6 +396,12 @@ class AssetDrawer {
       fail();
     }
   }
+}
+
+/** 本地绝对路径 → file:// URL（与 video-viewer 同构） */
+function fileUrlFromPath(filePath: string): string {
+  const normalized = String(filePath || '').replace(/\\/g, '/').replace(/^\/+/, '');
+  return normalized ? encodeURI(`file:///${normalized}`) : '';
 }
 
 /** HTML 转义（prompt/模型名展示用，防注入） */

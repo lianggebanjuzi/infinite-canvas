@@ -13,10 +13,15 @@ import { linkView, connectionDescription } from './link-view';
 import { runEngine } from '../engine/run-engine';
 import { showToast } from '../ui/toast';
 import { floatingPanels } from '../ui/floating-panels';
-import { Backend, fetchImageModels, fetchChatModels, fetchVideoModels } from '../api';
-import { createContinueStep, createOutpaintStep, createVideoStep, canContinueFrom } from '../ui/action-bar';
-import { insertImageAsAsset, attachImageToNode } from '../ui/resource-insert';
+import { Backend, fetchImageModels, fetchChatModels, fetchVideoModels, fetchAudioModels } from '../api';
+import { createContinueStep, createOutpaintStep, createVideoStep, createAudioStep, canContinueFrom } from '../ui/action-bar';
+import { insertImageAsAsset, insertMediaAsAsset, attachImageToNode } from '../ui/resource-insert';
 import { imageEditor } from '../ui/image-editor/image-editor';
+import { maskEditor } from '../ui/image-editor/mask-editor';
+import { annotationEditor } from '../ui/image-editor/annotation-editor';
+import { angleEditor } from '../ui/image-editor/angle-editor';
+import { exportBundle } from '../ui/export-bundle';
+import { getImageEditCapabilities } from '../nodes/model-config';
 
 const DRAG_THRESHOLD = 3;
 
@@ -86,8 +91,6 @@ class Interactions {
       // 中键：画布平移（preventDefault 避免浏览器 autoscroll 图标；不改动选中态）
       if (e.button === 1) {
         e.preventDefault();
-        // 悬浮框的定位依赖画布坐标；平移时先收起，松手后再按最终位置恢复，避免它们在结束瞬间跳位。
-        floatingPanels.suspendForPan();
         this.drag = {
           mode: 'pan',
           startX: e.clientX,
@@ -142,9 +145,11 @@ class Interactions {
       if (!cardEl) return;
       const node = flowState.getNode(cardEl.dataset.nodeId || '');
       if (!node) return;
-      // 有图 → 与右上「查看大图」走同一图片信息弹窗；空图片卡（无输出图且无参考图，非文本卡）双击 → 弹文件选择器加载参考图
+      // 有图 → 与右上「查看大图」走同一图片信息弹窗；只有没有自身或上游图片来源的普通图片卡才允许双击导入。
       if (node.imageUrl) { openNodeImageModal(node.id, node.activeGeneratedIndex || 0); return; }
-      if (node.type !== 'text-gen' && (!node.refImages || node.refImages.length === 0)) {
+      const hasReference = flowState.getReferenceImages(node.id).length > 0;
+      const isOutpaint = node.type === 'image-gen' && (node.params as unknown as StyleTransferParams).mode === 'outpaint';
+      if (node.type !== 'text-gen' && !hasReference && !isOutpaint) {
         this.openFilePickerForRef(node.id);
       }
     });
@@ -341,7 +346,6 @@ class Interactions {
 
     if (d.mode === 'pan') {
       canvasView.endPan();
-      floatingPanels.resumeAfterPan();
     }
 
     if (d.mode === 'connect') {
@@ -478,6 +482,7 @@ class Interactions {
       }
       if (d.type === 'text-split') return !!fromNode && fromNode.type === 'text-gen';
       if (d.type === 'video-gen') return !!fromNode && (fromNode.type === 'image-gen' || fromNode.type === 'text-gen');
+      if (d.type === 'audio-gen') return !!fromNode && (fromNode.type === 'image-gen' || fromNode.type === 'text-gen');
       // image-gen 候选：from 是文本（关键词）或图片（参考图）均可
       return !!fromNode && (fromNode.type === 'image-gen' || fromNode.type === 'text-gen' || fromNode.type === 'text-split');
     });
@@ -523,8 +528,8 @@ class Interactions {
     const node = flowState.getNode(nodeId);
     if (!node) return;
     if (node.type === 'text-split') return;
-    const kind = node.type === 'text-gen' ? 'chat' : (node.type === 'video-gen' ? 'video' : 'drawing');
-    const loader = kind === 'chat' ? fetchChatModels : (kind === 'video' ? fetchVideoModels : fetchImageModels);
+    const kind = node.type === 'text-gen' ? 'chat' : (node.type === 'video-gen' ? 'video' : (node.type === 'audio-gen' ? 'audio' : 'drawing'));
+    const loader = kind === 'chat' ? fetchChatModels : (kind === 'video' ? fetchVideoModels : (kind === 'audio' ? fetchAudioModels : fetchImageModels));
     void loader().then(models => {
       const cur = flowState.getNode(nodeId);
       if (!cur || (cur.params.model as string | undefined)) return;
@@ -603,7 +608,7 @@ class Interactions {
 
     wrap.addEventListener('dragover', (e: DragEvent) => {
       const types = e.dataTransfer?.types || [];
-      if (types.includes('application/history-image') || types.includes('Files') || types.includes('text/plain')) {
+      if (types.includes('application/history-image') || types.includes('application/history-media') || types.includes('Files') || types.includes('text/plain')) {
         e.preventDefault();
         e.dataTransfer!.dropEffect = 'copy';
       }
@@ -612,20 +617,34 @@ class Interactions {
     wrap.addEventListener('drop', (e: DragEvent) => {
       const types = e.dataTransfer?.types || [];
       const hasHistory = types.includes('application/history-image');
+      const hasMedia = types.includes('application/history-media');
       const hasFiles = types.includes('Files');
-      if (!hasHistory && !hasFiles) return;
+      if (!hasHistory && !hasMedia && !hasFiles) return;
       e.preventDefault();
 
       const world = canvasView.toWorldCoords(e.clientX, e.clientY);
       const historySrc = e.dataTransfer?.getData('application/history-image') || e.dataTransfer?.getData('text/plain') || '';
+      const mediaJson = e.dataTransfer?.getData('application/history-media') || '';
       const files = Array.from(e.dataTransfer?.files || []);
 
       if (historySrc) {
         void this._dropImage(historySrc, world, e.clientX, e.clientY);
         return;
       }
+      if (mediaJson) {
+        try {
+          const media = JSON.parse(mediaJson) as { kind?: string; mediaUrl?: string; mediaPath?: string; duration?: number; mimeType?: string };
+          const kind = media.kind === 'video' ? 'video' : media.kind === 'audio' ? 'audio' : null;
+          if (kind) {
+            this._dropMedia(media, world, e.clientX, e.clientY);
+            return;
+          }
+        } catch { /* 非 JSON 媒体拖拽忽略 */ }
+      }
       if (files.length > 0) {
         const imageFiles = files.filter(f => f.type.startsWith('image/'));
+        const audioFiles = files.filter(f => f.type.startsWith('audio/'));
+        const videoFiles = files.filter(f => f.type.startsWith('video/'));
         if (imageFiles.length > 0) {
           // 在异步读取文件前命中一次目标卡，避免首张素材创建后，后续图片
           // 被误判为投到了刚创建的素材卡上。
@@ -639,8 +658,63 @@ class Interactions {
           // 严格对应模型请求里的第 N 张参考图（图 1 / 图 2 / 图 3）。
           void this._dropFilesInOrder(imageFiles, world, e.clientX, e.clientY, targetNode);
         }
+        // 4.2-B：本地音频/视频文件拖入 → 创建媒体素材节点（只存路径+元数据，不塞 base64）
+        if (audioFiles.length > 0 || videoFiles.length > 0) {
+          const allMedia = [...audioFiles.map(f => ({ file: f, kind: 'audio' as const })), ...videoFiles.map(f => ({ file: f, kind: 'video' as const }))];
+          allMedia.forEach((entry, index) => {
+            void this._importLocalMedia(entry.file, entry.kind, world, index, e.clientX, e.clientY);
+          });
+        }
       }
     });
+  }
+
+  /** 4.2-B：本地媒体文件导入（拖入）：落盘原文件 → 创建素材节点（isAsset）；拖到视频节点上的音频自动建立音轨连线。 */
+  private async _importLocalMedia(file: File, kind: 'audio' | 'video', world: { x: number; y: number }, index: number, screenX: number, screenY: number): Promise<void> {
+    try {
+      const sourcePath = (file as File & { path?: string }).path || '';
+      // 优先直接复制本地文件（不经 base64 桥接，50MB 音频不膨胀桥接）；无 File.path 时兜底 dataUrl
+      const res = sourcePath
+        ? await Backend.prepareImportedMedia({ kind, sourcePath, filename: file.name })
+        : await Backend.prepareImportedMedia({ kind, dataUrl: (await this._readFileAsDataUrl(file)) || '', filename: file.name });
+      if (res.status !== 'success' || !res.path) {
+        showToast(res.message || `${kind === 'audio' ? '音频' : '视频'}导入失败`, false);
+        return;
+      }
+      const offset = index * (CARD_W + 48);
+      const node = insertMediaAsAsset(kind, res.url || '', res.path, {
+        duration: res.duration, mimeType: res.mime_type,
+      }, { x: world.x + offset, y: world.y });
+      if (!node) return;
+      // 拖到视频节点上的音频 → 自动建立 audio-ref 连线（音轨/配音参考；以原始投放点判定目标卡）
+      const targetNode = this._nodeAt(screenX, screenY);
+      if (kind === 'audio' && targetNode && targetNode.type === 'video-gen' && flowState.canConnect(node.id, targetNode.id) === null) {
+        flowState.addEdge(node.id, targetNode.id);
+        showToast('已创建音频素材节点并连接为音轨');
+      } else {
+        showToast(`已创建${kind === 'audio' ? '音频' : '视频'}素材节点`);
+      }
+    } catch (e) {
+      showToast(`${kind === 'audio' ? '音频' : '视频'}导入失败：${(e as Error).message}`, false);
+    }
+  }
+
+  /** 4.2-C：资产抽屉拖入的媒体（历史/资产记录）→ 媒体素材节点。 */
+  private _dropMedia(media: { kind?: string; mediaUrl?: string; mediaPath?: string; duration?: number; mimeType?: string }, world: { x: number; y: number }, screenX: number, screenY: number): void {
+    const kind = media.kind === 'video' ? 'video' : 'audio';
+    const node = insertMediaAsAsset(kind, media.mediaUrl || '', media.mediaPath || undefined, {
+      duration: media.duration, mimeType: media.mimeType,
+    }, { x: world.x, y: world.y });
+    if (node) {
+      // 拖到视频节点上的音频 → 自动建立 audio-ref 连线
+      const targetNode = this._nodeAt(screenX, screenY);
+      if (kind === 'audio' && targetNode && targetNode.type === 'video-gen' && flowState.canConnect(node.id, targetNode.id) === null) {
+        flowState.addEdge(node.id, targetNode.id);
+        showToast('已创建音频素材节点并连接为音轨');
+      } else {
+        showToast('已放到画布');
+      }
+    }
   }
 
   /** 多文件按 FileList 原始顺序串行读取、落盘并挂载；绝不以异步完成顺序决定参考图顺序。 */
@@ -924,6 +998,13 @@ class Interactions {
     const isAsset = flowState.isAssetNode(node); // 素材节点不显示「运行当前卡」「重新运行」（判分支 #6）
     // 继续创作守卫与操作条 / createContinueStep 共用同一函数（见 action-bar.ts）。
     const canContinue = canContinueFrom(node);
+    const isImageWithSource = node.type === 'image-gen' && (node.imageUrl || flowState.getReferenceImages(node.id).length > 0);
+    // 4.1-B 能力门控：入口只在模型明确支持时展示（4.0 §3.4）。
+    const model = String((node.params as unknown as StyleTransferParams).model || flowState.getModelDefault('drawing') || '');
+    const editCaps = getImageEditCapabilities(model);
+    const canMask = isImageWithSource && !this.isOutpaintNode(node) && editCaps.mask;
+    const canAnnotate = isImageWithSource && !this.isOutpaintNode(node) && editCaps.imageReference;
+    const canAngle = isImageWithSource && !this.isOutpaintNode(node) && editCaps.imageReference;
     const menu = this._menuEl();
     menu.innerHTML = `
       ${canContinue ? `
@@ -946,6 +1027,12 @@ class Interactions {
         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 3 14h7l-1 8 10-12h-7l1-8Z"/></svg>
         重新运行
       </div>` : ''}
+      ${canMask ? `
+      <div class="ctx-item" data-act="mask-edit">蒙版局部修改</div>` : ''}
+      ${canAnnotate ? `
+      <div class="ctx-item" data-act="annotation-edit">批注修改（圈选 / 箭头）</div>` : ''}
+      ${canAngle ? `
+      <div class="ctx-item" data-act="angle">多角度</div>` : ''}
       ${node.type === 'image-gen' && ((node.params as unknown as StyleTransferParams).mode !== 'outpaint') && (node.imageUrl || flowState.getReferenceImages(node.id).length > 0) ? `
       <div class="ctx-item" data-act="crop">裁剪图片</div>
       <div class="ctx-item" data-act="split">切图</div>
@@ -957,8 +1044,16 @@ class Interactions {
       <div class="ctx-item" data-act="video">
         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="13" height="16" rx="2"/><path d="m16 10 5-3v10l-5-3z"/></svg>
         生成视频
+      </div>
+      <div class="ctx-item" data-act="audio">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>
+        生成音频
       </div>` : ''}
       <div class="ctx-sep"></div>
+      <div class="ctx-item" data-act="export-bundle">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg>
+        导出选中节点包
+      </div>
       <div class="ctx-item danger" data-act="delete">
         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></svg>
         删除节点
@@ -966,6 +1061,11 @@ class Interactions {
     menu.dataset.nodeId = node.id;
     menu.dataset.edgeId = '';
     this._showMenu(menu, x, y);
+  }
+
+  /** 扩图步骤节点不提供蒙版/多角度（其源图在预览中合成，画布节点无直接输出图语义）。 */
+  private isOutpaintNode(node: FlowNode): boolean {
+    return node.type === 'image-gen' && (node.params as unknown as StyleTransferParams).mode === 'outpaint';
   }
 
   private _showCanvasMenu(x: number, y: number): void {
@@ -1056,6 +1156,25 @@ class Interactions {
         if (node) void imageEditor.openSplit(node.id);
         break;
       }
+      case 'mask-edit': {
+        const node = flowState.getNode(nodeId);
+        if (node) void maskEditor.open(node.id);
+        break;
+      }
+      case 'annotation-edit': {
+        const node = flowState.getNode(nodeId);
+        if (node) void annotationEditor.open(node.id);
+        break;
+      }
+      case 'angle': {
+        const node = flowState.getNode(nodeId);
+        if (node) void angleEditor.open(node.id);
+        break;
+      }
+      case 'export-bundle': {
+        exportBundle.openSelection([nodeId]);
+        break;
+      }
       case 'continue': {
         const node = flowState.getNode(nodeId);
         if (node) void createContinueStep(node);
@@ -1064,6 +1183,11 @@ class Interactions {
       case 'video': {
         const node = flowState.getNode(nodeId);
         if (node) void createVideoStep(node);
+        break;
+      }
+      case 'audio': {
+        const node = flowState.getNode(nodeId);
+        if (node) void createAudioStep(node);
         break;
       }
       case 'delete': {

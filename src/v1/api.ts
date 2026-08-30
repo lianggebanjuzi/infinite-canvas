@@ -4,8 +4,9 @@
 
 import { API } from '../utils/api';
 import { DEFAULT_CHAT_MODEL_KEY } from './nodes/text-gen';
+import { isModelRuntimeSupported, type ModelCapabilitySpec } from './nodes/model-config';
 
-function isModelReady(provider: BackendProvider, key: BackendProviderKey, model: BackendModel, kind: 'chat' | 'drawing' | 'video'): boolean {
+function isModelReady(provider: BackendProvider, key: BackendProviderKey, model: BackendModel, kind: 'chat' | 'drawing' | 'video' | 'audio'): boolean {
   const url = kind === 'chat' ? (provider.text_api_url || provider.api_url) : provider.api_url;
   // 密钥按能力类型取值：模型专用 → 同类型全局 → 旧配置迁移来的同类型账户通道。
   // 禁止直接回退 key.api_key，避免图像模型误用对话账户的通用 Key。
@@ -27,7 +28,7 @@ export async function fetchImageModels(): Promise<Array<{ id: string; name: stri
       (p.keys || []).forEach(k => {
         if (k.enabled === false) return;
         (k.models || [])
-          .filter(m => m.enabled !== false && m.type === 'drawing' && isModelReady(p, k, m, 'drawing'))
+          .filter(m => m.enabled !== false && m.type === 'drawing' && isModelReady(p, k, m, 'drawing') && isModelRuntimeSupported(m.id, 'drawing'))
           .forEach(m => {
             // 相同模型只留一个可选项；完整路由 id 保留在 value，供后端优先命中并失败切换。
             if (seen.has(m.id)) return;
@@ -55,7 +56,7 @@ export async function fetchChatModels(): Promise<Array<{ id: string; name: strin
       (p.keys || []).forEach(k => {
         if (k.enabled === false) return;
         (k.models || [])
-          .filter(m => m.enabled !== false && m.type === 'chat' && isModelReady(p, k, m, 'chat'))
+          .filter(m => m.enabled !== false && m.type === 'chat' && isModelReady(p, k, m, 'chat') && isModelRuntimeSupported(m.id, 'chat'))
           .forEach(m => {
             if (seen.has(m.id)) return;
             seen.add(m.id);
@@ -88,7 +89,7 @@ export async function fetchVideoModels(): Promise<Array<{ id: string; name: stri
       if (!provider.enabled) return;
       (provider.keys || []).forEach(key => {
         if (key.enabled === false) return;
-        (key.models || []).filter(model => model.enabled !== false && model.type === 'video' && isModelReady(provider, key, model, 'video'))
+        (key.models || []).filter(model => model.enabled !== false && model.type === 'video' && isModelReady(provider, key, model, 'video') && isModelRuntimeSupported(model.id, 'video'))
           .forEach(model => {
             const id = `${provider.id}:${key.id}:${model.id}`;
             if (seen.has(id)) return;
@@ -98,6 +99,31 @@ export async function fetchVideoModels(): Promise<Array<{ id: string; name: stri
       });
     });
     return models.length ? models : [{ id: '', name: '未找到视频模型，请先在设置中配置' }];
+  } catch {
+    return [{ id: '', name: '加载失败' }];
+  }
+}
+
+/** 拉取可用音频模型；只返回已启用且音频连接完整的三段路由 ID（4.2-B）。 */
+export async function fetchAudioModels(): Promise<Array<{ id: string; name: string }>> {
+  try {
+    const result = (await API.loadProviders()) as BackendProviderList;
+    const models: Array<{ id: string; name: string }> = [];
+    const seen = new Set<string>();
+    (result?.providers || []).forEach(provider => {
+      if (!provider.enabled) return;
+      (provider.keys || []).forEach(key => {
+        if (key.enabled === false) return;
+        (key.models || []).filter(model => model.enabled !== false && model.type === 'audio' && isModelReady(provider, key, model, 'audio') && isModelRuntimeSupported(model.id, 'audio'))
+          .forEach(model => {
+            const id = `${provider.id}:${key.id}:${model.id}`;
+            if (seen.has(id)) return;
+            seen.add(id);
+            models.push({ id, name: model.name || model.id });
+          });
+      });
+    });
+    return models.length ? models : [{ id: '', name: '未找到音频模型，请先在设置中配置' }];
   } catch {
     return [{ id: '', name: '加载失败' }];
   }
@@ -113,24 +139,10 @@ export function isGeminiImageModel(modelId: string): boolean {
   return isGeminiFamily(bare);
 }
 
-/** 拉取可用的扩图模型（gemini/nano-banana/seedream 系 drawing 模型；不暴露选择 UI，自动解析用） */
+/** 拉取可用的扩图模型（gemini/nano-banana/seedream 系 drawing 模型）。 */
 export async function fetchOutpaintModels(): Promise<Array<{ id: string; name: string }>> {
   const models = await fetchImageModels();
   return models.filter(m => isGeminiImageModel(m.id) || isGeminiFamily(m.name));
-}
-
-/**
- * 解析扩图模型（不暴露选择 UI，弹层打开时调用）：
- * ① 节点当前 params.model（若属 gemini/nano-banana/seedream 系）→ ② fetchOutpaintModels() 第一个
- * → ③ 返回 ''（调用方 toast「请先在设置中配置 Nano Banana 系列模型」并禁用确认按钮）。
- */
-export async function resolveOutpaintModel(node: FlowNode | null | undefined): Promise<string> {
-  if (node) {
-    const cur = (node.params?.model as string | undefined) || '';
-    if (cur && isGeminiImageModel(cur)) return cur;
-  }
-  const models = await fetchOutpaintModels();
-  return models.length > 0 && models[0].id ? models[0].id : '';
 }
 
 /**
@@ -257,10 +269,30 @@ export const Backend = {
     return (await API.unifiedGetVideoTaskResult(taskId)) as BackendVideoTaskResult;
   },
 
+  async generateAudio(prompt: string, options: Record<string, unknown>): Promise<BackendAudioTaskCreate> {
+    try {
+      const res = await API.unifiedGenerateAudio(prompt, options);
+      if (!res || !(res as BackendAudioTaskCreate).task_id) throw new Error('音频任务创建失败，未返回 task_id');
+      return res as BackendAudioTaskCreate;
+    } catch (e) {
+      const err = e as { message?: string; error?: string };
+      throw new Error(err.message || err.error || '音频任务创建失败');
+    }
+  },
+
+  async getAudioTaskResult(taskId: string): Promise<BackendAudioTaskResult> {
+    return (await API.unifiedGetAudioTaskResult(taskId)) as BackendAudioTaskResult;
+  },
+
   // ── 本地图片（图片性能优化：查看大图按需取原图） ──
   /** 按本地绝对路径读取原图 → base64 data_url（pywebview 桥接；一次性，用完即弃不常驻） */
   async loadLocalImage(filePath: string): Promise<{ status: string; data_url?: string; message?: string }> {
     return (await API.loadLocalImage(filePath)) as { status: string; data_url?: string; message?: string };
+  },
+
+  /** 4.1-B：删除应用自己管理的临时文件（mask-*.png 延迟清理；后端有路径白名单校验） */
+  async deleteTempFile(filePath: string): Promise<{ status: string; message?: string }> {
+    return await API.deleteTempFile(filePath);
   },
 
   /** 手动导入图片：原图落地、前端只保留缩略图；未设置保存目录时使用会话临时目录。 */
@@ -268,6 +300,13 @@ export const Backend = {
     status: string; path?: string; url?: string; thumbnail_data_url?: string; saved_to_disk?: boolean; message?: string;
   }> {
     return await API.prepareImportedImage(imageData, filename);
+  },
+
+  /** 4.2-B：手动导入本地媒体（视频/音频）：大文件仅落盘路径 + 轻量元数据。 */
+  async prepareImportedMedia(options: { kind: 'audio' | 'video'; sourcePath?: string; dataUrl?: string; filename?: string }): Promise<{
+    status: string; path?: string; url?: string; duration?: number; mime_type?: string; size_bytes?: number; saved_to_disk?: boolean; message?: string;
+  }> {
+    return await API.prepareImportedMedia(options);
   },
 
   // ── 对话链路（text-gen 专用：同步阻塞，无 task 轮询） ──
@@ -335,8 +374,8 @@ export const Backend = {
     return (await API.loadHistory()) as BackendHistoryResult;
   },
 
-  // ── 资产库索引（添加素材/tags/category） ──
-  async saveAssets(records: ImageAssetRecord[]): Promise<BackendAssetsResult> {
+  // ── 资产库索引（添加素材/tags/category；4.2-C 起支持视频/音频记录） ──
+  async saveAssets(records: MediaAssetRecord[]): Promise<BackendAssetsResult> {
     return (await API.saveAssets(records)) as BackendAssetsResult;
   },
 
@@ -352,6 +391,14 @@ export const Backend = {
   },
   async importBackup(options: Record<string, unknown> = {}): Promise<{ status: string; projects?: string[]; message?: string }> {
     return await API.importBackup(options);
+  },
+
+  // ── 4.1-C 画布资源包（.icbundle） ──
+  async exportBundle(options: Record<string, unknown> = {}): Promise<{ status: string; path?: string; manifest?: unknown; message?: string }> {
+    return await API.exportBundle(options);
+  },
+  async importBundle(options: Record<string, unknown> = {}): Promise<{ status: string; strategy?: string; projectPath?: string; data?: unknown; assets?: string[]; message?: string }> {
+    return await API.importBundle(options);
   },
 
   // ── 供应商/设置 ──
@@ -453,4 +500,29 @@ export const Backend = {
   },
   async removeRecentProject(path: string): Promise<{ status: string; message?: string }> { return await API.removeRecentProject(path); },
   async renameRecentProject(path: string, name: string): Promise<{ status: string; message?: string }> { return await API.renameRecentProject(path, name); },
+  async checkRecentProjectPath(path: string): Promise<{ status: string; exists?: boolean; message?: string }> {
+    return await API.checkRecentProjectPath(path);
+  },
+
+  // ── 4.4 导演台（director_* 前缀；薄壳由 ui/director-bridge.ts 使用） ──
+  async directorOpen(options: Record<string, unknown>): Promise<{ status: string; message?: string }> {
+    return (await API.directorOpen(options)) as { status: string; message?: string };
+  },
+
+  // ── 4.3-D 模型能力 schema（capability_* 前缀；model-config.ts 为唯一消费方） ──
+  async loadCapabilitySchemas(): Promise<{ status: string; schemas?: ModelCapabilitySpec[]; message?: string }> {
+    return (await API.loadCapabilitySchemas()) as { status: string; schemas?: ModelCapabilitySpec[]; message?: string };
+  },
+
+  async saveCapabilitySchema(schema: ModelCapabilitySpec): Promise<{ status: string; message?: string }> {
+    return (await API.saveCapabilitySchema(schema as unknown as Record<string, unknown>)) as { status: string; message?: string };
+  },
+
+  async deleteCapabilitySchema(modelId: string): Promise<{ status: string; message?: string }> {
+    return (await API.deleteCapabilitySchema(modelId)) as { status: string; message?: string };
+  },
+
+  async testCustomAdapter(modelId: string, options: Record<string, unknown> = {}): Promise<Record<string, unknown>> {
+    return (await API.testCustomAdapter(modelId, options)) as Record<string, unknown>;
+  },
 };

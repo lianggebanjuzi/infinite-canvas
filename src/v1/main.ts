@@ -9,6 +9,7 @@ import '../bridge';
 
 import './styles/variables.css';
 import './styles/app.css';
+import './styles/ui-v3.css';
 
 // 注册节点定义（副作用：向 nodeRegistry 注册；统一「生成节点」唯一注册）
 import './nodes/image-gen';
@@ -16,6 +17,7 @@ import './nodes/image-gen';
 import './nodes/text-gen';
 import './nodes/text-split';
 import './nodes/video-gen';
+import './nodes/audio-gen';
 
 import { flowState } from './state/flow-state';
 import { selection } from './state/selection';
@@ -38,9 +40,16 @@ import { outpaintPanel } from './ui/outpaint-panel';
 import { taskPanel } from './ui/task-panel';
 import { resultViewer } from './ui/result-viewer';
 import { videoViewer } from './ui/video-viewer';
+import { audioViewer } from './ui/audio-viewer';
 import { workflowLibrary } from './ui/workflow-library';
 import { projectHome } from './ui/project-home';
+import { initDirectorBridge } from './ui/director-bridge';
 import { imageEditor } from './ui/image-editor/image-editor';
+import { maskEditor } from './ui/image-editor/mask-editor';
+import { annotationEditor } from './ui/image-editor/annotation-editor';
+import { angleEditor } from './ui/image-editor/angle-editor';
+import { exportBundle } from './ui/export-bundle';
+import { importBundle } from './ui/import-bundle';
 import { saveCoordinator } from './save-coordinator';
 import { closeGuard } from './close-guard';
 import { flowHistory } from './state/history';
@@ -48,6 +57,7 @@ import { runEngine } from './engine/run-engine';
 import { batchStore } from './state/batch-store';
 import { assetStore } from './asset-store';
 import { fetchImageModels, fetchChatModels } from './api';
+import { loadCapabilitySchemas } from './nodes/model-config';
 
 // ───────────────────────── pywebview 就绪等待 ─────────────────────────
 function waitForPywebview(): Promise<void> {
@@ -144,6 +154,11 @@ function bindKeyboard(): void {
       comparePanel.close();
       resultViewer.close(); // C-2：结果查看器抽屉
       imageEditor.close();
+      maskEditor.close();
+      annotationEditor.close();
+      angleEditor.close();
+      exportBundle.close();
+      importBundle.close();
       workflowLibrary.close();
       leftCapsule.close(); // 统一资源抽屉（关闭保留页签状态）
       document.getElementById('ctx-menu')?.classList.remove('show');
@@ -360,6 +375,11 @@ async function init(): Promise<void> {
   cmdPanel.init();
   actionBar.init();
   imageEditor.init();
+  maskEditor.init();
+  annotationEditor.init();
+  angleEditor.init();
+  exportBundle.init();
+  importBundle.init();
   bottomBar.init();
   // emptyState.init(); // 挂起：空态引导卡停用（恢复时取消注释）
   settingsPanel.init();
@@ -369,6 +389,7 @@ async function init(): Promise<void> {
   taskPanel.init();
   resultViewer.init();
   videoViewer.init();
+  audioViewer.init();
   window.addEventListener('icv:local-image-history', (event: Event) => {
     const d = (event as CustomEvent<{ src?: string; nodeId?: string; trace?: GenerationTrace; origin?: ImageOrigin | null; width?: number; height?: number }>).detail;
     if (!d?.src || !d.nodeId || !d.trace) return;
@@ -382,6 +403,8 @@ async function init(): Promise<void> {
   });
   workflowLibrary.init();
   projectHome.init();
+  // 4.4 导演台薄壳：注入「导演台」入口 + 注册回传通道（不阻塞主画布）
+  initDirectorBridge();
 
   // 资产库索引（单一数据源）
   assetStore.init();
@@ -417,6 +440,9 @@ async function init(): Promise<void> {
     const maximized = readMaximized(r);
     if (maximized !== null) setWinMaxIcon(maximized);
   } catch { /* 后端不可用时静默（纯浏览器调试场景） */ }
+  // 4.3-D：启动即载入用户能力 schema（capability_schemas.json），
+  // 使视频/音频/图片编辑能力门控在首个节点渲染前就包含用户覆盖层。
+  await loadCapabilitySchemas();
   await cmdPanel.refreshModels();
   void fillDefaultModels();
   // 启动先给出明确的项目起点；画布已完成初始化，选择继续当前画布时无需重载。

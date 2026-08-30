@@ -25,6 +25,9 @@ const def: NodeDefinition = {
       aspectRatio: caps.aspectRatios.includes(p.aspectRatio) ? p.aspectRatio : caps.aspectRatios[0],
       resolution: caps.resolutions.includes(p.resolution) ? p.resolution : caps.resolutions[0],
       audio: caps.supportsAudio ? !!p.audio : undefined,
+      // 4.2-A：首帧/尾帧仅模型 capability 支持时透传（成对校验由后端执行）
+      ...(caps.supportsStartEndFrame && typeof p.startFrame === 'string' && p.startFrame ? { startFrame: p.startFrame } : {}),
+      ...(caps.supportsStartEndFrame && typeof p.endFrame === 'string' && p.endFrame ? { endFrame: p.endFrame } : {}),
       referenceImages: caps.supportsImageReference ? ctx.getReferenceImages(node.id) : [],
     };
   },

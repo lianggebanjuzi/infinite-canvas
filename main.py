@@ -17,11 +17,14 @@ from backend.api.provider_api  import ProviderAPI
 from backend.api.unified_api   import UnifiedAPIRouter
 from backend.api.image_api     import ImageAPI
 from backend.api.video_api     import VideoAPI
+from backend.api.audio_api     import AudioAPI
 from backend.api.clipboard_api import ClipboardAPI
 from backend.api.project_api   import ProjectAPI
 from backend.api.settings_api  import SettingsAPI
 from backend.api.backup_api    import BackupAPI
+from backend.api.bundle_api    import BundleAPI
 from backend.api.errors        import AppError, UnknownError
+from backend.director_api      import DirectorAPI
 
 # ─────────────────────────────────────────
 # 路径常量
@@ -35,12 +38,14 @@ else:
 
 BASE_DIR   = RESOURCE_DIR
 INDEX_HTML = os.path.join(RESOURCE_DIR, 'gui', 'dist', 'index.html')
+DIRECTOR_HTML = os.path.join(RESOURCE_DIR, 'gui', 'dist', 'director.html')
 ICON_PATH  = os.path.join(RESOURCE_DIR, 'icon.ico')
 
 # 用户数据文件（读写，放在 exe 同级目录 / 开发时项目根目录）
 PROVIDERS_FILE = os.path.join(APP_DIR, 'providers_data.json')
 SETTINGS_FILE  = os.path.join(APP_DIR, 'settings.json')
 PROMPTS_FILE   = os.path.join(APP_DIR, 'prompts_library.json')
+CAPABILITY_SCHEMAS_FILE = os.path.join(APP_DIR, 'capability_schemas.json')
 
 sys.path.insert(0, RESOURCE_DIR)
 
@@ -191,14 +196,19 @@ def _get_dpi_scale(hwnd):
 class InfiniteCanvasAPI:
 
     def __init__(self):
-        self.provider  = ProviderAPI(PROVIDERS_FILE)
+        self.provider  = ProviderAPI(PROVIDERS_FILE, schemas_file=CAPABILITY_SCHEMAS_FILE)
         self.settings  = SettingsAPI(SETTINGS_FILE, PROMPTS_FILE)
         self.unified   = UnifiedAPIRouter(self.provider, settings_api=self.settings)
         self.image     = ImageAPI(self.settings, self.unified)
         self.video     = VideoAPI(self.unified)
+        self.audio     = AudioAPI(self.unified)
         self.clipboard = ClipboardAPI()
         self.project   = ProjectAPI(settings_api=self.settings, fallback_dir=APP_DIR)
-        self.backup    = BackupAPI(APP_DIR, self.project, self.settings, PROVIDERS_FILE)
+        self.backup    = BackupAPI(APP_DIR, self.project, self.settings, PROVIDERS_FILE, schemas_file=CAPABILITY_SCHEMAS_FILE)
+        self.bundle    = BundleAPI(APP_DIR, self.project, self.settings)
+        # 4.4 导演台：独立窗口 js_api（director_* 前缀，不覆盖其他 API）
+        self.director  = DirectorAPI(app_api=self)
+        self._main_window_handle = None
         # 无边框窗口状态（自绘标题栏）
         self._win_maximized = False  # 最大化状态标志（win_toggle_maximize 切换用）
         self._win_restore_rect = None  # 最大化前窗口矩形 (left, top, width, height)；还原时恢复
@@ -342,6 +352,64 @@ class InfiniteCanvasAPI:
             return UnknownError(str(e)).to_dict()
 
     # ─────────────────────────────────────────
+    # AI 音频生成（4.2-B：异步任务协议，adapter 可配置；音频_* 前缀，不覆盖其它 API）
+    # ─────────────────────────────────────────
+
+    def generate_audio(self, prompt, config=None):
+        """音频生成（异步，立即返回 task_id）"""
+        try:
+            return self.audio.generate_audio_async(prompt, config)
+        except AppError as e:
+            return e.to_dict()
+        except Exception as e:
+            return UnknownError(str(e)).to_dict()
+
+    def generate_audio_async(self, prompt, config=None):
+        """音频生成（异步，立即返回 task_id）— 兼容命名，同 generate_audio"""
+        try:
+            return self.audio.generate_audio_async(prompt, config)
+        except AppError as e:
+            return e.to_dict()
+        except Exception as e:
+            return UnknownError(str(e)).to_dict()
+
+    def get_audio_task_result(self, task_id):
+        """查询音频异步任务结果（中间态 queued/processing/pending_confirmation；终态 done）"""
+        try:
+            return self.audio.get_audio_task_result(task_id)
+        except AppError as e:
+            return e.to_dict()
+        except Exception as e:
+            return UnknownError(str(e)).to_dict()
+
+    def unified_generate_audio(self, prompt, options=None):
+        """统一音频生成（异步，立即返回 task_id）"""
+        try:
+            return self.audio.generate_audio_async(prompt, options)
+        except AppError as e:
+            return e.to_dict()
+        except Exception as e:
+            return UnknownError(str(e)).to_dict()
+
+    def unified_generate_audio_sync(self, prompt, options=None):
+        """统一音频生成（同步，阻塞等待结果；QA/console 直测用）"""
+        try:
+            return self.audio.generate_audio(prompt, options)
+        except AppError as e:
+            return e.to_dict()
+        except Exception as e:
+            return UnknownError(str(e)).to_dict()
+
+    def unified_get_audio_task_result(self, task_id):
+        """查询音频异步任务结果"""
+        try:
+            return self.audio.get_audio_task_result(task_id)
+        except AppError as e:
+            return e.to_dict()
+        except Exception as e:
+            return UnknownError(str(e)).to_dict()
+
+    # ─────────────────────────────────────────
     # Agent 对话（全部走 UnifiedAPIRouter）
     # ─────────────────────────────────────────
 
@@ -423,11 +491,27 @@ class InfiniteCanvasAPI:
         # 不沿用用户原始文件名，避免重复导入同名文件时覆盖已保存的原图。
         return self.image.save_image_to_local(image_data, allow_temp=True)
 
+    def prepare_imported_media(self, options=None):
+        """手动导入本地媒体文件（视频/音频）：大文件仅落盘路径 + 轻量元数据（4.2-B）。"""
+        try:
+            return self.image.prepare_imported_media(options)
+        except AppError as e:
+            return e.to_dict()
+        except Exception as e:
+            return UnknownError(str(e)).to_dict()
+
     def save_image_as(self, image_data, filename=None):
         return self.image.save_image_as(image_data, filename)
 
     def load_local_image(self, file_path):
         return self.image.load_local_image(file_path)
+
+    def delete_temp_file(self, file_path):
+        """删除应用自己管理的临时文件（4.1-B 蒙版 mask-*.png 延迟清理）；路径白名单校验在后端。"""
+        try:
+            return self.image.delete_temp_file(file_path)
+        except Exception as e:
+            return UnknownError(str(e)).to_dict()
 
     def outpaint(self, image_base64, direction, ratio, prompt,
                  provider_id, model_id='', resolution=None, mask_data=None):
@@ -498,6 +582,60 @@ class InfiniteCanvasAPI:
         return self.backup.import_backup(options)
 
     # ─────────────────────────────────────────
+    # 4.1-C 画布资源包（.icbundle）：与 .icbackup 是两种文件
+    # ─────────────────────────────────────────
+    def export_bundle(self, options=None):
+        try:
+            return self.bundle.export_bundle(options)
+        except AppError as e:
+            return e.to_dict()
+        except Exception as e:
+            return UnknownError(str(e)).to_dict()
+
+    def import_bundle(self, options=None):
+        try:
+            return self.bundle.import_bundle(options)
+        except AppError as e:
+            return e.to_dict()
+        except Exception as e:
+            return UnknownError(str(e)).to_dict()
+
+    # ─────────────────────────────────────────
+    # 4.4 导演台：打开独立窗口（director_* 前缀，不覆盖其他 API）
+    # ─────────────────────────────────────────
+    def director_open(self, options=None):
+        """打开导演台独立窗口。
+
+        options: {projectPath?, imagePath?, imageName?, sourceProjectId?, sourceNodeId?}
+        - 打开成功后返回 {status:'success'}；
+        - 导演台保存不改写 2D 画布（.icdirector 与 .icproj 完全隔离）；
+        - 回传走 director_return_to_canvas → 主窗口 __icvDirectorReturn（D5）。
+        """
+        try:
+            if not os.path.exists(DIRECTOR_HTML):
+                return {"status": "error", "message": "导演台前端未构建（gui/dist/director.html 缺失）"}
+            options = options or {}
+            self.director.set_launch_options(options)
+            self.director.set_main_window(self._main_window_handle)
+            win = webview.create_window(
+                title='导演台 · Director（实验性）',
+                url=DIRECTOR_HTML,
+                js_api=self.director,
+                width=1280,
+                height=820,
+                min_size=(960, 640),
+                resizable=True,
+                frameless=False,
+            )
+            if win is None:
+                return {"status": "error", "message": "创建导演台窗口失败"}
+            return {"status": "success", "message": "导演台已打开"}
+        except AppError as e:
+            return e.to_dict()
+        except Exception as e:
+            return UnknownError(str(e)).to_dict()
+
+    # ─────────────────────────────────────────
     # 设置
     # ─────────────────────────────────────────
     def load_settings(self):
@@ -521,6 +659,9 @@ class InfiniteCanvasAPI:
     def rename_recent_project(self, path, name):
         return self.settings.rename_recent_project(path, name)
 
+    def check_recent_project_path(self, path):
+        return self.settings.check_recent_project_path(path)
+
     # ─────────────────────────────────────────
     # 提示词库
     # ─────────────────────────────────────────
@@ -532,6 +673,27 @@ class InfiniteCanvasAPI:
 
     def save_prompt_cover(self, data_url, filename='cover'):
         return self.settings.save_prompt_cover(data_url, filename)
+
+    # ─────────────────────────────────────────
+    # 4.3-D 模型能力 schema（capability_* 前缀，不覆盖 audio_*/director_*/bundle_* 方法）
+    # 存储于 capability_schemas.json（随设置备份、不含 Key）
+    # ─────────────────────────────────────────
+    def capability_load_schemas(self):
+        return self.provider.load_capability_schemas()
+
+    def capability_save_schema(self, schema):
+        return self.provider.save_capability_schema(schema)
+
+    def capability_delete_schema(self, model_id):
+        return self.provider.delete_capability_schema(model_id)
+
+    def capability_test_adapter(self, model_id, options=None):
+        try:
+            return self.provider.test_custom_adapter(model_id, options)
+        except AppError as e:
+            return e.to_dict()
+        except Exception as e:
+            return UnknownError(str(e)).to_dict()
 
     # ─────────────────────────────────────────
     # 窗口控制（无边框自绘标题栏）
@@ -784,6 +946,8 @@ def main():
                                # 会和画布平移/框选冲突；拖拽改由 pywebview 官方
                                # drag-region 机制接管（顶栏 .pywebview-drag-region）
     )
+    # 4.4：记录主窗口句柄，供导演台回传（director_return_to_canvas → __icvDirectorReturn）
+    api._main_window_handle = window
 
     # Win11 无边框窗口圆角补偿：start 前 hwnd 可能尚未生成，直接调用未必生效，
     # 因此注册 shown 事件（窗口显示后再设置，可靠路径），并提前尝试一次（hwnd 已存在时立即生效）。

@@ -10,13 +10,16 @@ import { canvasView, CARD_W } from '../canvas/canvas-view';
 import { cardView } from '../canvas/card-view';
 import { interactions } from '../canvas/interactions';
 import { runEngine } from '../engine/run-engine';
-import { fetchImageModels, fetchChatModels, fetchVideoModels } from '../api';
+import { fetchImageModels, fetchChatModels, fetchVideoModels, fetchAudioModels } from '../api';
 import { showToast } from './toast';
 import { floatingPanels } from './floating-panels';
 import { outpaintPanel } from './outpaint-panel';
 import { promptLibraryStore } from './prompt-library';
+import { assetStore } from '../asset-store';
+import { historyDrawer } from './history-drawer';
+import { uid } from '../../utils/uid';
 import { getSupportedAspectRatios, getModelCapabilities } from '../nodes/model-config';
-import { getVideoModelCapabilities } from '../nodes/model-config';
+import { getVideoModelCapabilities, getAudioModelCapabilities } from '../nodes/model-config';
 
 const DEFAULT_RATIO_OPTIONS = ['1:1', '3:4', '4:3', '9:16', '16:9', '21:9', '2:3', '3:2', '4:5', '5:4', 'Auto'];
 
@@ -67,9 +70,17 @@ class CmdPanel {
   private outpaintSettingsSummary: HTMLElement | null = null;
   private historyEl!: HTMLElement;
   private promptPreview: HTMLElement | null = null;
+  /** 4.1-B @素材：token chip 条与资源选择器 */
+  private mentionStrip: HTMLElement | null = null;
+  private mentionPicker: HTMLElement | null = null;
+  /** 打开选择器时记录的插入点（搜索框聚焦会移走 textarea 焦点，不能再读 selectionStart） */
+  private mentionInsertPos = 0;
   private modelOptions: Array<{ id: string; name: string }> = [];
   private chatModelOptions: Array<{ id: string; name: string }> = [];
   private videoModelOptions: Array<{ id: string; name: string }> = [];
+  private audioModelOptions: Array<{ id: string; name: string }> = [];
+  /** 4.2-A：视频首帧/尾帧选择条（仅模型 capability supportsStartEndFrame 时显示） */
+  private frameStrip: HTMLElement | null = null;
   /** 异步模型拉取序号：迟到的旧请求不得覆盖 pywebview 就绪后的新结果。 */
   private modelLoadSeq = 0;
   /** 动态参考图缩略元素（随 refImages/上游增删重建） */
@@ -100,6 +111,7 @@ class CmdPanel {
     this.outpaintSettingsRatio = document.getElementById('outpaint-settings-ratio') as HTMLElement | null;
     this.outpaintSettingsSummary = document.getElementById('outpaint-settings-summary') as HTMLElement | null;
     this.historyEl = document.getElementById('cmd-text-history') as HTMLElement;
+    this.mentionStrip = document.getElementById('cmd-mentions') as HTMLElement | null;
     document.getElementById('cmd-advanced-toggle')?.addEventListener('click', () => {
       this.advancedOpen = !this.advancedOpen;
       this.sync();
@@ -126,12 +138,40 @@ class CmdPanel {
       else this.el.appendChild(this.promptPreview);
     }
 
+    // 4.2-A：视频首帧/尾帧选择条（动态创建；仅 supportsStartEndFrame 时显示）
+    if (this.el && !this.el.querySelector('#cmd-frame-strip')) {
+      this.frameStrip = document.createElement('div');
+      this.frameStrip.className = 'cmd-frame-strip';
+      this.frameStrip.id = 'cmd-frame-strip';
+      this.frameStrip.hidden = true;
+      this.frameStrip.innerHTML = `
+        <span class="cmd-frame-title">首尾帧</span>
+        <button class="cmd-frame-pick" data-frame="start" title="选择首帧图片">首帧</button>
+        <button class="cmd-frame-pick" data-frame="end" title="选择尾帧图片">尾帧</button>
+        <button class="cmd-frame-clear" title="清除首尾帧">清除</button>
+        <span class="cmd-frame-hint"></span>`;
+      const refsEl = document.getElementById('cmd-refs');
+      if (refsEl) refsEl.before(this.frameStrip);
+      else this.el.appendChild(this.frameStrip);
+      this.frameStrip.addEventListener('click', (e: MouseEvent) => {
+        const target = e.target as HTMLElement;
+        if (target.classList.contains('cmd-frame-pick')) {
+          this._pickFrame(target.dataset.frame === 'end' ? 'end' : 'start');
+        } else if (target.classList.contains('cmd-frame-clear')) {
+          this._clearFrames();
+        }
+      });
+    } else {
+      this.frameStrip = this.el?.querySelector('#cmd-frame-strip') as HTMLElement | null;
+    }
+
     // 预取模型列表（绘图 + 对话，供 chip 菜单与默认模型回填）。主入口会在
     // pywebview 就绪后再次调用，避免启动竞态把空列表永久留在面板内。
     void this.refreshModels();
 
     this._bindEvents();
     flowState.subscribe(() => this.sync());
+    canvasView.onViewChange(() => this.reposition());
   }
 
   /** 供「继续创作」等图片动作直接把用户带到下一句想法，避免还要再找输入框。 */
@@ -158,15 +198,17 @@ class CmdPanel {
   /** 在桥接就绪或供应商配置变更后刷新模型；完成后立即刷新当前卡片的显示名。 */
   async refreshModels(): Promise<void> {
     const seq = ++this.modelLoadSeq;
-    const [imageModels, chatModels, videoModels] = await Promise.all([
+    const [imageModels, chatModels, videoModels, audioModels] = await Promise.all([
       fetchImageModels(),
       fetchChatModels(),
       fetchVideoModels(),
+      fetchAudioModels(),
     ]);
     if (seq !== this.modelLoadSeq) return;
     this.modelOptions = imageModels.filter(model => Boolean(model.id));
     this.chatModelOptions = chatModels.filter(model => Boolean(model.id));
     this.videoModelOptions = videoModels.filter(model => Boolean(model.id));
+    this.audioModelOptions = audioModels.filter(model => Boolean(model.id));
     this.sync();
   }
 
@@ -185,7 +227,24 @@ class CmdPanel {
         flowState.updateNodeParams(node.id, { instruction: this.input.value });
       } else {
         flowState.updateNodeParams(node.id, { prompt: this.input.value });
+        // 4.1-B：token 文本与结构化 mentions 保持同步（删除 token 即移除引用）
+        this._syncMentionsFromText(node.id, this.input.value);
       }
+    });
+
+    // 4.1-B @素材：图片节点输入框内输入 @ 打开资源选择器
+    this.input.addEventListener('keydown', (e: KeyboardEvent) => {
+      const node = selection.single();
+      if (!node || node.type !== 'image-gen') return;
+      if ((node.params as unknown as StyleTransferParams).mode === 'outpaint') return;
+      if (e.key !== '@') return;
+      e.preventDefault();
+      const text = this.input.value;
+      const before = text.slice(0, this.input.selectionStart ?? text.length);
+      const prevChar = before.length > 0 ? before[before.length - 1] : '';
+      if (before.length > 0 && !/\s/.test(prevChar)) return; // 词中 @ 不触发
+      this.mentionInsertPos = this.input.selectionStart ?? text.length;
+      this._openMentionPicker();
     });
 
     this.send.addEventListener('click', () => this._onSend());
@@ -199,6 +258,10 @@ class CmdPanel {
         void outpaintPanel.open(node.id);
         return;
       }
+      if (node.type === 'audio-gen') {
+        void this._openModelMenu(e.currentTarget as HTMLElement);
+        return;
+      }
       if (node.type === 'video-gen') {
         const caps = getVideoModelCapabilities((node.params as unknown as VideoGenParams).model || '');
         this._showChipMenu(e.currentTarget as HTMLElement, caps.aspectRatios.map(id => ({ id, name: id })), 'aspectRatio');
@@ -209,6 +272,13 @@ class CmdPanel {
     document.getElementById('chip-ratio')?.addEventListener('click', (e: MouseEvent) => {
       e.stopPropagation();
       const node = selection.single();
+      if (node?.type === 'audio-gen') {
+        // 音频：chip-ratio 复用为格式选择（mp3/wav/ogg）
+        const caps = getAudioModelCapabilities((node.params as unknown as AudioGenParams).model || '');
+        const formats = (caps.formats.length ? caps.formats : ['mp3']).map(id => ({ id, name: id.toUpperCase() }));
+        this._showChipMenu(e.currentTarget as HTMLElement, formats, 'format');
+        return;
+      }
       if (node?.type === 'video-gen') {
         const caps = getVideoModelCapabilities((node.params as unknown as VideoGenParams).model || '');
         this._showChipMenu(e.currentTarget as HTMLElement, caps.resolutions.map(id => ({ id, name: id })), 'resolution');
@@ -230,6 +300,13 @@ class CmdPanel {
     document.getElementById('chip-res')?.addEventListener('click', (e: MouseEvent) => {
       e.stopPropagation();
       const node = selection.single();
+      if (node?.type === 'audio-gen') {
+        // 音频：chip-res 复用为时长选择（仅 capability 声明 seconds 时显示）
+        const caps = getAudioModelCapabilities((node.params as unknown as AudioGenParams).model || '');
+        if (caps.seconds.length === 0) { showToast('当前音频模型未声明可选时长', false); return; }
+        this._showChipMenu(e.currentTarget as HTMLElement, caps.seconds.map(id => ({ id: String(id), name: `${id} 秒` })), 'seconds');
+        return;
+      }
       if (node?.type === 'video-gen') {
         const caps = getVideoModelCapabilities((node.params as unknown as VideoGenParams).model || '');
         this._showChipMenu(e.currentTarget as HTMLElement, caps.seconds.map(id => ({ id: String(id), name: `${id} 秒` })), 'seconds');
@@ -244,6 +321,10 @@ class CmdPanel {
     document.getElementById('chip-count')?.addEventListener('click', (e: MouseEvent) => {
       e.stopPropagation();
       const node = selection.single();
+      if (node?.type === 'audio-gen') {
+        showToast('音频生成每次生成一条音频，无需选择数量', false);
+        return;
+      }
       if (node && (node.params as unknown as StyleTransferParams).mode === 'outpaint') {
         showToast('扩图固定生成 1 张 4K 图；请点击比例调整画布', false);
         return;
@@ -414,12 +495,294 @@ class CmdPanel {
     searchInput.focus();
   }
 
+  // ───────────────────────── 4.1-B @素材引用 ─────────────────────────
+
+  /** 读取节点结构化 mentions（缺失返回 []）。 */
+  private _readMentions(nodeId: string): PromptMention[] {
+    const node = flowState.getNode(nodeId);
+    const mentions = (node?.params as Record<string, unknown> | undefined)?.mentions;
+    return Array.isArray(mentions) ? mentions.filter((m): m is PromptMention => !!m && typeof m === 'object') : [];
+  }
+
+  /** 写入节点结构化 mentions。 */
+  private _writeMentions(nodeId: string, mentions: PromptMention[]): void {
+    flowState.updateNodeParams(nodeId, { mentions });
+  }
+
+  /** 资源是否已丢失：图片无任何可解析来源、文本无正文且无名称。 */
+  private _isMentionMissing(m: PromptMention): boolean {
+    if (m.kind === 'image') {
+      if (m.sourceNodeId && flowState.getNode(m.sourceNodeId)) return false;
+      return !m.imageUrl && !m.originalPath;
+    }
+    return !m.text && !m.label;
+  }
+
+  /**
+   * 输入变化后同步 mentions：按文本中 `@label` 出现次数保留前 N 个同名 mention
+   * （删除 token 文本即移除对应引用；同名素材各绑各的资源，不会互相引用错）。
+   */
+  private _syncMentionsFromText(nodeId: string, text: string): void {
+    const mentions = this._readMentions(nodeId);
+    if (mentions.length === 0) return;
+    const used = new Map<string, number>();
+    const kept: PromptMention[] = [];
+    mentions.forEach(m => {
+      const label = m.label || '';
+      if (!label) return;
+      const escaped = label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const re = new RegExp(`@${escaped}`, 'g');
+      const total = (text.match(re) || []).length;
+      const current = used.get(label) ?? 0;
+      if (current < total) {
+        used.set(label, current + 1);
+        kept.push(m);
+      }
+    });
+    if (kept.length !== mentions.length) this._writeMentions(nodeId, kept);
+  }
+
+  /** 渲染 token chip 条：显示名称 + 删除；资源丢失标红。 */
+  private _renderMentions(): void {
+    if (!this.mentionStrip) return;
+    const node = selection.single();
+    if (!node || node.type !== 'image-gen' || (node.params as unknown as StyleTransferParams).mode === 'outpaint') {
+      this.mentionStrip.hidden = true;
+      this.mentionStrip.innerHTML = '';
+      return;
+    }
+    const mentions = this._readMentions(node.id);
+    this.mentionStrip.hidden = mentions.length === 0;
+    this.mentionStrip.innerHTML = '';
+    mentions.forEach(m => {
+      const chip = document.createElement('span');
+      chip.className = 'cmd-mention-chip' + (this._isMentionMissing(m) ? ' missing' : '');
+      chip.title = this._isMentionMissing(m) ? '引用资源已丢失：请移除或替换' : '点击 ✕ 移除该引用';
+      const label = document.createElement('span');
+      label.className = 'cmd-mention-label';
+      label.textContent = `@${m.label || '未命名'}`;
+      const del = document.createElement('button');
+      del.type = 'button';
+      del.className = 'cmd-mention-del';
+      del.textContent = '✕';
+      del.title = '移除引用';
+      del.addEventListener('click', (e: MouseEvent) => {
+        e.stopPropagation();
+        this._removeMention(node.id, m);
+      });
+      chip.append(label, del);
+      this.mentionStrip!.appendChild(chip);
+    });
+  }
+
+  /** 删除 chip：移除结构化引用 + 移除提示词中首个 `@label` 文本。 */
+  private _removeMention(nodeId: string, mention: PromptMention): void {
+    const node = flowState.getNode(nodeId);
+    if (!node) return;
+    const mentions = this._readMentions(nodeId).filter(m => m.id !== mention.id);
+    this._writeMentions(nodeId, mentions);
+    const label = mention.label || '';
+    const p = node.params as unknown as StyleTransferParams;
+    const text = typeof p.prompt === 'string' ? p.prompt : '';
+    if (label) {
+      const token = `@${label}`;
+      const idx = text.indexOf(token);
+      if (idx >= 0) {
+        const next = text.slice(0, idx) + text.slice(idx + token.length);
+        flowState.updateNodeParams(nodeId, { prompt: next });
+        this.input.value = next;
+        this._autoResizeInput();
+      }
+    }
+    this._renderMentions();
+  }
+
+  /** 打开 @ 资源选择器（项目资产 / 历史图片 / 画布图片 / 文本片段）。 */
+  private _openMentionPicker(): void {
+    this.mentionPicker?.remove();
+    const node = selection.single();
+    if (!node) return;
+
+    type Candidate = PromptMention & { group: string; thumb?: string };
+    const candidates: Candidate[] = [];
+
+    // 项目资产
+    assetStore.getAssets().forEach(a => {
+      const url = a.thumbnailUrl || a.url;
+      if (!url) return;
+      candidates.push({
+        id: uid('ment-asset'), kind: 'image', label: this.assetLabel(a), group: '项目资产',
+        imageUrl: url, originalPath: a.originalPath, thumb: a.thumbnailUrl || a.url,
+      });
+    });
+    // 历史图片
+    historyDrawer.listImages().forEach(h => {
+      const url = h.thumbnail || h.src;
+      if (!url) return;
+      candidates.push({
+        id: uid('ment-history'), kind: 'image', label: h.prompt ? h.prompt.slice(0, 24) : '历史图片', group: '历史图片',
+        imageUrl: url, originalPath: h.originalPath, thumb: h.thumbnail || h.src, text: h.prompt,
+      });
+    });
+    // 画布图片
+    flowState.nodes.forEach(n => {
+      if (!n.imageUrl) return;
+      candidates.push({
+        id: uid('ment-canvas'), kind: 'image', label: n.title || '画布图片', group: '画布图片',
+        imageUrl: n.imageUrl, originalPath: n.imageOrigin?.path, sourceNodeId: n.id, thumb: n.imageUrl,
+      });
+    });
+    // 文本片段
+    flowState.nodes.forEach(n => {
+      if (n.type !== 'text-gen' || !n.outputText?.trim()) return;
+      candidates.push({
+        id: uid('ment-text'), kind: 'text', label: (n.outputText || '').trim().slice(0, 24), group: '文本片段',
+        text: n.outputText || '', sourceNodeId: n.id,
+      });
+    });
+
+    const popup = document.createElement('div');
+    popup.className = 'mention-picker';
+    this.mentionPicker = popup;
+
+    const head = document.createElement('div');
+    head.className = 'mention-picker-head';
+    head.innerHTML = '<strong>@ 引用素材</strong><button type="button" class="mention-picker-close" title="关闭">×</button>';
+    popup.appendChild(head);
+
+    const searchWrap = document.createElement('div');
+    searchWrap.className = 'mention-picker-search';
+    const search = document.createElement('input');
+    search.type = 'text';
+    search.placeholder = '搜索资产 / 历史 / 画布 / 文本…';
+    searchWrap.appendChild(search);
+    popup.appendChild(searchWrap);
+
+    const list = document.createElement('div');
+    list.className = 'mention-picker-list';
+    popup.appendChild(list);
+
+    const renderList = (filter = '') => {
+      list.innerHTML = '';
+      const q = filter.trim().toLowerCase();
+      const groups = new Map<string, Candidate[]>();
+      candidates.forEach(c => {
+        if (q && !((c.label || '').toLowerCase().includes(q) || (c.text || '').toLowerCase().includes(q))) return;
+        const arr = groups.get(c.group) || [];
+        arr.push(c);
+        groups.set(c.group, arr);
+      });
+      if (groups.size === 0) {
+        const empty = document.createElement('div');
+        empty.className = 'mention-picker-empty';
+        empty.textContent = '没有匹配的素材';
+        list.appendChild(empty);
+        return;
+      }
+      groups.forEach((items, group) => {
+        const g = document.createElement('div');
+        g.className = 'mention-picker-group';
+        g.textContent = group;
+        list.appendChild(g);
+        items.slice(0, 20).forEach(c => {
+          const item = document.createElement('button');
+          item.type = 'button';
+          item.className = 'mention-picker-item';
+          if (c.thumb) {
+            const thumb = document.createElement('span');
+            thumb.className = 'mention-picker-thumb';
+            thumb.style.backgroundImage = `url('${c.thumb.replace(/'/g, "\\'")}')`;
+            item.appendChild(thumb);
+          } else {
+            const icon = document.createElement('span');
+            icon.className = 'mention-picker-thumb mention-picker-text-icon';
+            icon.textContent = 'T';
+            item.appendChild(icon);
+          }
+          const meta = document.createElement('span');
+          meta.className = 'mention-picker-meta';
+          meta.textContent = c.label;
+          item.appendChild(meta);
+          item.addEventListener('click', () => {
+            this._insertMention(node.id, c);
+            popup.remove();
+            this.mentionPicker = null;
+          });
+          list.appendChild(item);
+        });
+      });
+    };
+    renderList();
+    search.addEventListener('input', () => renderList(search.value));
+
+    head.querySelector('.mention-picker-close')?.addEventListener('click', () => {
+      popup.remove();
+      this.mentionPicker = null;
+    });
+    const closeHandler = (e: MouseEvent) => {
+      if (!popup.contains(e.target as Node)) {
+        popup.remove();
+        this.mentionPicker = null;
+        document.removeEventListener('click', closeHandler);
+      }
+    };
+    setTimeout(() => document.addEventListener('click', closeHandler), 0);
+
+    popup.style.position = 'fixed';
+    const rect = this.input.getBoundingClientRect();
+    const width = Math.min(340, window.innerWidth - 32);
+    popup.style.left = Math.max(16, Math.min(rect.left, window.innerWidth - width - 16)) + 'px';
+    popup.style.top = (rect.bottom + 6) + 'px';
+    popup.style.width = width + 'px';
+    document.body.appendChild(popup);
+    search.focus();
+  }
+
+  /** 资产条目 → 可读名称（prompt 优先、模型次之、缺省「资产」）。 */
+  private assetLabel(a: AssetAsset): string {
+    const meta = a.meta;
+    const prompt = (meta?.prompt || a.record.prompt || '').trim();
+    if (prompt) return prompt.slice(0, 24);
+    const model = (meta?.model || a.record.model || '').split(':').pop() || '';
+    return model ? `资产 · ${model}` : '资产';
+  }
+
+  /** 在光标处插入 `@label` token 并把结构化 mention 写入节点。 */
+  private _insertMention(nodeId: string, mention: PromptMention): void {
+    const node = flowState.getNode(nodeId);
+    if (!node) return;
+    const mentions = [...this._readMentions(nodeId), mention];
+    this._writeMentions(nodeId, mentions);
+    const label = mention.label || '未命名';
+    const token = `@${label}`;
+    const start = Math.min(this.mentionInsertPos, this.input.value.length);
+    const end = start;
+    const before = this.input.value.slice(0, start);
+    const after = this.input.value.slice(end);
+    const sep = before.length > 0 && !/\s$/.test(before) ? ' ' : '';
+    const next = `${before}${sep}${token} `;
+    this.input.value = next + after;
+    this.input.dispatchEvent(new Event('input'));
+    this._autoResizeInput();
+    this.input.focus();
+    const pos = next.length;
+    this.input.setSelectionRange(pos, pos);
+  }
+
   private _onSend(): void {
     const node = selection.single();
     if (!node) return;
     if (node.status === 'run') {
       runEngine.cancel(node.id);
       return;
+    }
+    // 4.1-B：@引用资源丢失时阻止提交，提示替换/移除（B3）
+    if (node.type === 'image-gen') {
+      const missing = this._readMentions(node.id).filter(m => this._isMentionMissing(m));
+      if (missing.length > 0) {
+        showToast(`有 ${missing.length} 个 @引用资源已丢失，请先移除或替换后再生成`, false);
+        return;
+      }
     }
     if (node.type === 'text-gen') {
       // 命令始终暂存在节点参数中，失焦、成功或失败均不清空，方便修改后重试。
@@ -445,6 +808,9 @@ class CmdPanel {
     } else if (node.type === 'video-gen') {
       this.videoModelOptions = (await fetchVideoModels()).filter(m => Boolean(m.id));
       this._showChipMenu(btn, this.videoModelOptions, 'model');
+    } else if (node.type === 'audio-gen') {
+      this.audioModelOptions = (await fetchAudioModels()).filter(m => Boolean(m.id));
+      this._showChipMenu(btn, this.audioModelOptions, 'model');
     } else {
       // image-gen：仅绘图模型列表（文本模型 tab / 反推模式 UI 已删除，W2-2；modelType 运行时忽略 Q7）
       this.modelOptions = await fetchImageModels();
@@ -496,6 +862,7 @@ class CmdPanel {
       case 'resolution': return p.resolution || '2k';
       case 'count': return String(p.count ?? 1);
       case 'seconds': return String((node.params as unknown as VideoGenParams).seconds ?? 5);
+      case 'format': return String((node.params as unknown as AudioGenParams).format ?? 'mp3');
       default: return '';
     }
   }
@@ -515,12 +882,31 @@ class CmdPanel {
           resolution: caps.resolutions.includes(old.resolution) ? old.resolution : (caps.resolutions[0] || '720p'),
           audio: caps.supportsAudio ? !!old.audio : false,
         };
+        // 4.2-A：切换模型时清理不兼容的首尾帧（仅当新模型不支持且已有值）
+        if (!caps.supportsStartEndFrame && (old.startFrame || old.endFrame)) {
+          patch.startFrame = undefined;
+          patch.endFrame = undefined;
+        }
         flowState.updateNodeParams(nodeId, patch as Record<string, unknown>);
         if (!caps.supportsAudio && old.audio) showToast('新模型不支持音频，已关闭音频参数', false);
+        if (!caps.supportsStartEndFrame && (old.startFrame || old.endFrame)) showToast('新模型不支持首尾帧，已清除首尾帧', false);
+      } else if (node.type === 'audio-gen') {
+        const old = node.params as unknown as AudioGenParams;
+        const caps = getAudioModelCapabilities(value);
+        const patch: Partial<AudioGenParams> = {};
+        if (caps.seconds.length > 0) {
+          patch.seconds = caps.seconds.includes(Number(old.seconds)) ? Number(old.seconds) : caps.seconds[0];
+        }
+        if (caps.formats.length > 0) {
+          patch.format = caps.formats.includes(old.format ?? 'mp3')
+            ? (old.format ?? 'mp3')
+            : caps.formats[0];
+        }
+        flowState.updateNodeParams(nodeId, patch as Record<string, unknown>);
       }
       if (value) {
         // 只记在当前项目：后续新建同类节点沿用用户最近选择，而不污染其它项目。
-        flowState.setModelDefault(node.type === 'text-gen' ? 'chat' : (node.type === 'video-gen' ? 'video' : 'drawing'), value);
+        flowState.setModelDefault(node.type === 'text-gen' ? 'chat' : (node.type === 'video-gen' ? 'video' : (node.type === 'audio-gen' ? 'audio' : 'drawing')), value);
       }
     } else if (paramType === 'aspectRatio') {
       flowState.updateNodeParams(nodeId, { aspectRatio: value });
@@ -530,6 +916,8 @@ class CmdPanel {
       flowState.updateNodeParams(nodeId, { count: Number(value) || 1 });
     } else if (paramType === 'seconds') {
       flowState.updateNodeParams(nodeId, { seconds: Number(value) || 5 });
+    } else if (paramType === 'format') {
+      flowState.updateNodeParams(nodeId, { format: value });
     }
   }
 
@@ -554,6 +942,7 @@ class CmdPanel {
     if (!(node.params.model as string | undefined)) {
       if (node.type === 'text-gen') this._ensureChatModel(node.id);
       else if (node.type === 'video-gen') this._ensureVideoModel(node.id);
+      else if (node.type === 'audio-gen') this._ensureAudioModel(node.id);
       else this._ensureModel(node.id);
     }
 
@@ -568,8 +957,9 @@ class CmdPanel {
     // image-gen 面板：绘图参数 chips 全显示（反推模式 UI 已删除，W2-2）
     const isTextGen = node.type === 'text-gen';
     const isVideo = node.type === 'video-gen';
+    const isAudio = node.type === 'audio-gen';
     const isTextSplitDriven = !isTextGen && flowState.getUpstreams(node.id).some(n => n.type === 'text-split');
-    const isOutpaint = !isTextGen && (node.params as unknown as StyleTransferParams).mode === 'outpaint';
+    const isOutpaint = node.type === 'image-gen' && (node.params as unknown as StyleTransferParams).mode === 'outpaint';
     // 扩图参数只在专用预览弹窗中调整。不要在画布下方重复展开一张大框：
     // 失败信息已直接显示在扩图步骤卡中，重试走上方「调整扩图」。
     if (isOutpaint) {
@@ -577,7 +967,7 @@ class CmdPanel {
       return;
     }
     // 上下文标识优先说明正在做的任务，而不是暴露内部节点标题。
-    this.ctxName.textContent = isTextGen ? '处理文本' : (isVideo ? '生成视频' : (isOutpaint ? '扩图' : (flowState.getReferenceImages(node.id).length > 0 ? '基于图片修改' : '创作图片')));
+    this.ctxName.textContent = isTextGen ? '处理文本' : (isVideo ? '生成视频' : (isAudio ? '生成音频' : (isOutpaint ? '扩图' : (flowState.getReferenceImages(node.id).length > 0 ? '基于图片修改' : '创作图片'))));
     this.el.classList.toggle('textgen', isTextGen);
     this.el.classList.toggle('outpaint', isOutpaint);
     this.el.classList.toggle('textsplit-driven', isTextSplitDriven);
@@ -590,18 +980,38 @@ class CmdPanel {
     }
     this.el.classList.remove('reverse');
 
-    // chip/发送钮 title 文案随节点类型切换（文本处理 / 图片生成）
-    this.chipModelBtn.title = isTextGen ? '选择文本模型' : (isVideo ? '选择视频模型' : (isOutpaint ? '扩图模型自动选择；点击调整扩图' : '选择绘图模型'));
+    // chip/发送钮 title 文案随节点类型切换（文本处理 / 图片生成 / 视频 / 音频）
+    this.chipModelBtn.title = isTextGen ? '选择文本模型' : (isVideo ? '选择视频模型' : (isAudio ? '选择音频模型' : (isOutpaint ? '扩图模型自动选择；点击调整扩图' : '选择绘图模型')));
     const ratioBtn = document.getElementById('chip-ratio');
     const resBtn = document.getElementById('chip-res');
     const countBtn = document.getElementById('chip-count');
-    if (ratioBtn) ratioBtn.title = isOutpaint ? '调整扩图比例和原图摆放' : '画面比例';
-    if (resBtn) resBtn.title = isOutpaint ? '扩图固定为 4K' : '分辨率';
-    if (countBtn) countBtn.title = isOutpaint ? '扩图固定生成 1 张' : '生成张数';
+    if (ratioBtn) {
+      ratioBtn.title = isOutpaint ? '调整扩图比例和原图摆放' : (isAudio ? '音频格式' : '画面比例');
+      ratioBtn.hidden = isTextGen;
+    }
+    if (resBtn) {
+      resBtn.title = isOutpaint ? '扩图固定为 4K' : (isAudio ? '音频时长' : (isVideo ? '视频时长' : '分辨率'));
+      resBtn.hidden = isTextGen;
+    }
+    if (countBtn) {
+      countBtn.title = isOutpaint ? '扩图固定生成 1 张' : '生成张数';
+      countBtn.hidden = isTextGen || isVideo || isAudio;
+    }
     const isRunning = node.status === 'run';
-    this.send.title = isRunning ? '暂停' : (isTextGen ? '处理文本' : (isVideo ? '生成视频' : (isOutpaint ? '开始扩图' : '生成')));
+    this.send.title = isRunning ? '暂停' : (isTextGen ? '处理文本' : (isVideo ? '生成视频' : (isAudio ? '生成音频' : (isOutpaint ? '开始扩图' : '生成'))));
     this.send.setAttribute('aria-label', this.send.title);
     this.send.innerHTML = isRunning ? PAUSE_SVG : SEND_SVG;
+
+    this.send.disabled = false;
+    // 4.2-B 能力门控：未配置音频模型时禁用发送钮并给明确提示（不出现可运行按钮）
+    if (isAudio) {
+      const audioCaps = getAudioModelCapabilities((node.params as unknown as AudioGenParams).model || '');
+      const hasAudioModel = !!audioCaps.available;
+      this.send.disabled = !hasAudioModel;
+      if (!hasAudioModel) this.send.title = '未配置音频模型，请先在设置中配置';
+    } else {
+      this.send.disabled = false;
+    }
 
     // 输入框占位提示跟随节点类型（切换选中节点时同步变化）
     if (isTextGen) {
@@ -610,6 +1020,8 @@ class CmdPanel {
       this.input.placeholder = '可选：描述希望扩展出的画面，如：向右延展为明亮的客厅';
     } else if (isVideo) {
       this.input.placeholder = '描述镜头动作、节奏和氛围，例如：镜头缓慢推进，窗帘随风轻摆';
+    } else if (isAudio) {
+      this.input.placeholder = '描述想要的音乐/音效，例如：温暖的原声吉他旋律，舒缓放松';
     } else {
       this.input.placeholder = PROMPT_INPUT_PLACEHOLDER;
     }
@@ -635,7 +1047,6 @@ class CmdPanel {
       }
     }
     this._autoResizeInput();
-    this.send.disabled = false;
     if (this.outpaintSettings) this.outpaintSettings.hidden = !isOutpaint;
     if (isOutpaint) {
       const params = node.params as unknown as StyleTransferParams;
@@ -647,6 +1058,7 @@ class CmdPanel {
     }
 
     this._renderRefs();
+    this._renderFrameStrip(node);
     this._renderChips(node);
     const audioToggle = document.getElementById('chip-video-audio') as HTMLElement | null;
     const audioInput = audioToggle?.querySelector('input') as HTMLInputElement | null;
@@ -655,13 +1067,27 @@ class CmdPanel {
     if (audioInput && isVideo) audioInput.checked = !!(node.params as unknown as VideoGenParams).audio;
     this._renderTextHistory(node);
     this._renderPromptPreview(node);
+    this._renderMentions();
     this._position(node);
   }
 
-  /** run 状态提示：text-gen「处理中」；批次「生成中 done/total」（无批次时退化为「生成中」） */
+  /** run 状态提示：text-gen「处理中」；批次「生成中 done/total」；媒体任务细分（提交中/已提交/处理中/查询恢复中） */
   private _runHint(nodeId: string): string {
     const node = flowState.getNode(nodeId);
     if (node && node.type === 'text-gen') return '· 处理中';
+    if (node) {
+      const task = (node.params as Record<string, unknown> | undefined)?.videoTask as MediaTask | undefined
+        ?? (node.params as Record<string, unknown> | undefined)?.audioTask as MediaTask | undefined;
+      if (task) {
+        switch (task.state) {
+          case 'submitting': return '· 提交中';
+          case 'accepted': return task.remoteTaskId ? '· 已提交（远端处理中）' : '· 已提交';
+          case 'processing': return '· 处理中';
+          case 'queued': return '· 排队中';
+          default: return '· 生成中';
+        }
+      }
+    }
     const p = runEngine.getBatchProgress(nodeId);
     if (p && p.total > 0) return `· 生成中 ${p.done}/${p.total}`;
     return '· 生成中';
@@ -744,6 +1170,85 @@ class CmdPanel {
     };
     if (this.videoModelOptions.length) apply(this.videoModelOptions);
     else void fetchVideoModels().then(models => { this.videoModelOptions = models.filter(m => Boolean(m.id)); apply(this.videoModelOptions); });
+  }
+
+  /** audio-gen 未配置模型时：沿用最近选择，否则取第一个可用音频模型（无可用则保持空 → canRun 拒绝）。 */
+  private _ensureAudioModel(nodeId: string): void {
+    if (this._modelFilling.has(nodeId)) return;
+    this._modelFilling.add(nodeId);
+    const apply = (models: Array<{ id: string }>) => {
+      const node = flowState.getNode(nodeId);
+      if (!node || (node.params.model as string | undefined)) return;
+      const saved = flowState.getModelDefault('audio');
+      const target = saved && models.some(m => m.id === saved) ? saved : (models.find(m => m.id)?.id || '');
+      if (target) flowState.updateNodeParams(nodeId, { model: target });
+    };
+    if (this.audioModelOptions.length) apply(this.audioModelOptions);
+    else void fetchAudioModels().then(models => { this.audioModelOptions = models.filter(m => Boolean(m.id)); apply(this.audioModelOptions); });
+  }
+
+  // ───────────────────────── 4.2-A：视频首帧/尾帧 ─────────────────────────
+
+  /** 选择首/尾帧图片：读取本地图片 → 压缩为 ≤768px 的 data URL → 写入 params（模型不支持时面板不显示入口）。 */
+  private _pickFrame(frame: 'start' | 'end'): void {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = 'image/*';
+    input.addEventListener('change', () => {
+      const file = input.files?.[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = (ev) => {
+        const src = ev.target?.result as string;
+        if (!src) return;
+        const img = new Image();
+        img.onload = () => {
+          const maxSide = 768;
+          const scale = Math.min(1, maxSide / Math.max(img.naturalWidth, img.naturalHeight));
+          const canvas = document.createElement('canvas');
+          canvas.width = Math.max(1, Math.round(img.naturalWidth * scale));
+          canvas.height = Math.max(1, Math.round(img.naturalHeight * scale));
+          const ctx = canvas.getContext('2d');
+          if (!ctx) return;
+          ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+          const dataUrl = canvas.toDataURL('image/jpeg', 0.82);
+          const node = selection.single();
+          if (!node) return;
+          flowHistory.record();
+          flowState.updateNodeParams(node.id, frame === 'start' ? { startFrame: dataUrl } : { endFrame: dataUrl });
+          this.sync();
+        };
+        img.src = src;
+      };
+      reader.readAsDataURL(file);
+    });
+    input.click();
+  }
+
+  private _clearFrames(): void {
+    const node = selection.single();
+    if (!node) return;
+    flowHistory.record();
+    flowState.updateNodeParams(node.id, { startFrame: undefined, endFrame: undefined });
+    showToast('已清除首尾帧');
+    this.sync();
+  }
+
+  /** 视频首尾帧选择条渲染（仅 supportsStartEndFrame 且有模型时显示）。 */
+  private _renderFrameStrip(node: FlowNode): void {
+    if (!this.frameStrip) return;
+    const isVideo = node.type === 'video-gen';
+    const p = node.params as unknown as VideoGenParams;
+    const caps = isVideo ? getVideoModelCapabilities(p.model || '') : null;
+    const show = isVideo && !!caps?.available && caps.supportsStartEndFrame;
+    this.frameStrip.hidden = !show;
+    if (!show) return;
+    const startBtn = this.frameStrip.querySelector('[data-frame="start"]') as HTMLElement | null;
+    const endBtn = this.frameStrip.querySelector('[data-frame="end"]') as HTMLElement | null;
+    const hint = this.frameStrip.querySelector('.cmd-frame-hint') as HTMLElement | null;
+    if (startBtn) startBtn.textContent = p.startFrame ? '首帧 ✓' : '首帧';
+    if (endBtn) endBtn.textContent = p.endFrame ? '尾帧 ✓' : '尾帧';
+    if (hint) hint.textContent = (p.startFrame && p.endFrame) ? '首尾帧已设置' : (p.startFrame || p.endFrame ? '首尾帧需成对使用' : '可选：选择首尾帧图片');
   }
 
   /** 历史反推结果列表：最新在前、单行截断 + 时间；点击回填（=恢复该历史输出，联动覆盖下游 prompt + 标 stale） */
@@ -838,7 +1343,7 @@ class CmdPanel {
 
   private _renderChips(node: FlowNode): void {
     const p = node.params as unknown as StyleTransferParams;
-    // 模型 chip 名称按节点类型查对应模型列表（text-gen → chat；image-gen → 绘图；反推模式已删除）
+    // 模型 chip 名称按节点类型查对应模型列表（text-gen → chat；image-gen → 绘图；视频/音频 → 各自）
     let modelName: string;
     if (node.type === 'text-gen') {
       const model = this.chatModelOptions.find(m => m.id === p.model);
@@ -846,11 +1351,21 @@ class CmdPanel {
     } else if (node.type === 'video-gen') {
       const model = this.videoModelOptions.find(m => m.id === p.model);
       modelName = model ? model.name : (p.model || '选择视频模型');
+    } else if (node.type === 'audio-gen') {
+      const model = this.audioModelOptions.find(m => m.id === p.model);
+      modelName = model ? model.name : (p.model || '选择音频模型');
     } else {
       const model = this.modelOptions.find(m => m.id === p.model);
       modelName = model ? model.name : (p.model || '选择模型');
     }
     this.chipModelLabel.textContent = modelName;
+    if (node.type === 'audio-gen') {
+      const ap = node.params as unknown as AudioGenParams;
+      this.chipRatioLabel.textContent = (ap.format || 'mp3').toUpperCase();
+      this.chipResLabel.textContent = typeof ap.seconds === 'number' ? `${ap.seconds} 秒` : '时长默认';
+      this.chipCountLabel.textContent = '1条';
+      return;
+    }
     this.chipRatioLabel.textContent = p.aspectRatio || '4:3';
     this.chipResLabel.textContent = (p.resolution || '2k').toUpperCase();
     this.chipCountLabel.textContent = node.type === 'video-gen'
@@ -859,6 +1374,18 @@ class CmdPanel {
   }
 
   /** 智能避让定位（原型 syncBars 逻辑） */
+  reposition(): void {
+    const node = selection.single();
+    if (!node || !floatingPanels.isVisible()) return;
+    // 导入素材只作为画布输入，不应因视图平移的定位回调重新露出下方命令面板。
+    const isOutpaint = node.type === 'image-gen' && (node.params as unknown as StyleTransferParams).mode === 'outpaint';
+    if (flowState.isAssetNode(node) || node.type === 'text-split' || isOutpaint) {
+      this.el?.classList.remove('show', 'pos-above', 'textgen', 'reverse');
+      return;
+    }
+    this._position(node);
+  }
+
   private _position(node: FlowNode): void {
     if (!this.el) return;
     const wrap = canvasView.wrap;
@@ -866,6 +1393,13 @@ class CmdPanel {
     const wr = wrap.getBoundingClientRect();
     const { x: cx0, y: topY } = canvasView.worldToWrap(node.x + CARD_W / 2, node.y);
     const botY = canvasView.worldToWrap(0, node.y + (node.h ?? cardView.cardHeight(node))).y;
+
+    const leftX = canvasView.worldToWrap(node.x, node.y).x;
+    const rightX = canvasView.worldToWrap(node.x + (node.w ?? CARD_W), node.y).x;
+    if (rightX < 0 || leftX > wr.width || botY < 0 || topY > wr.height) {
+      this.el.classList.remove('show', 'pos-above');
+      return;
+    }
 
     const cpH = this.el.offsetHeight || 240;
     const roomBelow = wr.height - botY;

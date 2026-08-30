@@ -12,6 +12,11 @@ import { outpaintPanel } from './outpaint-panel';
 import { floatingPanels } from './floating-panels';
 import { flowHistory } from '../state/history';
 import { imageEditor } from './image-editor/image-editor';
+import { maskEditor } from './image-editor/mask-editor';
+import { annotationEditor } from './image-editor/annotation-editor';
+import { angleEditor } from './image-editor/angle-editor';
+import { getImageEditCapabilities } from '../nodes/model-config';
+import { canOpenDirectorForNode, openDirectorForNode } from './director-bridge';
 
 class ActionBar {
   private el: HTMLElement | null = null;
@@ -20,27 +25,14 @@ class ActionBar {
     this.el = document.getElementById('action-bar');
     if (!this.el) return;
 
-    // 「继续创作」是图片优先体验的主入口。动态插入可避免把一次性的
-    // 交互实现散落到静态页面结构中，也让旧页面壳保持兼容。
-    if (!this.el.querySelector('[data-action="continue"]')) {
-      this.el.insertAdjacentHTML('afterbegin', `
-        <button class="act-btn act-continue" data-action="continue" title="以这张图为参考开始下一步">
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg>
-          继续创作
-        </button>
-        <div class="act-sep act-continue-sep"></div>`);
-    }
-    if (!this.el.querySelector('[data-action="video"]')) {
-      this.el.insertAdjacentHTML('afterbegin', `<button class="act-btn" data-action="video" title="基于当前图片生成视频">生成视频</button>`);
-    }
-    if (!this.el.querySelector('[data-action="crop"]')) {
-      const more = this.el.querySelector('.act-more-wrap');
-      more?.insertAdjacentHTML('beforebegin', `
-        <button class="act-btn act-image-edit" data-action="crop" title="裁剪图片">裁剪</button>
-        <button class="act-btn act-image-edit" data-action="split" title="按网格切分图片">切图</button>
-        <button class="act-btn act-image-edit" data-action="aspect-lock" title="切换图片节点尺寸锁定">锁定比例</button>
-        <div class="act-sep act-image-edit-sep"></div>`);
-    }
+    // 常用动作保持在卡片上方；低频高级能力仍可从右键菜单进入，避免工具条失控膨胀。
+    this.el.innerHTML = `
+      <button class="act-btn" data-action="expand" title="扩展画布"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M8 3H5a2 2 0 0 0-2 2v3M16 3h3a2 2 0 0 1 2 2v3M8 21H5a2 2 0 0 1-2-2v-3M16 21h3a2 2 0 0 1 2-2v-3"/></svg>扩图</button>
+      <button class="act-btn" data-action="continue" title="以这张图为参考开始下一步"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg>继续创作</button>
+      <button class="act-btn act-image-edit" data-action="mask-edit" title="局部修改">局部修改</button>
+      <button class="act-btn act-image-edit" data-action="annotation-edit" title="用圈选或箭头说明修改位置">标注修改</button>
+      <button class="act-btn" data-action="video" title="基于当前图片生成视频">生成视频</button>
+      <button class="act-btn act-image-edit" data-action="split" title="按网格切分图片">拆分</button>`;
 
     this.el.querySelectorAll('.act-btn').forEach(btn => {
       (btn as HTMLElement).addEventListener('click', (e: MouseEvent) => {
@@ -48,8 +40,8 @@ class ActionBar {
         this._handleAction(action);
       });
     });
-
     flowState.subscribe(() => this.sync());
+    canvasView.onViewChange(() => this.reposition());
   }
 
   private _handleAction(action: string): void {
@@ -68,10 +60,7 @@ class ActionBar {
       return;
     }
     if (action === 'expand') {
-      const p = node.params as unknown as StyleTransferParams;
-      // 扩图成为画布中的一个可见步骤：图片 → 扩图节点 → 结果。配置会保留在节点内，可随时复跑。
-      if (p.mode === 'outpaint') void outpaintPanel.open(node.id);
-      else void createOutpaintStep(node);
+      void outpaintPanel.open(node.id);
       return;
     }
     if (action === 'continue') {
@@ -84,15 +73,15 @@ class ActionBar {
     }
     if (action === 'crop') { void imageEditor.openCrop(node.id); return; }
     if (action === 'split') { void imageEditor.openSplit(node.id); return; }
+    if (action === 'mask-edit') { void maskEditor.open(node.id); return; }
+    if (action === 'annotation-edit') { void annotationEditor.open(node.id); return; }
+    if (action === 'angle') { void angleEditor.open(node.id); return; }
+    if (action === 'director') { void openDirectorForNode(node.id); return; }
     if (action === 'aspect-lock') {
       flowHistory.record();
       flowState.updateNode(node.id, { imageAspectLocked: !(node.imageAspectLocked ?? true) });
       showToast((node.imageAspectLocked ?? true) ? '已锁定图片比例' : '已启用自由缩放');
       return;
-    }
-    if (action === 'more') {
-      const menu = document.getElementById('act-more-menu');
-      if (menu) menu.hidden = !menu.hidden;
     }
   }
 
@@ -114,39 +103,62 @@ class ActionBar {
     const expand = this.el.querySelector('[data-action="expand"]') as HTMLElement | null;
     const continueButton = this.el.querySelector('[data-action="continue"]') as HTMLElement | null;
     const videoButton = this.el.querySelector('[data-action="video"]') as HTMLElement | null;
-    const isAsset = flowState.isAssetNode(node);
     const hasImage = node.type === 'image-gen' && (Boolean(node.imageUrl) || flowState.getReferenceImages(node.id).length > 0);
-    this.el.querySelectorAll('.act-image-edit, .act-image-edit-sep').forEach(button => {
-      (button as HTMLElement).classList.toggle('act-hidden', !hasImage);
-    });
-    const lockButton = this.el.querySelector('[data-action="aspect-lock"]') as HTMLButtonElement | null;
-    if (lockButton) {
-      const locked = node.imageAspectLocked ?? true;
-      lockButton.textContent = locked ? '锁定比例' : '自由缩放';
-      lockButton.title = locked ? '当前锁定比例；点击允许自由缩放' : '当前自由缩放；点击锁定比例';
-    }
+    this.el.querySelectorAll('.act-image-edit').forEach(button => (button as HTMLElement).classList.toggle('act-hidden', !hasImage));
+    // 4.1-B 能力门控：模型不支持 mask / 图片参考时隐藏「局部修改 / 多角度」入口（4.0 §3.4）。
+    const model = String((node.params as unknown as StyleTransferParams).model || flowState.getModelDefault('drawing') || '');
+    const editCaps = getImageEditCapabilities(model);
+    const maskBtn = this.el.querySelector('[data-action="mask-edit"]') as HTMLElement | null;
+    if (maskBtn) maskBtn.classList.toggle('act-hidden', !hasImage || !editCaps.mask);
+    const annotationBtn = this.el.querySelector('[data-action="annotation-edit"]') as HTMLElement | null;
+    if (annotationBtn) annotationBtn.classList.toggle('act-hidden', !hasImage || !editCaps.imageReference || (node.params as unknown as StyleTransferParams).mode === 'outpaint');
     // 继续创作守卫与 createContinueStep / 右键菜单共用同一判定，避免三处条件分叉。
     continueButton?.classList.toggle('act-hidden', !canContinueFrom(node));
     videoButton?.classList.toggle('act-hidden', !canContinueFrom(node));
     // 导入素材本身就是最常见的扩图起点。仅隐藏尚未实现的「更多」动作，
     // 不能把「扩图」一并藏掉，否则用户必须先创建无意义的继续创作中间节点。
     (expand as HTMLElement | null)?.classList.toggle('act-hidden', !canContinueFrom(node));
-    this.el.querySelectorAll('[data-action="more"]').forEach(button => {
-      (button as HTMLElement).classList.toggle('act-hidden', isAsset);
-    });
-    const moreMenu = document.getElementById('act-more-menu');
-    if (moreMenu && isAsset) moreMenu.hidden = true;
     const isOutpaint = (node.params as unknown as StyleTransferParams).mode === 'outpaint';
     if (expand) {
       expand.lastChild!.textContent = isOutpaint ? ' 调整扩图' : ' 扩图';
-      expand.title = isOutpaint ? '调整扩图画布' : '新建扩图步骤';
+      expand.title = isOutpaint ? '调整扩图画布' : '扩展画布';
     }
 
+    // 节点类型门控可能把全部按钮隐藏；这时不能只留下操作条外壳。
+    const isVisibleAction = (element: Element | null): element is HTMLElement =>
+      element instanceof HTMLElement
+      && element.classList.contains('act-btn')
+      && !element.classList.contains('act-hidden');
+    const hasVisibleAction = Array.from(this.el.querySelectorAll('.act-btn')).some(button => isVisibleAction(button));
+    if (!hasVisibleAction) {
+      this.el.classList.remove('show', 'pos-below');
+      return;
+    }
+
+    this._position(node);
+  }
+
+  /** 画布平移/缩放时只更新坐标，不重复刷新动作可用性或面板内容。 */
+  reposition(): void {
+    const node = selection.single();
+    if (!node || !floatingPanels.isVisible()) return;
+    this._position(node);
+  }
+
+  private _position(node: FlowNode): void {
+    if (!this.el) return;
     const wrap = canvasView.wrap;
     if (!wrap) return;
     const wr = wrap.getBoundingClientRect();
     const { x: cx0, y: topY } = canvasView.worldToWrap(node.x + CARD_W / 2, node.y);
     const botY = canvasView.worldToWrap(0, node.y + (node.h ?? cardView.cardHeight(node))).y;
+
+    const leftX = canvasView.worldToWrap(node.x, node.y).x;
+    const rightX = canvasView.worldToWrap(node.x + (node.w ?? CARD_W), node.y).x;
+    if (rightX < 0 || leftX > wr.width || botY < 0 || topY > wr.height) {
+      this.el.classList.remove('show', 'pos-below');
+      return;
+    }
 
     // 与指令面板同侧翻转：面板在上 → 操作条在下
     const cpH = (document.getElementById('cmd-panel') as HTMLElement)?.offsetHeight || 240;
@@ -279,6 +291,19 @@ export async function createVideoStep(source: FlowNode): Promise<void> {
   flowState.addEdge(source.id, node.id, { suppressStale: true });
   selection.select(node.id);
   showToast('已创建视频步骤：输入动态描述后生成');
+  cmdPanel.focusInput();
+}
+
+/** 4.2-B：从图片/文本建立音频步骤：只建立 reference 连线，不把图片复制或塞入节点 JSON。 */
+export async function createAudioStep(source: FlowNode): Promise<void> {
+  flowHistory.record();
+  const sourceHeight = cardView.cardHeight(source);
+  const node = flowState.addNode('audio-gen', source.x + CARD_W + 48, source.y + Math.max(0, (sourceHeight - CARD_W / (16 / 9)) / 2), {
+    title: '音频生成',
+  });
+  flowState.addEdge(source.id, node.id, { suppressStale: true });
+  selection.select(node.id);
+  showToast('已创建音频步骤：输入音乐/音效描述后生成');
   cmdPanel.focusInput();
 }
 

@@ -62,25 +62,3 @@
   --shadow-bar: 0 8px 28px rgba(0,0,0,.45), 0 2px 8px rgba(0,0,0,.3);
 }
 
-/* 4.3-C：所有主题仅覆写语义 token，画布/节点/连线/浮层不散落单独色值。 */
-[data-theme="ocean"] {
-  --bg-app:#F3F8F8; --bg-panel:#FFFFFF; --bg-hover:#E6F0F1; --bg-active:#D7E6E8; --bg-float:#FFFFFF;
-  --border:#D6E2E4; --border-strong:#B8CED1; --border-soft:#E8F1F2; --text-1:#294148; --text-2:#5F7880; --text-3:#8AA0A5;
-  --accent:#3D7F87; --accent-dim:rgba(61,127,135,.15); --warm:#B87952; --warm-dim:rgba(184,121,82,.14);
-  --st-idle:#B7C6C9; --st-run:#3D7F87; --st-done:#428D74; --st-stale:#C78A42; --st-fail:#C86666; --canvas-dot:#D6E4E5; --link:#B6CDCF;
-  --shadow-node:0 1px 3px rgba(31,72,77,.06),0 8px 24px rgba(31,72,77,.08); --shadow-bar:0 4px 14px rgba(31,72,77,.11),0 12px 36px rgba(31,72,77,.10);
-}
-[data-theme="violet"] {
-  --bg-app:#F8F6FB; --bg-panel:#FFFFFF; --bg-hover:#EFEBF6; --bg-active:#E3DCF0; --bg-float:#FFFFFF;
-  --border:#E2DCEC; --border-strong:#CBBFE0; --border-soft:#F0ECF6; --text-1:#413651; --text-2:#756983; --text-3:#9C90AA;
-  --accent:#765DA4; --accent-dim:rgba(118,93,164,.15); --warm:#BE8151; --warm-dim:rgba(190,129,81,.14);
-  --st-idle:#CBC2D3; --st-run:#765DA4; --st-done:#677FBA; --st-stale:#C38A42; --st-fail:#C66C79; --canvas-dot:#E2DBEC; --link:#CFC4DF;
-  --shadow-node:0 1px 3px rgba(65,54,81,.05),0 8px 24px rgba(65,54,81,.08); --shadow-bar:0 4px 14px rgba(65,54,81,.10),0 12px 36px rgba(65,54,81,.10);
-}
-[data-theme="copper"] {
-  --bg-app:#FBF8F3; --bg-panel:#FFFDF9; --bg-hover:#F2EADF; --bg-active:#E8DAC8; --bg-float:#FFFDF9;
-  --border:#E5D7C5; --border-strong:#CFB99E; --border-soft:#F2E9DE; --text-1:#48392D; --text-2:#7B6858; --text-3:#A08C7B;
-  --accent:#8B7355; --accent-dim:rgba(139,115,85,.15); --warm:#A7643E; --warm-dim:rgba(167,100,62,.14);
-  --st-idle:#D0C2B2; --st-run:#8B7355; --st-done:#728D69; --st-stale:#C1843E; --st-fail:#BD6658; --canvas-dot:#E5D8C8; --link:#CDBBA8;
-  --shadow-node:0 1px 3px rgba(72,57,45,.05),0 8px 24px rgba(72,57,45,.07); --shadow-bar:0 4px 14px rgba(72,57,45,.09),0 12px 36px rgba(72,57,45,.10);
-}

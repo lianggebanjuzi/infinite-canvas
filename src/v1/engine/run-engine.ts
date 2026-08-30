@@ -25,7 +25,7 @@ import { flowState } from '../state/flow-state';
 import { dirty } from '../state/dirty';
 import { flowHistory } from '../state/history';
 import { nodeRegistry } from '../nodes/node-registry';
-import { Backend, fetchImageModels, fetchVideoModels } from '../api';
+import { Backend, fetchImageModels, fetchVideoModels, fetchAudioModels } from '../api';
 import { pollTask, PollResult } from './poller';
 import { batchStore } from '../state/batch-store';
 import { batchQueue, readConcurrency, BatchCompleteFn, BatchJobCompleteFn, JobRunOutcome, RunJobFn } from './batch-queue';
@@ -35,7 +35,9 @@ import { linkView } from '../canvas/link-view';
 import { CARD_W, imageCardHeight } from '../canvas/canvas-view';
 import { showToast } from '../ui/toast';
 import { OUTPAINT_PROMPT_PREFIX, composeOutpaintDataUrl, loadOutpaintImage } from './outpaint-util';
-import { pollVideoTask } from './video-poller';
+import { pollVideoTask, VideoPollResult } from './video-poller';
+import { pollAudioTask, AudioPollResult } from './audio-poller';
+import { getVideoModelCapabilities } from '../nodes/model-config';
 
 /** 节点定义执行上下文（供 canRun/buildOptions 使用） */
 const ctx: FlowContext = {
@@ -44,6 +46,7 @@ const ctx: FlowContext = {
   getReferenceImages: id => flowState.getReferenceImages(id),
   getImageModels: fetchImageModels,
   getVideoModels: fetchVideoModels,
+  getAudioModels: fetchAudioModels,
 };
 
 /** 批次执行处理器（run-engine 侧注册；重试时复用同一批 runJob/onComplete，保证与原始批次同源） */
@@ -226,6 +229,56 @@ class RunEngine {
     return result;
   }
 
+  /**
+   * 4.1-B @素材：把节点 params.mentions 中的图片类引用解析为参考图 data URL。
+   * 解析顺序：mention.imageUrl（data:image 直接可用 / 其余原样）→ sourceNodeId 对应节点 imageUrl → originalPath 读原图。
+   * 与现有 refs 去重保序，避免同一张图被连续引用两次。
+   */
+  private async _resolveMentionImages(nodeId: string, existingRefs: string[]): Promise<string[]> {
+    const node = flowState.getNode(nodeId);
+    if (!node) return existingRefs;
+    const p = node.params as unknown as StyleTransferParams;
+    const mentions = Array.isArray(p.mentions) ? p.mentions : [];
+    if (mentions.length === 0) return existingRefs;
+    const result = [...existingRefs];
+    const seen = new Set(existingRefs);
+    for (const m of mentions) {
+      if (m.kind !== 'image') continue;
+      let url = m.imageUrl || '';
+      if (!url && m.sourceNodeId) {
+        const src = flowState.getNode(m.sourceNodeId);
+        if (src?.imageUrl) url = src.imageUrl;
+      }
+      if (!url && m.originalPath) {
+        try {
+          const loaded = await Backend.loadLocalImage(m.originalPath);
+          if (loaded.status === 'success' && loaded.data_url) url = loaded.data_url;
+        } catch {
+          // 原图不可读时跳过该 mention（不阻断整体生成）
+        }
+      }
+      if (url && !seen.has(url)) {
+        seen.add(url);
+        result.push(url);
+      }
+    }
+    return result;
+  }
+
+  /** 4.1-B @素材：文本类 mention 的正文附加到提示词之后（作为显式上下文，不扫描画布）。 */
+  private appendMentionText(nodeId: string, prompt: string): string {
+    const node = flowState.getNode(nodeId);
+    if (!node) return prompt;
+    const p = node.params as unknown as StyleTransferParams;
+    const mentions = Array.isArray(p.mentions) ? p.mentions : [];
+    const extra = mentions
+      .filter(m => m.kind === 'text' && typeof m.text === 'string' && m.text.trim().length > 0)
+      .map(m => (m.text as string).trim())
+      .join('\n');
+    if (!extra) return prompt;
+    return prompt ? `${prompt}\n${extra}` : extra;
+  }
+
   /** 是否存在运行中的节点（撤销/重做与关闭保护仍在运行期禁用）。 */
   isBusy(): boolean {
     return this.activeRuns.size > 0;
@@ -282,6 +335,8 @@ class RunEngine {
         await this.runTextGen(nodeId, active);
       } else if (node.type === 'video-gen') {
         await this.runVideoGen(nodeId, active);
+      } else if (node.type === 'audio-gen') {
+        await this.runAudioGen(nodeId, active);
       } else {
         // 旧 modelType='text' 反推分支已删除（Q7）：image-gen 一律按 draw 走 runBatch
         await this.runBatch(nodeId, active);
@@ -304,18 +359,38 @@ class RunEngine {
     const refs = await this._resolveGenerationReferenceImages(nodeId);
     options.referenceImages = refs;
     const prompt = this.composeImagePrompt(nodeId);
+
+    // 4.2-C：视频节点连了音频输入但当前模型不支持 → 运行前明确提示，不静默丢弃。
+    const caps = getVideoModelCapabilities((node.params as unknown as VideoGenParams).model || '');
+    const audioUpstream = flowState.getUpstreams(nodeId).find(u => u.type === 'audio-gen');
+    if (audioUpstream && !caps.supportsAudio) {
+      flowState.updateNode(nodeId, {
+        status: 'fail',
+        error: '当前视频模型不支持音频输入（已忽略音轨）。可切换支持音频的视频模型，或断开音频连线后重试。',
+      });
+      showToast('当前视频模型不支持音频输入；请切换模型或断开音频连线', false);
+      return;
+    }
+
     flowState.updateNode(nodeId, { status: 'queued', error: null });
+    flowState.updateNodeParams(nodeId, { videoTask: { state: 'queued' } });
     linkView.setNodeFlowing(nodeId, true);
     try {
-      flowState.updateNode(nodeId, { status: 'run' });
+      flowState.updateNode(nodeId, { status: 'submitting' });
+      flowState.updateNodeParams(nodeId, { videoTask: { state: 'submitting' } });
       const created = await withTimeout(Backend.generateVideo(prompt, options), TASK_CREATE_TIMEOUT_MS, '视频任务创建超时');
       if (!this._isActive(active)) return;
       if (!created?.task_id) throw new Error('视频任务创建失败，未返回 task_id');
+      // accepted：拿到本地任务 id；后续只查询原任务，禁止换 Key 重投（4.0 §3.2）
+      flowState.updateNodeParams(nodeId, { videoTask: { state: 'accepted', localTaskId: created.task_id } });
+      flowState.updateNode(nodeId, { status: 'run' });
       const result = await pollVideoTask(created.task_id, (status, remoteTaskId) => {
         if (!this._isActive(active)) return;
         const current = flowState.getNode(nodeId);
         if (!current) return;
         const existing = current.video || null;
+        const task = this._normalizeMediaState(status, created.task_id, remoteTaskId);
+        flowState.updateNodeParams(nodeId, { videoTask: task });
         flowState.updateNode(nodeId, {
           status: status === 'queued' ? 'queued' : 'run',
           video: existing ? { ...existing, remoteTaskId: remoteTaskId || existing.remoteTaskId } : undefined,
@@ -325,10 +400,28 @@ class RunEngine {
       if (!this._isActive(active)) return;
       if (!result.success || !result.video) {
         const suffix = result.remoteTaskId ? `（远端任务：${result.remoteTaskId}）` : '';
+        const errorText = `${result.error || '视频生成失败'}${suffix}`;
+        flowState.updateNodeParams(nodeId, {
+          videoTask: {
+            state: result.uncertain ? 'uncertain' : 'failed',
+            localTaskId: created.task_id,
+            remoteTaskId: result.remoteTaskId,
+            error: errorText,
+          },
+        });
         flowState.updateNode(nodeId, {
           status: result.uncertain ? 'stale' : 'fail',
-          error: `${result.error || '视频生成失败'}${suffix}`,
+          error: errorText,
           video: node.video ? { ...node.video, remoteTaskId: result.remoteTaskId || node.video.remoteTaskId } : null,
+        });
+        void historyPersist.appendTrace({
+          kind: 'video', nodeId: node.id, prompt, model: (node.params as unknown as VideoGenParams).model || '',
+          aspectRatio: (node.params as unknown as VideoGenParams).aspectRatio || '',
+          resolution: (node.params as unknown as VideoGenParams).resolution || '',
+          seconds: (node.params as unknown as VideoGenParams).seconds || 0,
+          references: refs.map(ref => historyPersist.hashRef(ref)),
+          createdAt: Date.now(), remoteTaskId: result.remoteTaskId,
+          taskState: result.uncertain ? 'uncertain' : 'failed',
         });
         showToast(result.uncertain ? '视频已提交，稍后可重试查询同一任务' : `视频生成失败：${result.error || '未知错误'}`, false);
         return;
@@ -340,22 +433,283 @@ class RunEngine {
         refImageHashes: refs.map(ref => historyPersist.hashRef(ref)), refImageUrls: refs, seed: null,
         createdAt: Date.now(), parentId: node.parentId ?? node.id, outputType: 'video',
       };
+      flowState.updateNodeParams(nodeId, {
+        videoTask: {
+          state: 'succeeded', localTaskId: created.task_id,
+          remoteTaskId: video.remoteTaskId,
+        },
+      });
       flowState.updateNode(nodeId, { status: 'done', error: null, video, trace, lastRunAt: Date.now() });
       void historyPersist.appendTrace({
         kind: 'video', nodeId: node.id, prompt, model: p.model || '', aspectRatio: p.aspectRatio || '',
         resolution: p.resolution || '', seconds: p.seconds || 0, references: refs.map(ref => historyPersist.hashRef(ref)),
         createdAt: trace.createdAt, remoteTaskId: video.remoteTaskId, originalPath: video.originalPath,
-        videoUrl: video.url, duration: video.duration,
+        videoUrl: video.url, duration: video.duration, taskState: 'succeeded',
+      });
+      historyDrawer.addVideo({
+        nodeId: node.id, prompt, model: p.model || '', seconds: p.seconds || 0,
+        originalPath: video.originalPath, mediaUrl: video.url, duration: video.duration,
+        remoteTaskId: video.remoteTaskId, taskState: 'succeeded', timestamp: trace.createdAt,
       });
       dirty.markUpstreamChanged(nodeId);
       showToast('视频已生成并保存到本地');
     } catch (error) {
       if (this._isActive(active)) {
-        flowState.updateNode(nodeId, { status: 'fail', error: (error as Error).message || '视频生成失败' });
-        showToast(`视频生成失败：${(error as Error).message || '未知错误'}`, false);
+        const message = (error as Error).message || '视频生成失败';
+        flowState.updateNodeParams(nodeId, { videoTask: { state: 'failed', error: message } });
+        flowState.updateNode(nodeId, { status: 'fail', error: message });
+        showToast(`视频生成失败：${message}`, false);
       }
     } finally {
       linkView.setNodeFlowing(nodeId, false);
+    }
+  }
+
+  /** 音频生成（4.2-B）：复用媒体状态机（与视频同构），accepted 后只查询原任务，不换 Key 重投。 */
+  private async runAudioGen(nodeId: string, active: ActiveRun): Promise<void> {
+    const node = flowState.getNode(nodeId);
+    if (!node) return;
+    const def = nodeRegistry.get('audio-gen');
+    const options = def.buildOptions(node, ctx);
+    const refs = await this._resolveGenerationReferenceImages(nodeId);
+    options.referenceImages = refs;
+    const prompt = this.composeImagePrompt(nodeId);
+
+    flowState.updateNode(nodeId, { status: 'queued', error: null });
+    flowState.updateNodeParams(nodeId, { audioTask: { state: 'queued' } });
+    linkView.setNodeFlowing(nodeId, true);
+    try {
+      flowState.updateNode(nodeId, { status: 'submitting' });
+      flowState.updateNodeParams(nodeId, { audioTask: { state: 'submitting' } });
+      const created = await withTimeout(Backend.generateAudio(prompt, options), TASK_CREATE_TIMEOUT_MS, '音频任务创建超时');
+      if (!this._isActive(active)) return;
+      if (!created?.task_id) throw new Error('音频任务创建失败，未返回 task_id');
+      flowState.updateNodeParams(nodeId, { audioTask: { state: 'accepted', localTaskId: created.task_id } });
+      flowState.updateNode(nodeId, { status: 'run' });
+      const result = await pollAudioTask(created.task_id, (status, remoteTaskId) => {
+        if (!this._isActive(active)) return;
+        const current = flowState.getNode(nodeId);
+        if (!current) return;
+        const existing = current.audio || null;
+        const task = this._normalizeMediaState(status, created.task_id, remoteTaskId);
+        flowState.updateNodeParams(nodeId, { audioTask: task });
+        flowState.updateNode(nodeId, {
+          status: status === 'queued' ? 'queued' : 'run',
+          audio: existing ? { ...existing, remoteTaskId: remoteTaskId || existing.remoteTaskId } : undefined,
+          error: status === 'recovering' ? '查询恢复中：远端任务仍会保留' : null,
+        });
+      });
+      if (!this._isActive(active)) return;
+      if (!result.success || !result.audio) {
+        const suffix = result.remoteTaskId ? `（远端任务：${result.remoteTaskId}）` : '';
+        const errorText = `${result.error || '音频生成失败'}${suffix}`;
+        flowState.updateNodeParams(nodeId, {
+          audioTask: {
+            state: result.uncertain ? 'uncertain' : 'failed',
+            localTaskId: created.task_id,
+            remoteTaskId: result.remoteTaskId,
+            error: errorText,
+          },
+        });
+        flowState.updateNode(nodeId, {
+          status: result.uncertain ? 'stale' : 'fail',
+          error: errorText,
+          audio: node.audio ? { ...node.audio, remoteTaskId: result.remoteTaskId || node.audio.remoteTaskId } : null,
+        });
+        void historyPersist.appendTrace({
+          kind: 'audio', nodeId: node.id, prompt, model: (node.params as unknown as AudioGenParams).model || '',
+          seconds: typeof (node.params as unknown as AudioGenParams).seconds === 'number' ? (node.params as unknown as AudioGenParams).seconds : undefined,
+          format: typeof (node.params as unknown as AudioGenParams).format === 'string' ? (node.params as unknown as AudioGenParams).format : undefined,
+          references: refs.map(ref => historyPersist.hashRef(ref)),
+          createdAt: Date.now(), remoteTaskId: result.remoteTaskId,
+          taskState: result.uncertain ? 'uncertain' : 'failed',
+        });
+        showToast(result.uncertain ? '音频已提交，稍后可重试查询同一任务' : `音频生成失败：${result.error || '未知错误'}`, false);
+        return;
+      }
+      const p = node.params as unknown as AudioGenParams;
+      const audio = { ...result.audio, remoteTaskId: result.remoteTaskId || result.audio.remoteTaskId };
+      const trace: GenerationTrace = {
+        prompt, model: p.model || '', aspectRatio: '', resolution: '', count: 1,
+        refImageHashes: refs.map(ref => historyPersist.hashRef(ref)), refImageUrls: refs, seed: null,
+        createdAt: Date.now(), parentId: node.parentId ?? node.id, outputType: 'audio',
+      };
+      flowState.updateNodeParams(nodeId, {
+        audioTask: {
+          state: 'succeeded', localTaskId: created.task_id,
+          remoteTaskId: audio.remoteTaskId,
+        },
+      });
+      flowState.updateNode(nodeId, { status: 'done', error: null, audio, trace, lastRunAt: Date.now() });
+      void historyPersist.appendTrace({
+        kind: 'audio', nodeId: node.id, prompt, model: p.model || '',
+        seconds: typeof p.seconds === 'number' ? p.seconds : undefined,
+        format: typeof p.format === 'string' ? p.format : undefined,
+        references: refs.map(ref => historyPersist.hashRef(ref)),
+        createdAt: trace.createdAt, remoteTaskId: audio.remoteTaskId, originalPath: audio.originalPath,
+        audioUrl: audio.url, duration: audio.duration, mimeType: audio.mimeType, taskState: 'succeeded',
+      });
+      historyDrawer.addAudio({
+        nodeId: node.id, prompt, model: p.model || '', seconds: typeof p.seconds === 'number' ? p.seconds : undefined,
+        format: typeof p.format === 'string' ? p.format : undefined,
+        originalPath: audio.originalPath, mediaUrl: audio.url, duration: audio.duration,
+        mimeType: audio.mimeType, remoteTaskId: audio.remoteTaskId, taskState: 'succeeded', timestamp: trace.createdAt,
+      });
+      dirty.markUpstreamChanged(nodeId);
+      showToast('音频已生成并保存到本地');
+    } catch (error) {
+      if (this._isActive(active)) {
+        const message = (error as Error).message || '音频生成失败';
+        flowState.updateNodeParams(nodeId, { audioTask: { state: 'failed', error: message } });
+        flowState.updateNode(nodeId, { status: 'fail', error: message });
+        showToast(`音频生成失败：${message}`, false);
+      }
+    } finally {
+      linkView.setNodeFlowing(nodeId, false);
+    }
+  }
+
+  /** poller 中间态字符串 → MediaTask.state 规范化（accepted 后只有原任务查询语义）。 */
+  private _normalizeMediaState(status: string, localTaskId: string, remoteTaskId?: string): MediaTask {
+    let state: MediaTask['state'] = 'accepted';
+    if (status === 'queued' || status === 'pending') state = 'queued';
+    else if (status === 'processing' || status === 'in_progress') state = 'processing';
+    else if (status === 'pending_confirmation') state = 'processing';
+    else if (status === 'recovering') state = 'accepted';
+    else if (status === 'done') state = 'succeeded';
+    else if (status === 'failed' || status === 'error') state = 'failed';
+    return { state, localTaskId, ...(remoteTaskId ? { remoteTaskId } : {}) };
+  }
+
+  /** 是否存在运行中/待恢复的媒体任务（视频/音频；含跨会话可恢复的 params.videoTask/audioTask）。 */
+  mediaTasksInProgress(): { nodeId: string; kind: 'video' | 'audio'; remoteTaskId?: string }[] {
+    const result: { nodeId: string; kind: 'video' | 'audio'; remoteTaskId?: string }[] = [];
+    flowState.nodes.forEach(node => {
+      if (this.activeRuns.has(node.id) && (node.type === 'video-gen' || node.type === 'audio-gen')) {
+        result.push({ nodeId: node.id, kind: node.type === 'video-gen' ? 'video' : 'audio' });
+        return;
+      }
+      if (node.type === 'video-gen') {
+        const task = (node.params as Record<string, unknown> | undefined)?.videoTask as MediaTask | undefined;
+        if (task && !this.isMediaTaskTerminal(task.state)) {
+          result.push({ nodeId: node.id, kind: 'video', remoteTaskId: task.remoteTaskId });
+        }
+      } else if (node.type === 'audio-gen') {
+        const task = (node.params as Record<string, unknown> | undefined)?.audioTask as MediaTask | undefined;
+        if (task && !this.isMediaTaskTerminal(task.state)) {
+          result.push({ nodeId: node.id, kind: 'audio', remoteTaskId: task.remoteTaskId });
+        }
+      }
+    });
+    return result;
+  }
+
+  private isMediaTaskTerminal(state: MediaTask['state']): boolean {
+    return state === 'succeeded' || state === 'failed' || state === 'cancelled' || state === 'uncertain';
+  }
+
+  /** 项目打开后恢复进行中的视频/音频任务：accepted/processing 只查询原任务，不重投（4.0 §3.2）。 */
+  recoverMediaTasks(): void {
+    flowState.nodes.forEach(node => {
+      if (node.type === 'video-gen') {
+        const task = (node.params as Record<string, unknown> | undefined)?.videoTask as MediaTask | undefined;
+        if (task?.localTaskId && !this.isMediaTaskTerminal(task.state) && !this.activeRuns.has(node.id)) {
+          void this.recoverMediaNode(node.id, 'video', task);
+        }
+      } else if (node.type === 'audio-gen') {
+        const task = (node.params as Record<string, unknown> | undefined)?.audioTask as MediaTask | undefined;
+        if (task?.localTaskId && !this.isMediaTaskTerminal(task.state) && !this.activeRuns.has(node.id)) {
+          void this.recoverMediaNode(node.id, 'audio', task);
+        }
+      }
+    });
+  }
+
+  private async recoverMediaNode(nodeId: string, kind: 'video' | 'audio', task: MediaTask): Promise<void> {
+    const active: ActiveRun = { nodeId, cancelled: false, historySuspended: true };
+    this.activeRuns.set(nodeId, active);
+    flowState.updateNode(nodeId, { status: 'run', error: '查询恢复中：不会重新提交远端任务' });
+    try {
+      const result = kind === 'video'
+        ? await pollVideoTask(task.localTaskId!, (status, remoteTaskId) => {
+            if (!this._isActive(active)) return;
+            const current = flowState.getNode(nodeId);
+            if (!current) return;
+            flowState.updateNodeParams(nodeId, { videoTask: this._normalizeMediaState(status, task.localTaskId!, remoteTaskId) });
+            flowState.updateNode(nodeId, { status: status === 'queued' ? 'queued' : 'run', error: status === 'recovering' ? '查询恢复中：远端任务仍会保留' : null });
+          })
+        : await pollAudioTask(task.localTaskId!, (status, remoteTaskId) => {
+            if (!this._isActive(active)) return;
+            const current = flowState.getNode(nodeId);
+            if (!current) return;
+            flowState.updateNodeParams(nodeId, { audioTask: this._normalizeMediaState(status, task.localTaskId!, remoteTaskId) });
+            flowState.updateNode(nodeId, { status: status === 'queued' ? 'queued' : 'run', error: status === 'recovering' ? '查询恢复中：远端任务仍会保留' : null });
+          });
+      if (!this._isActive(active)) return;
+      const node = flowState.getNode(nodeId);
+      if (!node) return;
+      // 分别窄化轮询结果类型（video/audio 各自返回不同结构）
+      if (kind === 'video') {
+        const vr = result as VideoPollResult;
+        if (!vr.success || !vr.video) {
+          const suffix = vr.remoteTaskId ? `（远端任务：${vr.remoteTaskId}）` : '';
+          const errorText = `${vr.error || '视频生成失败'}${suffix}`;
+          flowState.updateNodeParams(nodeId, {
+            videoTask: { state: vr.uncertain ? 'uncertain' : 'failed', localTaskId: task.localTaskId, remoteTaskId: vr.remoteTaskId, error: errorText },
+          });
+          flowState.updateNode(nodeId, { status: vr.uncertain ? 'stale' : 'fail', error: errorText });
+          return;
+        }
+        const vMedia = { ...vr.video, remoteTaskId: vr.remoteTaskId || vr.video.remoteTaskId };
+        const vTrace: GenerationTrace = {
+          prompt: node.trace?.prompt || ((node.params as Record<string, unknown>).prompt as string) || '',
+          model: node.trace?.model || '', aspectRatio: '', resolution: '', count: 1,
+          refImageHashes: node.trace?.refImageHashes || [], refImageUrls: node.trace?.refImageUrls || [], seed: null,
+          createdAt: node.trace?.createdAt || Date.now(), parentId: node.parentId ?? node.id, outputType: 'video',
+        };
+        flowState.updateNodeParams(nodeId, {
+          videoTask: { state: 'succeeded', localTaskId: task.localTaskId, remoteTaskId: vMedia.remoteTaskId },
+        });
+        flowState.updateNode(nodeId, {
+          status: 'done', error: null, lastRunAt: Date.now(), video: vMedia,
+          trace: node.trace ? { ...node.trace, remoteTaskId: vMedia.remoteTaskId } : vTrace,
+        });
+        showToast('视频任务已恢复');
+        return;
+      }
+      const ar = result as AudioPollResult;
+      if (!ar.success || !ar.audio) {
+        const suffix = ar.remoteTaskId ? `（远端任务：${ar.remoteTaskId}）` : '';
+        const errorText = `${ar.error || '音频生成失败'}${suffix}`;
+        flowState.updateNodeParams(nodeId, {
+          audioTask: { state: ar.uncertain ? 'uncertain' : 'failed', localTaskId: task.localTaskId, remoteTaskId: ar.remoteTaskId, error: errorText },
+        });
+        flowState.updateNode(nodeId, { status: ar.uncertain ? 'stale' : 'fail', error: errorText });
+        return;
+      }
+      const aMedia = { ...ar.audio, remoteTaskId: ar.remoteTaskId || ar.audio.remoteTaskId };
+      const aTrace: GenerationTrace = {
+        prompt: node.trace?.prompt || ((node.params as Record<string, unknown>).prompt as string) || '',
+        model: node.trace?.model || '', aspectRatio: '', resolution: '', count: 1,
+        refImageHashes: node.trace?.refImageHashes || [], refImageUrls: node.trace?.refImageUrls || [], seed: null,
+        createdAt: node.trace?.createdAt || Date.now(), parentId: node.parentId ?? node.id, outputType: 'audio',
+      };
+      flowState.updateNodeParams(nodeId, {
+        audioTask: { state: 'succeeded', localTaskId: task.localTaskId, remoteTaskId: aMedia.remoteTaskId },
+      });
+      flowState.updateNode(nodeId, {
+        status: 'done', error: null, lastRunAt: Date.now(), audio: aMedia,
+        trace: node.trace ? { ...node.trace, remoteTaskId: aMedia.remoteTaskId } : aTrace,
+      });
+      showToast('音频任务已恢复');
+    } catch (e) {
+      if (this._isActive(active)) {
+        const message = (e as Error).message || '任务恢复失败';
+        flowState.updateNode(nodeId, { status: 'fail', error: message });
+      }
+    } finally {
+      if (active.historySuspended) { flowHistory.resume(); active.historySuspended = false; }
+      if (this.activeRuns.get(nodeId) === active) this.activeRuns.delete(nodeId);
     }
   }
 
@@ -383,7 +737,8 @@ class RunEngine {
 
   /**
    * 扩图执行公共链路：画布内持久化扩图步骤与调节弹层共用。
-   * 前端先提供白底合成图，再由扩图模型补全；结果作为该步骤的子节点放到右侧。
+   * 前端先提供白底合成图，再由扩图模型补全。新版图片操作条会将结果就地回写当前节点；
+   * 旧的持久化扩图步骤则保留子节点产出，以兼容已有画布。
    */
   async runOutpaint(nodeId: string, opts: OutpaintOptions): Promise<void> {
     const node = flowState.getNode(nodeId);
@@ -400,8 +755,8 @@ class RunEngine {
     const isWorkflowNode = (node.params as unknown as StyleTransferParams).mode === 'outpaint';
     const createdCardIds = new Set<string>();
     try {
-      // 扩图步骤重跑时也遵守画布的“顶掉旧纯结果”规则，保留被用户继续编排的结果并标记待重跑。
-      flowState.removeChildren(nodeId);
+      // 旧扩图步骤重跑时清理自己的纯结果；就地扩图绝不能删除当前图片已有的下游编排。
+      if (!opts.replaceNode) flowState.removeChildren(nodeId);
       // 执行中：源节点 run + 上游连线流光（结束后恢复原状态）
       flowState.updateNode(nodeId, { status: 'run', error: null });
       linkView.setNodeFlowing(nodeId, true);
@@ -441,32 +796,36 @@ class RunEngine {
         ? { path: result.originalPath, url: result.originalUrl }
         : null;
 
-      // 产出节点：x 固定在源节点右侧，y 向下避让同列已有卡片（与旧反推产出布局口径一致）
-      const x = node.x + CARD_W + RESULT_GAP_X;
-      let y = node.y;
-      flowState.nodes.forEach(n => {
-        if (n.id === node.id) return;
-        if (Math.abs(n.x - x) >= CARD_W / 2) return; // 只统计同列（x 相近）卡片
-        const nH = imageCardHeight(n.ratio);
-        y = Math.max(y, n.y + nH + RESULT_GAP_Y);
-      });
-      const layout: ResultLayout = { x, cursorY: y };
       // R3：扩图产出（count=1 的批次）也生成 batchId，历史按批次视图下作为单张批次卡展示
       const batchId = `${nodeId}_${Date.now()}`;
-      const card = await this.createResultCard(nodeId, displayUrl, layout, {
-        model: opts.model,
-        aspectRatio: opts.aspectRatio || '1:1',
-        resolution: opts.resolution || '4k',
-        mode: 'draw',
-      }, { outputType: 'outpaint', refs: refs, batchId }, origin, opts.prompt, result.width, result.height, active);
-      if (!this._isActive(active)) return;
-
-      // 新产出节点从 stale 传播豁免；源节点旧下游标 stale（与引擎其它成功链路口径一致）
-      createdCardIds.add(card.id);
-      dirty.markUpstreamChangedExcept(nodeId, createdCardIds);
+      if (opts.replaceNode) {
+        await this._writeBackToSelf(nodeId, displayUrl, origin, batchId, 'outpaint', opts.prompt, result.width, result.height, active);
+        if (!this._isActive(active)) return;
+        dirty.markUpstreamChanged(nodeId);
+      } else {
+        // 旧扩图步骤仍保留子节点产出，确保已保存的画布不改变其编排语义。
+        const x = node.x + CARD_W + RESULT_GAP_X;
+        let y = node.y;
+        flowState.nodes.forEach(n => {
+          if (n.id === node.id) return;
+          if (Math.abs(n.x - x) >= CARD_W / 2) return;
+          const nH = imageCardHeight(n.ratio);
+          y = Math.max(y, n.y + nH + RESULT_GAP_Y);
+        });
+        const layout: ResultLayout = { x, cursorY: y };
+        const card = await this.createResultCard(nodeId, displayUrl, layout, {
+          model: opts.model,
+          aspectRatio: opts.aspectRatio || '1:1',
+          resolution: opts.resolution || '4k',
+          mode: 'draw',
+        }, { outputType: 'outpaint', refs: refs, batchId }, origin, opts.prompt, result.width, result.height, active);
+        if (!this._isActive(active)) return;
+        createdCardIds.add(card.id);
+        dirty.markUpstreamChangedExcept(nodeId, createdCardIds);
+      }
 
       // 画布扩图步骤本身收敛为 done；保留旧的一次性入口则仍恢复其源图节点原状态。
-      flowState.updateNode(nodeId, { status: isWorkflowNode ? 'done' : prevStatus, error: null, lastRunAt: Date.now() });
+      flowState.updateNode(nodeId, { status: isWorkflowNode || opts.replaceNode ? 'done' : prevStatus, error: null, lastRunAt: Date.now() });
       showToast('扩图完成');
     } catch (e) {
       if (!this._isActive(active)) return;
@@ -585,7 +944,9 @@ class RunEngine {
     // prompt 合成唯一入口：上游文本（连线序拼接）+ 自身 prompt（非空追加在后）（W3-2/Q5）
     const splitPrompts = flowState.getUpstreamTextSplitPrompts(nodeId);
     const usesTextSplit = splitPrompts.length > 0;
-    const prompt = usesTextSplit ? splitPrompts[0] : this.composeImagePrompt(nodeId);
+    // 4.1-B @素材：文本类 mention 正文附加到提示词之后（token 的 @label 文本已在 params.prompt 中）
+    const basePrompt = usesTextSplit ? splitPrompts[0] : this.composeImagePrompt(nodeId);
+    const prompt = this.appendMentionText(nodeId, basePrompt);
     const total = usesTextSplit ? splitPrompts.length : Math.min(COUNT_MAX, Math.max(COUNT_MIN, Math.round(Number(params.count) || COUNT_MIN)));
     // R3：批次号 = 生成节点 id + 批次启动时刻（同批全部成功图共用；同节点重跑 → 时间戳不同 → 可区分）
     const batchId = `${nodeId}_${Date.now()}`;
@@ -597,8 +958,10 @@ class RunEngine {
     // 缩略图，但提交给模型时优先读取上游原图，避免连续图生图损失色彩/细节。
     //     isTxt2Img 仅用于 outputType 标记（'txt2img'/'img2img'）与 trace 参考图透传，不再决定回写/清空分支（Q1）。
     const refs = await this._resolveGenerationReferenceImages(nodeId);
-    options.referenceImages = refs;
-    const isTxt2Img = refs.length === 0;
+    // 4.1-B @素材：图片类 mention 并入参考图（显式 @引用即上下文，不扫描整张画布）
+    const allRefs = await this._resolveMentionImages(nodeId, refs);
+    options.referenceImages = allRefs;
+    const isTxt2Img = allRefs.length === 0;
     if (!usesTextSplit && node.generatedImages?.length) {
       // 退出拆分模式后恢复普通图片节点的单图/批次行为。
       flowState.updateNode(nodeId, { generatedImages: [], activeGeneratedIndex: 0 });
@@ -632,11 +995,11 @@ class RunEngine {
       concurrency: readConcurrency(total),
       prompts,
     });
-    const outputType: Exclude<GenerationTrace['outputType'], 'video'> = isTxt2Img ? 'txt2img' : 'img2img';
+    const outputType: Exclude<GenerationTrace['outputType'], 'video' | 'audio'> = isTxt2Img ? 'txt2img' : 'img2img';
     const runJob = this._makeRunJob(options, () => { batchFlags.sawNotSavedToDisk = true; });
     // count=1 单图路径保持「第 1 张写回自身」；count>1 与文本拆分写回 generatedImages；
     const isSingleImage = !usesTextSplit && total === 1;
-    const onJobComplete = this._makeBatchJobComplete(nodeId, refs, outputType, isSingleImage, createdCardIds);
+    const onJobComplete = this._makeBatchJobComplete(nodeId, allRefs, outputType, isSingleImage, createdCardIds);
     const onComplete: BatchCompleteFn = async () => { /* 成功结果已逐张写回；终态只由下方汇总收敛。 */ };
     this._batchRunners.set(batchId, { nodeId, runJob, onJobComplete, onComplete });
 
@@ -731,7 +1094,7 @@ class RunEngine {
   private _makeBatchJobComplete(
     nodeId: string,
     refs: string[],
-    outputType: Exclude<GenerationTrace['outputType'], 'video'>,
+    outputType: Exclude<GenerationTrace['outputType'], 'video' | 'audio'>,
     isSingleImage: boolean,
     createdCardIds: Set<string>,
   ): BatchJobCompleteFn {
@@ -756,7 +1119,7 @@ class RunEngine {
     batch: GenerationBatch,
     completedJob: GenerationJob,
     refs: string[],
-    outputType: Exclude<GenerationTrace['outputType'], 'video'>,
+    outputType: Exclude<GenerationTrace['outputType'], 'video' | 'audio'>,
   ): Promise<void> {
     const node = flowState.getNode(nodeId);
     if (!node || !completedJob.image) return;
@@ -819,7 +1182,7 @@ class RunEngine {
     imageUrl: string,
     origin: ImageOrigin | null = null,
     batchId?: string,
-    outputType: Exclude<GenerationTrace['outputType'], 'video'> = 'txt2img',
+    outputType: Exclude<GenerationTrace['outputType'], 'video' | 'audio'> = 'txt2img',
     composedPrompt?: string,
     imageWidth?: number,
     imageHeight?: number,
@@ -888,7 +1251,7 @@ class RunEngine {
    * 创建一张图生图产出节点（image-gen）：x=批次快照的 gen.x+CARD_W+48，y=累计底部游标 cursorY
    * （每建一张 cursorY 递增该卡高+28，从下往上紧密排布，任何比例组合都不重叠）；自动连线（suppressStale）；入历史图库。
    * params 继承上游（prompt/aspectRatio/resolution/count/model/textModel），modelType 强制 'draw'（产出节点不继承反推态）；
-   * paramOverrides 覆盖默认继承值（扩图用：model=自动解析的 banana 模型、aspectRatio=目标比例、resolution='4k'）；
+   * paramOverrides 覆盖默认继承值（扩图兼容路径用：model、aspectRatio、resolution='4k'）；
    * refImages 保持 []（参考图由 getReferenceImages 从上游自动派生，refImages 语义是用户主动挂载，不随产出节点携带）；
    * parentId=genId 标记引擎产出归属（重跑顶掉用）。
    * 原子占用：读取 cursorY 与写回之间无 await 间隙，并发 worker 不会读到同一 y。
@@ -898,7 +1261,7 @@ class RunEngine {
     imageUrl: string,
     layout: ResultLayout,
     paramOverrides: Record<string, unknown> = {},
-    trace: { outputType: Exclude<GenerationTrace['outputType'], 'video'>; refs: string[]; batchId?: string; jobId?: string } = { outputType: 'img2img', refs: [] },
+    trace: { outputType: Exclude<GenerationTrace['outputType'], 'video' | 'audio'>; refs: string[]; batchId?: string; jobId?: string } = { outputType: 'img2img', refs: [] },
     origin: ImageOrigin | null = null,
     composedPrompt?: string, // 本次实际使用的合成 prompt（上游文本 + 自身 prompt；trace/历史记录用，W3-2）
     imageWidth?: number,     // 原图真实像素宽（后端 PIL im.size 透传；旧后端缺失为 undefined）

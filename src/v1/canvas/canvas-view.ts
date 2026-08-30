@@ -32,8 +32,10 @@ class CanvasView {
   private _panStart: { mx: number; my: number; vx: number; vy: number } | null = null;
   /** 平移与浏览器绘制同频，避免高频 mousemove 对带图片画布重复提交 transform。 */
   private _panFrame: number | null = null;
+  /** 视图平移/缩放后的轻量同步；供画布外的悬浮 UI 重新锚定节点。 */
+  private _viewListeners = new Set<() => void>();
   private minimap: HTMLElement | null = null;
-  private minimapCollapsed = true;
+  private minimapCollapsed = false;
   private minimapDrag = false;
 
   /** 实时读取 flowState.canvas（避免 replaceAll 后引用过期） */
@@ -71,6 +73,13 @@ class CanvasView {
       this.wrap.style.backgroundSize = `${DOT_SPACING * scale}px ${DOT_SPACING * scale}px`;
     }
     this._renderMinimap();
+    this._viewListeners.forEach(listener => listener());
+  }
+
+  /** 订阅视图变化。返回取消订阅函数，避免让悬浮 UI 直接依赖平移实现。 */
+  onViewChange(listener: () => void): () => void {
+    this._viewListeners.add(listener);
+    return () => this._viewListeners.delete(listener);
   }
 
   /** 屏幕坐标 → 世界坐标（画布坐标系） */
@@ -119,7 +128,7 @@ class CanvasView {
   private _initMinimap(): void {
     if (!this.wrap || this.minimap) return;
     const map = document.createElement('div');
-    map.className = 'canvas-minimap is-collapsed';
+    map.className = 'canvas-minimap';
     map.innerHTML = '<button class="minimap-toggle" type="button" title="展开小地图">⌁</button><div class="minimap-stage"><div class="minimap-nodes"></div><div class="minimap-viewport"></div></div>';
     this.wrap.appendChild(map);
     this.minimap = map;
@@ -132,14 +141,33 @@ class CanvasView {
     this._renderMinimap();
   }
 
-  private _minimapBounds(): { minX: number; minY: number; maxX: number; maxY: number } {
-    if (flowState.nodes.length === 0) return { minX: -400, minY: -300, maxX: 400, maxY: 300 };
+  /** 当前屏幕可见区域换算到世界坐标；小地图视口框和节点必须共用这套坐标。 */
+  private _worldViewport(): { minX: number; minY: number; maxX: number; maxY: number } {
+    if (!this.wrap) return { minX: 0, minY: 0, maxX: 1, maxY: 1 };
+    const minX = -this.view.panX / this.view.scale;
+    const minY = -this.view.panY / this.view.scale;
+    return {
+      minX,
+      minY,
+      maxX: minX + this.wrap.clientWidth / this.view.scale,
+      maxY: minY + this.wrap.clientHeight / this.view.scale,
+    };
+  }
+
+  /**
+   * 小地图的世界包围盒：节点与当前可见视口取并集，再留出余白。
+   * 这样无论画布在节点外侧、节点很少或视口很大，视口框都不会被截断或铺满整张地图。
+   */
+  private _minimapBounds(view = this._worldViewport()): { minX: number; minY: number; maxX: number; maxY: number } {
     const b = flowState.nodes.reduce((acc, node) => {
       const w = node.w ?? CARD_W, h = node.h ?? cardView.cardHeight(node);
       acc.minX = Math.min(acc.minX, node.x); acc.minY = Math.min(acc.minY, node.y);
       acc.maxX = Math.max(acc.maxX, node.x + w); acc.maxY = Math.max(acc.maxY, node.y + h); return acc;
-    }, { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity });
-    const pad = 120; return { minX: b.minX - pad, minY: b.minY - pad, maxX: b.maxX + pad, maxY: b.maxY + pad };
+    }, { minX: view.minX, minY: view.minY, maxX: view.maxX, maxY: view.maxY });
+    b.minX = Math.min(b.minX, view.minX); b.minY = Math.min(b.minY, view.minY);
+    b.maxX = Math.max(b.maxX, view.maxX); b.maxY = Math.max(b.maxY, view.maxY);
+    const pad = Math.max(80, Math.min(b.maxX - b.minX, b.maxY - b.minY) * .08);
+    return { minX: b.minX - pad, minY: b.minY - pad, maxX: b.maxX + pad, maxY: b.maxY + pad };
   }
 
   private _renderMinimap(): void {
@@ -149,17 +177,22 @@ class CanvasView {
     const dots = map.querySelector('.minimap-nodes') as HTMLElement | null;
     const viewport = map.querySelector('.minimap-viewport') as HTMLElement | null;
     if (!stage || !dots || !viewport) return;
-    const b = this._minimapBounds(), r = stage.getBoundingClientRect();
+    const view = this._worldViewport();
+    const b = this._minimapBounds(view), r = stage.getBoundingClientRect();
     if (!(r.width > 0 && r.height > 0)) return;
     const spanX = Math.max(1, b.maxX - b.minX), spanY = Math.max(1, b.maxY - b.minY);
+    // 等比缩放，避免纵横比不同的画布把节点与视口框拉伸变形。
+    const scale = Math.min(r.width / spanX, r.height / spanY);
+    const offsetX = (r.width - spanX * scale) / 2;
+    const offsetY = (r.height - spanY * scale) / 2;
     dots.innerHTML = flowState.nodes.map(node => {
       const w = node.w ?? CARD_W, h = node.h ?? cardView.cardHeight(node);
-      return `<i style="left:${(node.x - b.minX) / spanX * 100}%;top:${(node.y - b.minY) / spanY * 100}%;width:${Math.max(2, w / spanX * 100)}%;height:${Math.max(2, h / spanY * 100)}%"></i>`;
+      return `<i style="left:${offsetX + (node.x - b.minX) * scale}px;top:${offsetY + (node.y - b.minY) * scale}px;width:${Math.max(2, w * scale)}px;height:${Math.max(2, h * scale)}px"></i>`;
     }).join('');
-    const viewLeft = -this.view.panX / this.view.scale, viewTop = -this.view.panY / this.view.scale;
-    const viewW = wrap.clientWidth / this.view.scale, viewH = wrap.clientHeight / this.view.scale;
-    viewport.style.left = `${(viewLeft - b.minX) / spanX * 100}%`; viewport.style.top = `${(viewTop - b.minY) / spanY * 100}%`;
-    viewport.style.width = `${Math.min(100, viewW / spanX * 100)}%`; viewport.style.height = `${Math.min(100, viewH / spanY * 100)}%`;
+    viewport.style.left = `${offsetX + (view.minX - b.minX) * scale}px`;
+    viewport.style.top = `${offsetY + (view.minY - b.minY) * scale}px`;
+    viewport.style.width = `${Math.max(1, (view.maxX - view.minX) * scale)}px`;
+    viewport.style.height = `${Math.max(1, (view.maxY - view.minY) * scale)}px`;
     const shouldSuggest = flowState.nodes.length > 12 || spanX > wrap.clientWidth / this.view.scale * 2 || spanY > wrap.clientHeight / this.view.scale * 2;
     map.classList.toggle('has-suggestion', this.minimapCollapsed && shouldSuggest);
   }
@@ -168,8 +201,11 @@ class CanvasView {
     const stage = this.minimap?.querySelector('.minimap-stage') as HTMLElement | null;
     if (!stage || !this.wrap) return;
     const rect = stage.getBoundingClientRect(), b = this._minimapBounds();
-    const x = b.minX + Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width)) * (b.maxX - b.minX);
-    const y = b.minY + Math.min(1, Math.max(0, (e.clientY - rect.top) / rect.height)) * (b.maxY - b.minY);
+    const spanX = Math.max(1, b.maxX - b.minX), spanY = Math.max(1, b.maxY - b.minY);
+    const scale = Math.min(rect.width / spanX, rect.height / spanY);
+    const offsetX = (rect.width - spanX * scale) / 2, offsetY = (rect.height - spanY * scale) / 2;
+    const x = b.minX + Math.min(spanX, Math.max(0, (e.clientX - rect.left - offsetX) / scale));
+    const y = b.minY + Math.min(spanY, Math.max(0, (e.clientY - rect.top - offsetY) / scale));
     this.view.panX = this.wrap.clientWidth / 2 - x * this.view.scale;
     this.view.panY = this.wrap.clientHeight / 2 - y * this.view.scale;
     this.applyView();

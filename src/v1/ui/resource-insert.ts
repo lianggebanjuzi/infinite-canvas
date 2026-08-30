@@ -119,6 +119,51 @@ function historyImageSource(item: ResourceHistoryImage): { url: string; origin: 
   return { url, origin: null };
 }
 
+/** 4.2-C：以媒体文件（视频/音频）创建一个素材节点（isAsset:true；大文件仅存路径，不塞 base64）。 */
+export function insertMediaAsAsset(
+  kind: 'video' | 'audio',
+  mediaUrl: string,
+  mediaPath?: string,
+  media: { duration?: number; mimeType?: string; remoteTaskId?: string } = {},
+  position?: { x: number; y: number },
+): FlowNode | null {
+  if (!mediaUrl && !mediaPath) {
+    showToast('媒体地址无效', false);
+    return null;
+  }
+  const url = mediaUrl || fileUrlFromPath(mediaPath || '');
+  if (!url) {
+    showToast('媒体地址无效', false);
+    return null;
+  }
+  const pos = resolveAssetPosition(position);
+  const nodeType = kind === 'video' ? 'video-gen' : 'audio-gen';
+  const mediaRec = {
+    originalPath: mediaPath || mediaUrl,
+    url,
+    ...(typeof media.duration === 'number' ? { duration: media.duration } : {}),
+    ...(typeof media.mimeType === 'string' ? { mimeType: media.mimeType } : {}),
+    ...(typeof media.remoteTaskId === 'string' ? { remoteTaskId: media.remoteTaskId } : {}),
+  };
+  const extra: Partial<FlowNode> = {
+    isAsset: true,
+    ratio: 16 / 9,
+    status: 'idle',
+    title: kind === 'video' ? '视频素材' : '音频素材',
+    refImages: [],
+    ...(kind === 'video' ? { video: mediaRec } : { audio: mediaRec }),
+  };
+  const node = flowState.addNode(nodeType, pos.x, pos.y, extra);
+  selection.select(node.id);
+  return node;
+}
+
+/** 本地绝对路径 → file:// URL（与 video-viewer 同构） */
+function fileUrlFromPath(filePath: string): string {
+  const normalized = String(filePath || '').replace(/\\/g, '/').replace(/^\/+/, '');
+  return normalized ? encodeURI(`file:///${normalized}`) : '';
+}
+
 /**
  * 把一条历史图片放到画布：创建素材节点（含原图引用与配方溯源字段），不触发生成。
  * @param historyItem 历史图库条目（thumbnail/src/originalPath 等）

@@ -50,3 +50,5 @@ tsc-errors*.txt
 # QA 集成编译产物（tsconfig.qa-main.json 输出）
 .icv-main/
 .qa-verify/_filetest/
+# QA smoke 的本机文本输出（脚本本身仍纳入版本控制）
+.qa-verify/*.txt

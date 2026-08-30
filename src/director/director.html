@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>导演台 · Director</title>
+<link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+<div id="app" class="director-app">
+
+  <!-- 顶栏：文件 / 撤销重做 / 视角 / 导出 -->
+  <header class="d-topbar">
+    <div class="d-brand" title="MONOFORM 式导演台（独立实验性子产品）">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5h16v12H4z"/><path d="M8 21h8M12 17v4"/><circle cx="9" cy="10" r="1.4"/><circle cx="15" cy="10" r="1.4"/><path d="M9 13.5c1.6 1.2 4.4 1.2 6 0"/></svg>
+      <span>导演台</span>
+    </div>
+    <div class="d-file-group">
+      <button class="d-btn" id="d-new" title="新建工程 (Ctrl+N)">新建</button>
+      <button class="d-btn" id="d-open" title="打开工程 (Ctrl+O)">打开</button>
+      <button class="d-btn" id="d-save" title="保存 (Ctrl+S)">保存</button>
+      <button class="d-btn" id="d-save-as" title="另存为">另存为</button>
+    </div>
+    <div class="d-project-name-wrap">
+      <input class="d-project-name" id="d-project-name" value="未命名导演工程" spellcheck="false" title="工程名称">
+      <span class="d-save-status" id="d-save-status" data-status="saved">已保存</span>
+    </div>
+    <div class="d-undo-group">
+      <button class="d-btn d-undo" id="d-undo" title="撤销 (Ctrl+Z)" disabled>↶ 撤销</button>
+      <button class="d-btn d-redo" id="d-redo" title="重做 (Ctrl+Shift+Z)" disabled>↷ 重做</button>
+    </div>
+    <div class="d-view-group">
+      <button class="d-btn d-view-btn active" id="d-view-edit" title="编辑视角（自由视口）">编辑视角</button>
+      <button class="d-btn d-view-btn" id="d-view-camera" title="摄像机视角（与导出一致）">摄像机视角</button>
+    </div>
+    <div class="d-export-group">
+      <button class="d-btn d-btn-primary" id="d-export-png" title="导出当前帧 PNG">导出 PNG</button>
+      <button class="d-btn d-btn-primary" id="d-export-mp4" title="导出时间轴视频">导出视频</button>
+      <button class="d-btn d-btn-ghost" id="d-return-canvas" title="把当前画面回传到主画布（成为素材节点）">回传画布</button>
+    </div>
+  </header>
+
+  <!-- 主体 -->
+  <div class="d-main">
+    <!-- 左：面板（页签切换） -->
+    <aside class="d-left">
+      <div class="d-tabs" role="tablist">
+        <button class="d-tab active" data-panel="hierarchy" role="tab">场景</button>
+        <button class="d-tab" data-panel="camera" role="tab">摄像机</button>
+        <button class="d-tab" data-panel="reference" role="tab">参考图</button>
+        <button class="d-tab" data-panel="lighting" role="tab">光照</button>
+        <button class="d-tab" data-panel="character" role="tab">人物</button>
+      </div>
+
+      <!-- 场景层级 -->
+      <section class="d-panel active" data-panel-body="hierarchy">
+        <div class="d-panel-head">
+          <span>场景对象</span>
+          <span class="d-hint">点击选中 · W/E/R 变换</span>
+        </div>
+        <div class="d-add-row">
+          <button class="d-mini-btn" data-add="box" title="添加立方体">▣ 立方体</button>
+          <button class="d-mini-btn" data-add="sphere" title="添加球体">◉ 球体</button>
+          <button class="d-mini-btn" data-add="cylinder" title="添加圆柱">▮ 圆柱</button>
+          <button class="d-mini-btn" data-add="cone" title="添加圆锥">▲ 圆锥</button>
+          <button class="d-mini-btn" data-add="plane" title="添加平面">▬ 平面</button>
+          <button class="d-mini-btn" data-add="character" title="添加原创占位人物白模">🧍 人物</button>
+        </div>
+        <div class="d-add-row">
+          <button class="d-mini-btn" id="d-import-gltf" title="导入本地 GLB/GLTF（自包含优先）">⇪ 导入模型</button>
+          <button class="d-mini-btn" id="d-import-image" title="导入参考图">🖼 导入图片</button>
+        </div>
+        <div class="d-hierarchy-list" id="d-hierarchy-list"></div>
+        <div class="d-empty-hint" id="d-hierarchy-empty">暂无对象。点上方按钮添加几何体、人物或导入模型。</div>
+        <div class="d-tool-row">
+          <button class="d-tool-btn active" data-tool="translate" title="移动 (W)">移动</button>
+          <button class="d-tool-btn" data-tool="rotate" title="旋转 (E)">旋转</button>
+          <button class="d-tool-btn" data-tool="scale" title="缩放 (R)">缩放</button>
+          <span class="d-tool-sep"></span>
+          <button class="d-tool-btn" id="d-space-world" title="世界坐标系">世界</button>
+          <button class="d-tool-btn" id="d-space-local" title="局部坐标系">局部</button>
+          <span class="d-tool-sep"></span>
+          <button class="d-tool-btn" id="d-snap-toggle" title="吸附开关">吸附</button>
+          <input class="d-snap-step" id="d-snap-step" type="number" min="0.01" max="10" step="0.01" value="0.25" title="吸附步长">
+          <span class="d-tool-sep"></span>
+          <button class="d-tool-btn" id="d-ground" title="贴地（选中对象 Y 归零）">贴地</button>
+          <button class="d-tool-btn" id="d-focus" title="聚焦选中对象 (F)">聚焦</button>
+        </div>
+      </section>
+
+      <!-- 摄像机 -->
+      <section class="d-panel" data-panel-body="camera">
+        <div class="d-panel-head"><span>摄像机</span></div>
+        <div class="d-cam-list" id="d-cam-list"></div>
+        <div class="d-cam-actions">
+          <button class="d-mini-btn" id="d-cam-add" title="新建摄像机">＋ 新建</button>
+          <button class="d-mini-btn" id="d-cam-duplicate" title="复制选中摄像机">⧉ 复制</button>
+          <button class="d-mini-btn" id="d-cam-rename" title="重命名选中摄像机">✎ 重命名</button>
+          <button class="d-mini-btn" id="d-cam-delete" title="删除选中摄像机">✕ 删除</button>
+        </div>
+        <div class="d-cam-props" id="d-cam-props">
+          <div class="d-field">
+            <label>焦距（FOV°）</label>
+            <input type="range" id="d-cam-fov" min="15" max="90" step="1" value="40">
+            <output id="d-cam-fov-out">40°</output>
+          </div>
+          <div class="d-field">
+            <label>画幅比例</label>
+            <select id="d-cam-aspect">
+              <option value="16/9">16:9</option>
+              <option value="4/3">4:3</option>
+              <option value="3/4">3:4</option>
+              <option value="1">1:1</option>
+              <option value="9/16">9:16</option>
+            </select>
+          </div>
+          <label class="d-check"><input type="checkbox" id="d-cam-include-export"> 参与导出</label>
+        </div>
+      </section>
+
+      <!-- 参考图 -->
+      <section class="d-panel" data-panel-body="reference">
+        <div class="d-panel-head"><span>参考图</span></div>
+        <div class="d-ref-list" id="d-ref-list"></div>
+        <div class="d-ref-actions">
+          <button class="d-mini-btn" id="d-ref-add" title="上传参考图">＋ 上传参考图</button>
+        </div>
+      </section>
+
+      <!-- 光照 -->
+      <section class="d-panel" data-panel-body="lighting">
+        <div class="d-panel-head">
+          <span>光照</span>
+          <button class="d-mini-btn" id="d-light-default" title="恢复默认灯光">恢复默认</button>
+        </div>
+        <div class="d-field"><label>曝光</label><input type="range" id="d-light-exposure" min="0.2" max="3" step="0.05" value="1"><output id="d-light-exposure-out">1.0</output></div>
+        <div class="d-field"><label>环境光强度</label><input type="range" id="d-light-ambient" min="0" max="2" step="0.05" value="0.55"><output id="d-light-ambient-out">0.55</output></div>
+        <div class="d-field"><label>环境光颜色</label><input type="color" id="d-light-ambient-color" value="#f2f0ea"></div>
+        <div class="d-field"><label>主光强度</label><input type="range" id="d-light-key" min="0" max="4" step="0.05" value="1.35"><output id="d-light-key-out">1.35</output></div>
+        <div class="d-field"><label>主光颜色</label><input type="color" id="d-light-key-color" value="#fff6e8"></div>
+        <div class="d-field"><label>补光强度</label><input type="range" id="d-light-fill" min="0" max="2" step="0.05" value="0.5"><output id="d-light-fill-out">0.5</output></div>
+        <div class="d-field"><label>补光颜色</label><input type="color" id="d-light-fill-color" value="#cfe0ff"></div>
+        <div class="d-field"><label>背景色</label><input type="color" id="d-light-bg" value="#1e1f24"></div>
+      </section>
+
+      <!-- 人物 -->
+      <section class="d-panel" data-panel-body="character">
+        <div class="d-panel-head"><span>人物姿势</span></div>
+        <div class="d-char-hint" id="d-char-hint">场景中没有人物对象时，此面板自动降级。</div>
+        <div class="d-pose-row" id="d-pose-row"></div>
+        <div class="d-field"><label>姿势预设</label><select id="d-pose-select"><option value="tpose">T-Pose</option><option value="apose">A-Pose</option><option value="idle">站立</option><option value="walk">行走</option><option value="wave">挥手</option><option value="sit">坐姿</option></select></div>
+        <div class="d-char-actions">
+          <button class="d-mini-btn" id="d-pose-apply" title="应用选中预设">应用预设</button>
+          <button class="d-mini-btn" id="d-pose-save" title="把当前关节姿态存入工程">保存姿势</button>
+          <button class="d-mini-btn" id="d-pose-ik" title="四肢末端优先 IK 调整模式（拖动手/脚目标）">IK 模式</button>
+        </div>
+        <div class="d-ik-hint" id="d-ik-hint" style="display:none;">IK 模式：选中人物后拖动白色末端小球调整手/脚位置（四肢末端优先）。</div>
+      </section>
+    </aside>
+
+    <!-- 中：视口 + 监看器 -->
+    <div class="d-center">
+      <div class="d-viewport" id="d-viewport">
+        <canvas id="d-gl-canvas"></canvas>
+        <div class="d-viewport-overlay">
+          <span class="d-viewport-tag" id="d-viewport-tag">编辑视角</span>
+          <span class="d-viewport-grid-info" id="d-viewport-info">吸附: 关</span>
+        </div>
+        <div class="d-export-progress" id="d-export-progress" style="display:none;">
+          <div class="d-export-progress-label"><span id="d-export-progress-text">导出中…</span><button class="d-btn d-btn-danger" id="d-export-cancel">取消</button></div>
+          <div class="d-export-progress-track"><div class="d-export-progress-bar" id="d-export-progress-bar"></div></div>
+        </div>
+        <div class="d-webgl-fallback" id="d-webgl-fallback" style="display:none;">
+          <h2>无法初始化 3D 视口</h2>
+          <p>当前环境不支持 WebGL。你仍然可以：</p>
+          <div class="d-fallback-actions">
+            <button class="d-btn d-btn-primary" id="d-fallback-new">新建空工程</button>
+            <button class="d-btn" id="d-fallback-open">打开工程</button>
+            <button class="d-btn" id="d-fallback-save">保存工程</button>
+          </div>
+        </div>
+      </div>
+      <div class="d-monitor" id="d-monitor">
+        <div class="d-monitor-head">
+          <span class="d-monitor-title" id="d-monitor-title">监看 · 主摄像机</span>
+          <span class="d-monitor-hint">导出与监看一致</span>
+        </div>
+        <canvas id="d-monitor-canvas" width="320" height="180"></canvas>
+        <div class="d-monitor-empty" id="d-monitor-empty" style="display:none;">无可用摄像机</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 底部：时间轴 -->
+  <footer class="d-timeline" id="d-timeline">
+    <div class="d-tl-left">
+      <button class="d-btn d-tl-play" id="d-tl-play" title="播放/暂停 (Space)">▶</button>
+      <button class="d-btn" id="d-tl-stop" title="回到起点 (Home)">⏮</button>
+      <span class="d-tl-time" id="d-tl-time">0.0s / 10.0s</span>
+      <label class="d-tl-fps">FPS
+        <select id="d-tl-fps"><option value="12">12</option><option value="24" selected>24</option><option value="30">30</option><option value="60">60</option></select>
+      </label>
+      <label class="d-tl-dur">时长
+        <input type="number" id="d-tl-duration" min="1" max="60" step="1" value="10">s
+      </label>
+    </div>
+    <div class="d-tl-center">
+      <div class="d-tl-ruler" id="d-tl-ruler"></div>
+      <div class="d-tl-playhead" id="d-tl-playhead"></div>
+    </div>
+    <div class="d-tl-right">
+      <button class="d-mini-btn" id="d-kf-add" title="在当前时间给选中目标添加关键帧">＋ 关键帧</button>
+      <button class="d-mini-btn" id="d-kf-copy" title="复制选中关键帧">复制</button>
+      <button class="d-mini-btn" id="d-kf-paste" title="粘贴到当前时间">粘贴</button>
+      <button class="d-mini-btn" id="d-kf-delete" title="删除选中关键帧">删除</button>
+      <label class="d-tl-interp">插值
+        <select id="d-kf-interp"><option value="linear">线性</option><option value="hold">保持</option></select>
+      </label>
+    </div>
+    <div class="d-tl-tracks" id="d-tl-tracks"></div>
+  </footer>
+</div>
+
+<input type="file" id="d-file-input" accept=".glb,.gltf,image/*" style="display:none;">
+<script type="module" src="./main.ts"></script>
+</body>
+</html>

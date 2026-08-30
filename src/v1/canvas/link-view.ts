@@ -19,12 +19,14 @@ const NS = 'http://www.w3.org/2000/svg';
  * 连线的画布表达语义。它只由既有节点类型和 parentId 推断，绝不参与
  * 生成请求或改变 FlowEdge 的持久化格式。
  */
-export type LinkRelation = 'reference' | 'text-input' | 'result' | 'generic';
+export type LinkRelation = 'reference' | 'text-input' | 'result' | 'generic' | 'audio-ref';
 
 export function linkRelation(edge: FlowEdge): LinkRelation {
   const from = flowState.getNode(edge.from);
   const to = flowState.getNode(edge.to);
   if (!from || !to) return 'generic';
+  // 4.2-C：音频节点 → 视频节点 = 音轨/配音参考（显式关系类型）
+  if (edge.kind === 'audio-ref') return 'audio-ref';
   // 引擎写出的产出节点会保留 parentId；它比「图片 → 图片」这一宽泛类型
   // 判断更精确，因而必须优先识别为结果来源而不是参考输入。
   if (to.parentId === from.id) return 'result';
@@ -38,6 +40,7 @@ function relationLabel(relation: LinkRelation): string {
     case 'reference': return '参考';
     case 'text-input': return '文字';
     case 'result': return '结果';
+    case 'audio-ref': return '音轨';
     default: return '';
   }
 }
@@ -62,6 +65,7 @@ export function connectionDescription(fromId: string, toId: string): string {
   if (from.type === 'text-gen' && to.type === 'text-split') return '按分隔符自动拆分';
   if (to.type === 'text-gen' && from.type === 'image-gen') return '可反推提示词';
   if (from.type === 'image-gen' && to.type === 'image-gen') return '作为参考图';
+  if (from.type === 'audio-gen' && to.type === 'video-gen') return '音频将作为音轨/配音参考';
   return `${outs.join('/')} → ${ins.join('/')}`;
 }
 

@@ -11,6 +11,8 @@ import { showToast } from './ui/toast';
 import { historyPersist } from './history-persist';
 import { historyDrawer } from './ui/history-drawer';
 import { assetStore } from './asset-store';
+import { imageEditEngine } from './engine/image-edit-engine';
+import { runEngine } from './engine/run-engine';
 
 /**
  * 文本历史归一：只接受 {text: string, ts: number} 条目，过滤非法、按 TEXT_HISTORY_LIMIT 裁尾。
@@ -93,12 +95,53 @@ function normalizeVideo(raw: unknown): VideoMedia | null {
   };
 }
 
+/** 4.2-B：音频媒体归一（大文件仅本地路径 + 轻量元数据，不塞 base64）。 */
+function normalizeAudio(raw: unknown): AudioMedia | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const v = raw as Record<string, unknown>;
+  const originalPath = typeof v.originalPath === 'string' ? v.originalPath : '';
+  if (!originalPath) return null;
+  return {
+    originalPath,
+    ...(typeof v.url === 'string' ? { url: v.url } : {}),
+    ...(typeof v.thumbnail === 'string' ? { thumbnail: v.thumbnail } : {}),
+    ...(typeof v.duration === 'number' && v.duration >= 0 ? { duration: v.duration } : {}),
+    ...(typeof v.mimeType === 'string' ? { mimeType: v.mimeType } : {}),
+    ...(typeof v.sizeBytes === 'number' && v.sizeBytes >= 0 ? { sizeBytes: v.sizeBytes } : {}),
+    ...(typeof v.remoteTaskId === 'string' ? { remoteTaskId: v.remoteTaskId } : {}),
+  };
+}
+
+/** 媒体任务状态机归一（videoTask/audioTask；非法/缺失 → undefined 不写回）。 */
+function normalizeMediaTask(raw: unknown): MediaTask | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const t = raw as Record<string, unknown>;
+  const states: MediaTask['state'][] = ['queued', 'submitting', 'accepted', 'processing', 'succeeded', 'failed', 'cancelled', 'uncertain'];
+  const state = states.includes(t.state as MediaTask['state']) ? t.state as MediaTask['state'] : undefined;
+  if (!state) return undefined;
+  const task: MediaTask = { state };
+  if (typeof t.localTaskId === 'string' && t.localTaskId) task.localTaskId = t.localTaskId;
+  if (typeof t.remoteTaskId === 'string' && t.remoteTaskId) task.remoteTaskId = t.remoteTaskId;
+  if (typeof t.error === 'string' && t.error) task.error = t.error;
+  return task;
+}
+
+/** 工作流节点参数剥离媒体任务/首尾帧瞬态（工作流不携带任务状态与本地媒体引用）。 */
+function stripMediaTaskParams(raw: unknown): Record<string, unknown> {
+  const p: Record<string, unknown> = { ...((raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>) };
+  delete p.videoTask;
+  delete p.audioTask;
+  delete p.startFrame;
+  delete p.endFrame;
+  return p;
+}
+
 /** 本地编辑 trace 也属于项目事实源；只接受可序列化的已知字段，旧/坏记录安全回退 null。 */
 function normalizeTrace(raw: unknown): GenerationTrace | null {
   if (!raw || typeof raw !== 'object') return null;
   const t = raw as Record<string, unknown>;
   const outputType = t.outputType;
-  if (!['txt2img', 'img2img', 'outpaint', 'image-edit', 'video'].includes(String(outputType))) return null;
+  if (!['txt2img', 'img2img', 'outpaint', 'image-edit', 'video', 'audio'].includes(String(outputType))) return null;
   const cropRaw = t.crop as Record<string, unknown> | undefined;
   const splitRaw = t.split as Record<string, unknown> | undefined;
   const numeric = (value: unknown): number | undefined => typeof value === 'number' && Number.isFinite(value) ? value : undefined;
@@ -112,7 +155,7 @@ function normalizeTrace(raw: unknown): GenerationTrace | null {
     ...(typeof t.parentId === 'string' ? { parentId: t.parentId } : {}),
     ...(typeof t.seed === 'string' || t.seed === null ? { seed: t.seed } : {}),
     ...(typeof t.batchId === 'string' ? { batchId: t.batchId } : {}), ...(typeof t.jobId === 'string' ? { jobId: t.jobId } : {}),
-    ...(typeof t.editKind === 'string' && ['crop', 'split', 'mask-edit', 'angle'].includes(t.editKind) ? { editKind: t.editKind as GenerationTrace['editKind'] } : {}),
+    ...(typeof t.editKind === 'string' && ['crop', 'split', 'mask-edit', 'annotation', 'angle'].includes(t.editKind) ? { editKind: t.editKind as GenerationTrace['editKind'] } : {}),
     ...(typeof t.sourceNodeId === 'string' ? { sourceNodeId: t.sourceNodeId } : {}),
     ...(cropRaw && numeric(cropRaw.x) !== undefined && numeric(cropRaw.y) !== undefined && numeric(cropRaw.width) !== undefined && numeric(cropRaw.height) !== undefined ? { crop: { x: numeric(cropRaw.x)!, y: numeric(cropRaw.y)!, width: numeric(cropRaw.width)!, height: numeric(cropRaw.height)!, ...(numeric(cropRaw.rotation) !== undefined ? { rotation: numeric(cropRaw.rotation) } : {}) } } : {}),
     ...(splitRaw && numeric(splitRaw.rows) !== undefined && numeric(splitRaw.cols) !== undefined && numeric(splitRaw.index) !== undefined ? { split: { rows: numeric(splitRaw.rows)!, cols: numeric(splitRaw.cols)!, index: numeric(splitRaw.index)!, ...(numeric(splitRaw.row) !== undefined ? { row: numeric(splitRaw.row) } : {}), ...(numeric(splitRaw.column) !== undefined ? { column: numeric(splitRaw.column) } : {}), ...(numeric(splitRaw.gutter) !== undefined ? { gutter: numeric(splitRaw.gutter) } : {}) } } : {}),
@@ -124,7 +167,7 @@ function migrateNode(raw: unknown): FlowNode | null {
   if (!raw || typeof raw !== 'object') return null;
   const r = raw as Record<string, unknown>;
   const t = r.type as string;
-  if (t !== 'image-gen' && t !== 'image-result' && t !== 'text-gen' && t !== 'text-split' && t !== 'video-gen') return null;
+  if (t !== 'image-gen' && t !== 'image-result' && t !== 'text-gen' && t !== 'text-split' && t !== 'video-gen' && t !== 'audio-gen') return null;
   if (typeof r.id !== 'string') return null;
 
   const rawParams = r.params && typeof r.params === 'object'
@@ -220,12 +263,35 @@ function migrateNode(raw: unknown): FlowNode | null {
     return {
       id: r.id, type: 'video-gen', x: typeof r.x === 'number' ? r.x : 0, y: typeof r.y === 'number' ? r.y : 0,
       ratio: typeof r.ratio === 'number' && r.ratio > 0 ? r.ratio : 16 / 9,
-      status: (['idle', 'run', 'done', 'stale', 'fail', 'queued'] as NodeStatus[]).includes(r.status as NodeStatus) ? r.status as NodeStatus : 'idle',
+      status: (['idle', 'run', 'done', 'stale', 'fail', 'queued', 'submitting'] as NodeStatus[]).includes(r.status as NodeStatus) ? r.status as NodeStatus : 'idle',
       title: typeof r.title === 'string' ? r.title : '视频生成',
       params: { prompt: '', model: '', seconds: 5, aspectRatio: '16:9', resolution: '720p', audio: false, ...rawParams },
       imageUrl: null, imageOrigin: null, video: normalizeVideo(r.video), outputText: null, textHistory: [], refImages: [],
       error: typeof r.error === 'string' ? r.error : null, lastRunAt: typeof r.lastRunAt === 'number' ? r.lastRunAt : null,
       parentId, trace: normalizeTrace(r.trace),
+      ...(r.isAsset === true ? { isAsset: true } : {}),
+      ...(typeof r.w === 'number' && r.w > 0 ? { w: r.w } : {}),
+      ...(typeof r.h === 'number' && r.h > 0 ? { h: r.h } : {}),
+    };
+  }
+
+  if (t === 'audio-gen') {
+    const task = normalizeMediaTask(rawParams.audioTask);
+    return {
+      id: r.id, type: 'audio-gen', x: typeof r.x === 'number' ? r.x : 0, y: typeof r.y === 'number' ? r.y : 0,
+      ratio: typeof r.ratio === 'number' && r.ratio > 0 ? r.ratio : 16 / 9,
+      status: (['idle', 'run', 'done', 'stale', 'fail', 'queued', 'submitting'] as NodeStatus[]).includes(r.status as NodeStatus) ? r.status as NodeStatus : 'idle',
+      title: typeof r.title === 'string' ? r.title : '音频生成',
+      params: {
+        prompt: '', model: '', seconds: 10, format: 'mp3', ...rawParams,
+        ...(task ? { audioTask: task } : {}),
+      },
+      imageUrl: null, imageOrigin: null, audio: normalizeAudio(r.audio), outputText: null, textHistory: [], refImages: [],
+      error: typeof r.error === 'string' ? r.error : null, lastRunAt: typeof r.lastRunAt === 'number' ? r.lastRunAt : null,
+      parentId, trace: normalizeTrace(r.trace),
+      ...(r.isAsset === true ? { isAsset: true } : {}),
+      ...(typeof r.w === 'number' && r.w > 0 ? { w: r.w } : {}),
+      ...(typeof r.h === 'number' && r.h > 0 ? { h: r.h } : {}),
     };
   }
 
@@ -276,8 +342,8 @@ class Persistence {
       modelDefaults: { ...flowState.modelDefaults },
       nodes: flowState.nodes.map(n => ({
         ...n,
-        // 共享约定 6：七态持久化归一为五态（queued→idle、partial-failed→done；run/done/stale/fail 原样）
-        status: n.status === 'queued' ? 'idle' : (n.status === 'partial-failed' ? 'done' : n.status),
+        // 共享约定 6：八态持久化归一为五态（queued→idle、submitting→run、partial-failed→done；run/done/stale/fail 原样）
+        status: n.status === 'queued' ? 'idle' : (n.status === 'submitting' ? 'run' : (n.status === 'partial-failed' ? 'done' : n.status)),
         params: { ...(n.params || {}) },
         refImages: [...(n.refImages || [])],
         textHistory: [...(n.textHistory || [])],
@@ -294,7 +360,7 @@ class Persistence {
     const now = Date.now();
     flowState.replaceAll({
       format: 'icv', version: '3.4', projectName: '未命名项目',
-      canvas: { scale: 1, panX: 60, panY: 40 }, modelDefaults: { drawing: '', chat: '', video: '' },
+      canvas: { scale: 1, panX: 60, panY: 40 }, modelDefaults: { drawing: '', chat: '', video: '', audio: '' },
       nodes: [], edges: [], createdAt: now, updatedAt: now,
     });
     this.lastPath = null;
@@ -333,7 +399,10 @@ class Persistence {
         parentId: null,
         trace: null,
         isAsset: undefined,
-        params: { ...(node.params || {}) },
+        // 4.2：工作流不携带本地媒体引用（视频/音频大文件路径只属于项目）
+        video: null,
+        audio: null,
+        params: stripMediaTaskParams(node.params),
       })),
       edges: flowState.edges.map(edge => ({ ...edge })),
       createdAt: now,
@@ -403,6 +472,7 @@ class Persistence {
         drawing: typeof p.modelDefaults?.drawing === 'string' ? p.modelDefaults.drawing : '',
         chat: typeof p.modelDefaults?.chat === 'string' ? p.modelDefaults.chat : '',
         video: typeof p.modelDefaults?.video === 'string' ? p.modelDefaults.video : '',
+        audio: typeof p.modelDefaults?.audio === 'string' ? p.modelDefaults.audio : '',
       },
       nodes,
       edges,
@@ -492,6 +562,8 @@ class Persistence {
         flowHistory.clear(); // 跨项目：清空撤销栈，避免撤销回滚到旧项目快照
         void this._loadHistoryIntoDrawer();
         void assetStore.loadFromBackend(); // 恢复资产库（关闭重开后状态一致）
+        imageEditEngine.recoverAll();      // 4.1-B：恢复进行中的蒙版/多角度任务（受理后只查询原任务）
+        runEngine.recoverMediaTasks();     // 4.2-A/B：恢复进行中的视频/音频任务（受理后只查询原任务）
         showToast('项目已打开');
         return true;
       }

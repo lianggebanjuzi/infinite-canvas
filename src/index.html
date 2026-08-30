@@ -69,6 +69,8 @@
         <div class="history-tabs" id="history-tabs">
           <button class="history-tab active" data-tab="image"><span class="history-tab-name">成图</span><span class="history-tab-count"></span></button>
           <button class="history-tab" data-tab="text"><span class="history-tab-name">文本</span><span class="history-tab-count"></span></button>
+          <button class="history-tab" data-tab="video"><span class="history-tab-name">视频</span><span class="history-tab-count"></span></button>
+          <button class="history-tab" data-tab="audio"><span class="history-tab-name">音频</span><span class="history-tab-count"></span></button>
         </div>
         <div class="history-grid" id="history-grid"></div>
         <div class="history-empty" id="history-empty" style="display:none;"></div>
@@ -115,13 +117,6 @@
         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3H5a2 2 0 0 0-2 2v3M16 3h3a2 2 0 0 1 2 2v3M8 21H5a2 2 0 0 1-2-2v-3M16 21h3a2 2 0 0 0 2-2v-3"/></svg>
         扩图
       </button>
-      <div class="act-more-wrap">
-        <button class="act-btn" data-action="more" type="button">更多 ▾</button>
-        <div class="act-more-menu" id="act-more-menu" hidden>
-          <span>局部修改 · 即将推出</span>
-          <span>多角度 · 即将推出</span>
-        </div>
-      </div>
       <div class="act-sep"></div>
       <button class="act-btn" data-action="download" title="下载">
         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg>
@@ -175,14 +170,17 @@
         </button>
       </div>
       <textarea class="cmd-input" id="cmd-input" placeholder="输入指令编辑这张图，如：把背景换成浅灰水泥墙，加一盆绿萝" spellcheck="false"></textarea>
-      <!-- 提示词库：入口负责浏览，旁侧收藏只保存当前输入，避免两种操作抢同一视觉层级。 -->
+      <!-- 4.1-B @素材引用：token 以 chip 展示（删除 chip 同步移除引用与 @label 文本） -->
+      <div class="cmd-mentions" id="cmd-mentions" hidden></div>
+      <!-- 与 ui-v3-concept 的提示词工具行保持一致：书本入口 + 书签收藏。 -->
       <div class="cmd-prompt-lib">
         <button class="cmd-lib-btn cmd-lib-browse-btn" id="cmd-lib-btn" title="打开提示词库">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H20v20H6.5a2.5 2.5 0 0 1 0-5H20"/><path d="M8 7h8M8 11h6"/></svg>
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H20v20H6.5a2.5 2.5 0 0 1 0-5H20"/><path d="M8 7h8M8 11h6"/></svg>
           <span>提示词库</span>
         </button>
+        <i class="cmd-lib-separator" aria-hidden="true"></i>
         <button class="cmd-lib-btn cmd-lib-save-btn" id="cmd-lib-save" title="收藏当前提示词" aria-label="收藏当前提示词">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20.5s-7-4.4-7-10.2A4.1 4.1 0 0 1 12 7.4a4.1 4.1 0 0 1 7 2.9c0 5.8-7 10.2-7 10.2Z"/></svg>
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m19 21-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/><path d="M12 7v6M9 10h6"/></svg>
         </button>
       </div>
       <!-- text-gen 历史反推结果列表（仅选中文本反推节点时显示，JS 填充） -->
@@ -205,8 +203,8 @@
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
           <span id="chip-count-label">1张</span> <span class="chev">▾</span>
         </button>
-        <button class="cmd-send" id="cmd-send" title="发送">
-          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+        <button class="cmd-send" id="cmd-send" title="运行">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m12 3-1.912 5.813a2 2 0 0 1-1.265 1.265L3 12l5.813 1.912a2 2 0 0 1 1.265 1.265L12 21l1.912-5.813a2 2 0 0 1 1.265-1.265L21 12l-5.813-1.912a2 2 0 0 1-1.265-1.265z"/><path d="M5 3v4M19 17v4M3 5h4M17 19h4"/></svg>
         </button>
       </div>
     </div>
@@ -268,30 +266,42 @@
 <!-- Phase 5 项目入口：本地项目的明确起点；不读取或写入浏览器项目存储。 -->
 <div class="project-home" id="project-home" hidden>
   <div class="project-home-card" role="dialog" aria-modal="true" aria-labelledby="project-home-title">
-    <div class="project-home-mark">Infinite Canvas</div>
-    <h1 id="project-home-title">开始一项视觉创作</h1>
-    <p>从一张图片、一句想法或已有本地项目继续。所有内容仍保存在本地 .icproj 项目中。</p>
-    <div class="project-home-actions">
-      <button class="btn-primary" id="project-home-new" type="button">新建创作项目</button>
-      <button class="btn-ghost" id="project-home-open" type="button">打开本地项目</button>
-    </div>
-    <section class="project-home-recent" aria-labelledby="project-home-recent-title">
-      <div class="project-home-section-head"><h2 id="project-home-recent-title">最近项目</h2><button type="button" id="project-home-clear-missing">清理失效记录</button></div>
-      <div id="project-home-recent-list" class="project-home-recent-list"></div>
-      <p id="project-home-recent-empty" class="project-home-recent-empty">保存或打开项目后，会在这里保留最近记录。</p>
-    </section>
-    <section class="project-home-themes" aria-labelledby="project-home-theme-title">
-      <h2 id="project-home-theme-title">工作台主题</h2>
-      <div id="project-home-theme-list" class="project-home-theme-list">
-        <button type="button" data-theme-choice="warm">暖白</button><button type="button" data-theme-choice="dark">深色</button><button type="button" data-theme-choice="ocean">海雾</button><button type="button" data-theme-choice="violet">靛紫</button><button type="button" data-theme-choice="copper">铜绿</button>
+    <header class="project-home-hero">
+      <div class="project-home-mark">Infinite Canvas</div>
+      <h1 id="project-home-title">开始一项视觉创作</h1>
+      <p>从一张图片、一句想法或已有本地项目继续。所有内容仅保存在本地项目中。</p>
+      <div class="project-home-actions">
+        <button class="btn-primary" id="project-home-new" type="button">新建创作项目</button>
+        <button class="btn-ghost" id="project-home-open" type="button">打开本地项目</button>
       </div>
+    </header>
+
+    <section class="project-home-recent" aria-labelledby="project-home-recent-title">
+      <div class="project-home-section-head"><div><span class="project-home-eyebrow">继续创作</span><h2 id="project-home-recent-title">最近项目</h2></div><button type="button" id="project-home-clear-missing">清理失效记录</button></div>
+      <div id="project-home-recent-list" class="project-home-recent-list"></div>
+      <div id="project-home-recent-empty" class="project-home-recent-empty"><span class="project-home-empty-icon" aria-hidden="true">+</span><p>还没有最近项目</p><small>新建或打开项目后会显示在这里。</small></div>
     </section>
-    <div class="project-home-actions project-home-backup-actions" aria-label="本地备份">
-      <button class="btn-ghost" id="project-home-backup-export" type="button">导出个人备份</button>
-      <button class="btn-ghost" id="project-home-backup-import" type="button">恢复个人备份</button>
-    </div>
-    <small class="project-home-backup-note">备份不包含 API 密钥；恢复后请重新配置渠道。</small>
-    <button class="project-home-resume" id="project-home-resume" type="button">继续当前画布</button>
+
+    <aside class="project-home-utilities" aria-label="工作台与项目工具">
+      <section class="project-home-themes" aria-labelledby="project-home-theme-title">
+        <span class="project-home-eyebrow">外观</span><h2 id="project-home-theme-title">工作台主题</h2>
+        <div id="project-home-theme-list" class="project-home-theme-list" role="group" aria-label="选择工作台主题">
+          <button type="button" data-theme-choice="light"><i aria-hidden="true"></i>亮色</button><button type="button" data-theme-choice="dark"><i aria-hidden="true"></i>暗色</button>
+        </div>
+      </section>
+      <section class="project-home-transfer" aria-labelledby="project-home-transfer-title">
+        <span class="project-home-eyebrow">本地管理</span><h2 id="project-home-transfer-title">备份与项目包</h2>
+        <div class="project-home-transfer-row">
+          <div><strong>个人备份</strong><small>不包含 API 密钥</small></div>
+          <div class="project-home-inline-actions"><button id="project-home-backup-export" type="button">导出</button><button id="project-home-backup-import" type="button">恢复</button></div>
+        </div>
+        <div class="project-home-transfer-row">
+          <div><strong>当前项目包</strong><small>画布、媒体与缩略图</small></div>
+          <div class="project-home-inline-actions"><button id="project-home-bundle-export" type="button">导出</button><button id="project-home-bundle-import" type="button">导入</button></div>
+        </div>
+      </section>
+      <button class="project-home-resume" id="project-home-resume" type="button">继续当前画布</button>
+    </aside>
   </div>
 </div>
 
@@ -348,47 +358,55 @@
       </button>
     </div>
     <div class="outpaint-body">
-      <div class="outpaint-control-head">
-        <div class="outpaint-section-label">目标画布大小</div>
-        <span class="outpaint-control-value" id="outpaint-canvas-summary">4096 × 4096 px</span>
-      </div>
-      <div class="outpaint-ratios" id="outpaint-ratios">
-        <button class="outpaint-ratio" data-ratio="1:1">1:1</button>
-        <button class="outpaint-ratio" data-ratio="3:4">3:4</button>
-        <button class="outpaint-ratio" data-ratio="4:3">4:3</button>
-        <button class="outpaint-ratio" data-ratio="16:9">16:9</button>
-        <button class="outpaint-ratio" data-ratio="9:16">9:16</button>
-      </div>
-      <div class="outpaint-stage" id="outpaint-stage">
-        <div class="outpaint-stage-hint">白色区域将被补全<br>可拖动原图微调位置</div>
-        <img id="outpaint-img" alt="" draggable="false">
-      </div>
-      <div class="outpaint-placement">
-        <div class="outpaint-control-head">
-          <div class="outpaint-section-label">原图位置</div>
-          <span class="outpaint-control-value">也可直接拖动预览图</span>
+      <div class="outpaint-workspace">
+        <div class="outpaint-preview">
+          <div class="outpaint-stage" id="outpaint-stage">
+            <img id="outpaint-img" alt="" draggable="false">
+          </div>
         </div>
-        <div class="outpaint-position-grid" id="outpaint-position-grid" aria-label="原图位置">
-          <button type="button" data-position="top-left" title="左上">↖</button>
-          <button type="button" data-position="top" title="上方">↑</button>
-          <button type="button" data-position="top-right" title="右上">↗</button>
-          <button type="button" data-position="left" title="左侧">←</button>
-          <button type="button" data-position="center" title="居中">●</button>
-          <button type="button" data-position="right" title="右侧">→</button>
-          <button type="button" data-position="bottom-left" title="左下">↙</button>
-          <button type="button" data-position="bottom" title="下方">↓</button>
-          <button type="button" data-position="bottom-right" title="右下">↘</button>
+        <div class="outpaint-controls">
+          <div class="outpaint-control-head">
+            <div class="outpaint-section-label">目标画布大小</div>
+            <span class="outpaint-control-value" id="outpaint-canvas-summary">4096 × 4096 px</span>
+          </div>
+          <div class="outpaint-ratios" id="outpaint-ratios">
+            <button class="outpaint-ratio" data-ratio="1:1">1:1</button>
+            <button class="outpaint-ratio" data-ratio="3:4">3:4</button>
+            <button class="outpaint-ratio" data-ratio="4:3">4:3</button>
+            <button class="outpaint-ratio" data-ratio="16:9">16:9</button>
+            <button class="outpaint-ratio" data-ratio="9:16">9:16</button>
+          </div>
+          <div class="outpaint-placement">
+            <div class="outpaint-control-head">
+              <div class="outpaint-section-label">原图位置</div>
+            </div>
+            <div class="outpaint-position-grid" id="outpaint-position-grid" aria-label="原图位置">
+              <button type="button" data-position="top-left" title="左上">↖</button>
+              <button type="button" data-position="top" title="上方">↑</button>
+              <button type="button" data-position="top-right" title="右上">↗</button>
+              <button type="button" data-position="left" title="左侧">←</button>
+              <button type="button" data-position="center" title="居中">●</button>
+              <button type="button" data-position="right" title="右侧">→</button>
+              <button type="button" data-position="bottom-left" title="左下">↙</button>
+              <button type="button" data-position="bottom" title="下方">↓</button>
+              <button type="button" data-position="bottom-right" title="右下">↘</button>
+            </div>
+          </div>
+          <div class="outpaint-zoom">
+            <span class="outpaint-zoom-label">原图大小</span>
+            <input type="range" id="outpaint-zoom" min="0.2" max="3" step="0.05" value="1">
+            <output id="outpaint-zoom-value">100%</output>
+          </div>
+          <div class="outpaint-desc">
+            <textarea id="outpaint-desc" placeholder="可选：补充希望扩展出的内容，如：花园里的白色绣球花、暖阳" spellcheck="false"></textarea>
+          </div>
+          <div class="outpaint-model">
+            <label class="outpaint-section-label" for="outpaint-model-select">扩图模型</label>
+            <select id="outpaint-model-select" disabled><option>正在加载可用模型…</option></select>
+            <div id="outpaint-model-label"></div>
+          </div>
         </div>
       </div>
-      <div class="outpaint-zoom">
-        <span class="outpaint-zoom-label">原图大小</span>
-        <input type="range" id="outpaint-zoom" min="0.2" max="3" step="0.05" value="1">
-        <output id="outpaint-zoom-value">100%</output>
-      </div>
-      <div class="outpaint-desc">
-        <textarea id="outpaint-desc" placeholder="可选：补充希望扩展出的内容，如：花园里的白色绣球花、暖阳" spellcheck="false"></textarea>
-      </div>
-      <div class="outpaint-model" id="outpaint-model-label"></div>
     </div>
     <div class="outpaint-foot">
       <button class="btn-ghost" id="outpaint-cancel">取消</button>

@@ -11,6 +11,7 @@
 import { flowState } from './state/flow-state';
 import { saveCoordinator } from './save-coordinator';
 import { runEngine } from './engine/run-engine';
+import { imageEditEngine } from './engine/image-edit-engine';
 import { threeWayDialog } from './ui/confirm';
 
 type PromptMode = 'close' | 'open';
@@ -73,15 +74,22 @@ class CloseGuard {
   async promptUnsavedChanges(mode: PromptMode): Promise<PromptChoice> {
     this.prompting = true;
     try {
-      const busy = runEngine.isBusy();
+      const busy = runEngine.isBusy() || imageEditEngine.isBusy();
+      // 4.2：进行中的视频/音频媒体任务（含跨会话可恢复的 videoTask/audioTask）
+      const mediaTasks = runEngine.mediaTasksInProgress();
+      const mediaHint = mediaTasks.length > 0
+        ? `有 ${mediaTasks.length} 个视频/音频任务正在进行或等待恢复：关闭后远端仍会继续生成，下次打开项目时可恢复查询同一任务。`
+        : '';
+      const busyHint = busy
+        ? '当前项目有尚未保存的修改，且有任务在运行，关闭会中断。'
+        : '当前项目有尚未保存的修改。';
       return await threeWayDialog({
         title: mode === 'close' ? '有未保存的改动' : '打开项目前有未保存的改动',
-        message: busy
-          ? '当前项目有尚未保存的修改，且有任务在运行，关闭会中断。'
-          : '当前项目有尚未保存的修改。',
-        saveText: mode === 'close' ? '保存并关闭' : '保存',
-        discardText: mode === 'close' ? '不保存' : '放弃改动',
-        cancelText: '取消',
+        message: [busyHint, mediaHint].filter(Boolean).join('\n'),
+        saveText: mode === 'close' ? (mediaTasks.length > 0 ? '保存并关闭' : '保存并关闭') : '保存',
+        // 媒体任务进行中：第二按钮语义 = 关闭但保留远端任务记录（不保存本地改动）
+        discardText: mode === 'close' ? (mediaTasks.length > 0 ? '关闭但保留远端任务记录' : '不保存') : '放弃改动',
+        cancelText: mediaTasks.length > 0 ? '取消关闭（继续等待）' : '取消',
       });
     } finally {
       this.prompting = false;

@@ -141,6 +141,7 @@ class ModelType(Enum):
     CHAT    = "chat"
     DRAWING = "drawing"
     VIDEO   = "video"
+    AUDIO   = "audio"
 
 
 # ─────────────────────────────────────────
@@ -151,6 +152,8 @@ class ApiFormat(Enum):
     OPENAI_IMAGE = "openai_image"
     GEMINI_NATIVE = "gemini_native"
     FLUXPORT_VIDEO = "fluxport_video"
+    FLUXPORT_AUDIO = "fluxport_audio"
+    OPENAI_AUDIO   = "openai_audio"
 
 
 # ─────────────────────────────────────────
@@ -189,6 +192,8 @@ _API_FORMAT_MAP = {
     'openai_image':  ApiFormat.OPENAI_IMAGE,
     'gemini_native': ApiFormat.GEMINI_NATIVE,
     'fluxport_video': ApiFormat.FLUXPORT_VIDEO,
+    'fluxport_audio': ApiFormat.FLUXPORT_AUDIO,
+    'openai_audio':   ApiFormat.OPENAI_AUDIO,
 }
 
 # 分辨率后缀映射（用于 Gemini 图片模型）
@@ -280,6 +285,7 @@ class UnifiedAPIRouter:
 
     def _chat_with_candidate(self, messages, options, provider, key, model_entry):
         """向一个已验证的同名文本模型候选发请求；由 chat 负责候选切换。"""
+        self._assert_runtime_adapter_supported(model_entry.id)
         connection = self._get_connection(provider, key, ModelType.CHAT, model_entry.id)
         if not connection:
             raise AppError(503, "文本对话尚未填写 URL / API Key，请到设置中补充")
@@ -463,6 +469,7 @@ class UnifiedAPIRouter:
                                              progress_task_id=None):
         """使用一个已验证的图像模型候选发起请求；由 generate_image 负责候选切换。"""
 
+        self._assert_runtime_adapter_supported(model_entry.id)
         connection = self._get_connection(provider, key, ModelType.DRAWING, model_entry.id)
         if not connection:
             raise AppError(503, "图像生成尚未填写 URL / API Key，请到设置中补充后再生成")
@@ -612,6 +619,26 @@ class UnifiedAPIRouter:
             self._cache_time = now
         return self._providers_cache
 
+    def _assert_runtime_adapter_supported(self, model_id):
+        """Reject custom schemas whose declarative adapter has no request executor yet."""
+        bare_id = str(model_id or '').split(':')[-1].strip().lower()
+        if not bare_id:
+            return
+        try:
+            schemas = self.provider_api.load_capability_schemas().get('schemas', [])
+        except Exception:
+            return
+        for schema in schemas:
+            if not isinstance(schema, dict):
+                continue
+            schema_id = str(schema.get('modelId') or '').strip().lower()
+            if schema_id == bare_id and schema.get('requestAdapter') == 'custom-declarative':
+                raise AppError(
+                    422,
+                    f"模型「{model_id}」使用 custom-declarative 配置；当前版本仅支持预览和连接测试，"
+                    "尚未接入实际生成。请改用已支持的内置协议模型。",
+                )
+
     def _detect_model_type(self, model_id):
         """
         根据模型 ID 关键字推断模型类型和 API 格式
@@ -626,6 +653,8 @@ class UnifiedAPIRouter:
             return ModelType.DRAWING, fmt
         if m_type_str == ModelType.VIDEO.value:
             return ModelType.VIDEO, fmt
+        if m_type_str == ModelType.AUDIO.value:
+            return ModelType.AUDIO, fmt
         return ModelType.CHAT, fmt
 
     def _resolve_chat_model(self, model_str=None):
@@ -993,6 +1022,73 @@ class UnifiedAPIRouter:
         # ── 未指定/空 → 全量第一个可用视频模型 ──
         return self._first_available_model(providers, ModelType.VIDEO)
 
+    def _resolve_audio_model(self, model_str=None):
+        """解析音频生成模型（multi-key：与 _resolve_video_model 同构，4.2-B）。
+
+        model_str: "provider_id:key_id:model_id" / 旧两段 "provider_id:model_id" / None
+        返回: (provider_dict, key_dict, ModelEntry|None)
+        匹配条件：m_type == 'audio'，或未存 type 但实时规则判定为音频模型（旧数据兼容）。
+        """
+        providers = self._load_providers()
+        parts = (model_str or '').split(':') if model_str else []
+
+        # ── 三段 id：精确命中 key ──
+        if len(parts) >= 3:
+            provider_id, key_id, model_id = parts[0], parts[1], ':'.join(parts[2:])
+            for p in providers:
+                if p.get('id') != provider_id or not p.get('enabled'):
+                    continue
+                keys = p.get('keys') or []
+                key  = next((k for k in keys if k.get('id') == key_id), None)
+                if key is None or not key.get('enabled', True):
+                    raise AppError(503, "模型所属 Key 已删除或停用，请重新选择模型")
+                for m in key.get('models', []):
+                    if not m.get('enabled', True):
+                        continue
+                    if m.get('id') != model_id:
+                        continue
+                    m_type = m.get('type', '')
+                    if m_type == 'audio' or (
+                        not m_type and self._detect_model_type(m['id'])[0] == ModelType.AUDIO
+                    ):
+                        return p, key, ModelEntry(
+                            id=m['id'], name=m.get('name', m['id']),
+                            type=ModelType.AUDIO,
+                            api_format=self._detect_api_format(m['id'], ModelType.AUDIO),
+                            enabled=m.get('enabled', True)
+                        )
+                raise AppError(503, "模型所属 Key 已删除或停用，请重新选择模型")
+            return self._first_available_model(providers, ModelType.AUDIO)
+
+        # ── 两段 id（旧项目/旧 localStorage）──
+        if len(parts) == 2:
+            provider_id, model_id = parts
+            for p in providers:
+                if p.get('id') != provider_id or not p.get('enabled'):
+                    continue
+                for key in p.get('keys') or []:
+                    if not key.get('enabled', True):
+                        continue
+                    for m in key.get('models', []):
+                        if not m.get('enabled', True):
+                            continue
+                        if m.get('id') != model_id:
+                            continue
+                        m_type = m.get('type', '')
+                        if m_type == 'audio' or (
+                            not m_type and self._detect_model_type(m['id'])[0] == ModelType.AUDIO
+                        ):
+                            return p, key, ModelEntry(
+                                id=m['id'], name=m.get('name', m['id']),
+                                type=ModelType.AUDIO,
+                                api_format=self._detect_api_format(m['id'], ModelType.AUDIO),
+                                enabled=m.get('enabled', True)
+                            )
+            return self._first_available_model(providers, ModelType.AUDIO)
+
+        # ── 未指定/空 → 全量第一个可用音频模型 ──
+        return self._first_available_model(providers, ModelType.AUDIO)
+
     def _first_available_model(self, providers, model_type):
         """
         全量第一个可用模型（enabled provider + api_url 非空 → enabled key + api_key 非空
@@ -1021,6 +1117,11 @@ class UnifiedAPIRouter:
                         is_match = (
                             m_type == 'video'
                             or (not m_type and self._detect_model_type(m['id'])[0] == ModelType.VIDEO)
+                        )
+                    elif model_type == ModelType.AUDIO:
+                        is_match = (
+                            m_type == 'audio'
+                            or (not m_type and self._detect_model_type(m['id'])[0] == ModelType.AUDIO)
                         )
                     else:
                         is_match = (m_type == 'drawing' or (not m_type and not self._is_chat_model(m['id'])))

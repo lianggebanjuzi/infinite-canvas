@@ -9,6 +9,9 @@ import { showToast } from '../toast';
 
 type Mode = 'crop' | 'split';
 type Crop = { x: number; y: number; width: number; height: number };
+type ResizeHandle = 'n' | 'e' | 's' | 'w' | 'ne' | 'nw' | 'se' | 'sw';
+
+const RESIZE_HANDLES: ResizeHandle[] = ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'];
 
 class ImageEditor {
   private overlay: HTMLElement | null = null;
@@ -20,6 +23,8 @@ class ImageEditor {
   private ratio = 'free';
   private mode: Mode = 'crop';
   private split = { rows: 2, cols: 2, gutter: 0 };
+  private previewRotation = -1;
+  private cropDragAbort: AbortController | null = null;
 
   init(): void {
     // Lazy-created so the static app shell stays compatible with old project files.
@@ -34,6 +39,8 @@ class ImageEditor {
   }
 
   close(): void {
+    this.cropDragAbort?.abort();
+    this.cropDragAbort = null;
     this.overlay?.remove();
     this.overlay = null;
     this.nodeId = '';
@@ -47,6 +54,7 @@ class ImageEditor {
     this.nodeId = nodeId;
     this.mode = mode;
     this.rotation = 0;
+    this.previewRotation = -1;
     this.ratio = 'free';
     this.crop = { x: .08, y: .08, width: .84, height: .84 };
     this.split = { rows: 2, cols: 2, gutter: 0 };
@@ -96,14 +104,17 @@ class ImageEditor {
   }
 
   private render(): void {
-    this.close();
+    // Re-rendering the dialog must preserve nodeId: confirm() needs it to create
+    // the derived images. close() intentionally clears that editing state.
+    this.overlay?.remove();
+    this.overlay = null;
     const overlay = document.createElement('div');
     overlay.className = 'overlay image-editor-overlay';
     overlay.innerHTML = `
       <section class="image-editor-panel" role="dialog" aria-modal="true" aria-label="${this.mode === 'crop' ? '裁剪图片' : '切图'}">
         <header class="image-editor-head"><div><h2>${this.mode === 'crop' ? '裁剪图片' : '图片切图'}</h2><p>本地处理，不会调用生成模型</p></div><button data-ie="close" title="关闭">×</button></header>
         <div class="image-editor-body">
-          <div class="image-editor-stage"><div class="image-editor-image-wrap" id="ie-image-wrap"><img id="ie-image" src="${escapeUrl(this.sourceUrl)}" alt="待编辑图片"><div id="ie-crop-frame" class="ie-crop-frame" hidden></div><div id="ie-grid" class="ie-grid" hidden></div></div></div>
+          <div class="image-editor-stage"><div class="image-editor-image-wrap" id="ie-image-wrap"><img id="ie-image" alt="待编辑图片"><div id="ie-crop-frame" class="ie-crop-frame" hidden><div class="ie-crop-guide"></div>${RESIZE_HANDLES.map(handle => `<button type="button" class="ie-crop-handle ie-crop-handle-${handle}" data-ie-handle="${handle}" aria-label="调整裁切范围"></button>`).join('')}</div><div id="ie-grid" class="ie-grid" hidden></div></div></div>
           <aside class="image-editor-controls" id="ie-controls"></aside>
         </div>
         <footer><button class="btn-ghost" data-ie="cancel">取消</button><button class="btn-primary" data-ie="confirm">${this.mode === 'crop' ? '生成裁剪结果' : '生成切图结果'}</button></footer>
@@ -122,13 +133,14 @@ class ImageEditor {
       controls.innerHTML = `
         <label>比例</label><div class="ie-presets">${['free', '1:1', '3:4', '4:3', '16:9', '9:16'].map(v => `<button class="${this.ratio === v ? 'active' : ''}" data-ie-ratio="${v}">${v === 'free' ? '自由' : v}</button>`).join('')}</div>
         <label>旋转</label><div class="ie-row"><button data-ie="rotate">顺时针 90°</button><button data-ie="reset">重置</button></div>
-        <p class="ie-hint">拖动裁剪框移动；拖右下角调节大小。</p>`;
+        <p class="ie-hint">拖动选区移动；拖动边或角调整裁切范围。</p>`;
     } else {
       const presets = [[2,2,'2×2'], [3,3,'3×3'], [1,2,'横向 2'], [1,3,'横向 3'], [1,4,'横向 4'], [2,1,'纵向 2'], [3,1,'纵向 3'], [4,1,'纵向 4']];
       controls.innerHTML = `
         <label>网格</label><div class="ie-presets">${presets.map(([r,c,label]) => `<button class="${this.split.rows === r && this.split.cols === c ? 'active' : ''}" data-ie-grid="${r},${c}">${label}</button>`).join('')}</div>
+        <label>切分范围</label><div class="ie-presets">${[['free', '自由'], ['image', '原图比例']].map(([value, label]) => `<button class="${this.ratio === value ? 'active' : ''}" data-ie-ratio="${value}">${label}</button>`).join('')}</div>
         <label class="ie-check"><input type="checkbox" data-ie="gutter" ${this.split.gutter ? 'checked' : ''}> 保留边缘余量</label>
-        <p class="ie-hint">按从左到右、从上到下创建独立图片结果。</p>`;
+        <p class="ie-hint">拖动选框对齐要切分的画面；网格内每一格都会生成一张独立图片。</p>`;
     }
   }
 
@@ -136,50 +148,66 @@ class ImageEditor {
     const image = this.overlay?.querySelector('#ie-image') as HTMLImageElement | null;
     const wrap = this.overlay?.querySelector('#ie-image-wrap') as HTMLElement | null;
     if (!image || !wrap) return;
-    image.style.transform = `rotate(${this.rotation}deg)`;
-    image.style.maxWidth = this.rotation % 180 ? '72%' : '100%';
+    // 预览使用与导出相同的旋转画布，避免 CSS 旋转后的视觉坐标和 Canvas 裁切坐标不一致。
+    if (this.previewRotation !== this.rotation) {
+      this.previewRotation = this.rotation;
+      image.onload = () => this.renderStage();
+      image.src = this.rotation ? this.rotatedCanvas().toDataURL('image/png') : this.sourceUrl;
+      return;
+    }
     const cropFrame = this.overlay?.querySelector('#ie-crop-frame') as HTMLElement | null;
     const grid = this.overlay?.querySelector('#ie-grid') as HTMLElement | null;
-    if (this.mode === 'crop' && cropFrame) {
+    if (cropFrame) {
       cropFrame.hidden = false;
-      if (grid) grid.hidden = true;
       cropFrame.style.left = `${this.crop.x * 100}%`;
       cropFrame.style.top = `${this.crop.y * 100}%`;
       cropFrame.style.width = `${this.crop.width * 100}%`;
       cropFrame.style.height = `${this.crop.height * 100}%`;
       this.bindCropDrag(cropFrame, wrap);
-    } else if (grid) {
+    }
+    if (this.mode === 'split' && grid) {
       grid.hidden = false;
-      if (cropFrame) cropFrame.hidden = true;
+      grid.style.left = `${this.crop.x * 100}%`;
+      grid.style.top = `${this.crop.y * 100}%`;
+      grid.style.width = `${this.crop.width * 100}%`;
+      grid.style.height = `${this.crop.height * 100}%`;
       grid.style.setProperty('--ie-cols', String(this.split.cols));
       grid.style.setProperty('--ie-rows', String(this.split.rows));
       grid.innerHTML = Array.from({ length: this.split.rows * this.split.cols }, () => '<span></span>').join('');
+    } else if (grid) {
+      grid.hidden = true;
     }
   }
 
   private bindCropDrag(frame: HTMLElement, wrap: HTMLElement): void {
-    let drag: { startX: number; startY: number; crop: Crop; resize: boolean } | null = null;
-    frame.onmousedown = e => {
-      const rect = frame.getBoundingClientRect();
-      drag = { startX: e.clientX, startY: e.clientY, crop: { ...this.crop }, resize: e.clientX > rect.right - 22 && e.clientY > rect.bottom - 22 };
+    frame.onpointerdown = e => {
+      const handle = (e.target as Element).closest<HTMLElement>('[data-ie-handle]')?.dataset.ieHandle as ResizeHandle | undefined;
       e.preventDefault(); e.stopPropagation();
-    };
-    window.onmousemove = e => {
-      if (!drag) return;
+      this.cropDragAbort?.abort();
+      const abort = new AbortController();
+      this.cropDragAbort = abort;
+      const drag = { startX: e.clientX, startY: e.clientY, crop: { ...this.crop }, handle: handle || null };
       const r = wrap.getBoundingClientRect();
-      const dx = (e.clientX - drag.startX) / r.width;
-      const dy = (e.clientY - drag.startY) / r.height;
-      if (drag.resize) {
-        this.crop.width = Math.min(1 - drag.crop.x, Math.max(.08, drag.crop.width + dx));
-        this.crop.height = Math.min(1 - drag.crop.y, Math.max(.08, drag.crop.height + dy));
-        this.applyRatio();
-      } else {
-        this.crop.x = Math.min(1 - drag.crop.width, Math.max(0, drag.crop.x + dx));
-        this.crop.y = Math.min(1 - drag.crop.height, Math.max(0, drag.crop.y + dy));
-      }
-      this.renderStage();
+      frame.setPointerCapture(e.pointerId);
+      frame.addEventListener('pointermove', event => {
+        const dx = (event.clientX - drag.startX) / r.width;
+        const dy = (event.clientY - drag.startY) / r.height;
+        if (drag.handle) {
+          this.crop = this.resizeCrop(drag.crop, dx, dy, drag.handle);
+        } else {
+          this.crop.x = Math.min(1 - drag.crop.width, Math.max(0, drag.crop.x + dx));
+          this.crop.y = Math.min(1 - drag.crop.height, Math.max(0, drag.crop.y + dy));
+        }
+        this.renderStage();
+      }, { signal: abort.signal });
+      const stop = () => {
+        if (frame.hasPointerCapture(e.pointerId)) frame.releasePointerCapture(e.pointerId);
+        abort.abort();
+        if (this.cropDragAbort === abort) this.cropDragAbort = null;
+      };
+      frame.addEventListener('pointerup', stop, { signal: abort.signal });
+      frame.addEventListener('pointercancel', stop, { signal: abort.signal });
     };
-    window.onmouseup = () => { drag = null; window.onmousemove = null; window.onmouseup = null; };
   }
 
   private onClick(e: MouseEvent): void {
@@ -197,12 +225,51 @@ class ImageEditor {
 
   private applyRatio(): void {
     if (this.ratio === 'free') return;
-    const [rw, rh] = this.ratio.split(':').map(Number);
-    const imageRatio = this.rotatedSize().width / this.rotatedSize().height;
-    const target = rw / rh;
-    if (target > imageRatio) this.crop.height = Math.min(1 - this.crop.y, this.crop.width / target * imageRatio);
-    else this.crop.width = Math.min(1 - this.crop.x, this.crop.height * target / imageRatio);
-    this.crop.width = Math.max(.08, this.crop.width); this.crop.height = Math.max(.08, this.crop.height);
+    const [rw, rh] = this.ratio === 'image' ? [this.rotatedSize().width, this.rotatedSize().height] : this.ratio.split(':').map(Number);
+    const normalizedRatio = (rw / rh) * (this.rotatedSize().height / this.rotatedSize().width);
+    let width = this.crop.width;
+    let height = width / normalizedRatio;
+    if (height > this.crop.height) { height = this.crop.height; width = height * normalizedRatio; }
+    if (width > 1) { width = 1; height = width / normalizedRatio; }
+    if (height > 1) { height = 1; width = height * normalizedRatio; }
+    this.crop = {
+      x: Math.min(1 - width, Math.max(0, this.crop.x + (this.crop.width - width) / 2)),
+      y: Math.min(1 - height, Math.max(0, this.crop.y + (this.crop.height - height) / 2)),
+      width,
+      height,
+    };
+  }
+
+  private resizeCrop(crop: Crop, dx: number, dy: number, handle: ResizeHandle): Crop {
+    let next = { ...crop };
+    if (handle.includes('e')) next.width = crop.width + dx;
+    if (handle.includes('s')) next.height = crop.height + dy;
+    if (handle.includes('w')) { next.x = crop.x + dx; next.width = crop.width - dx; }
+    if (handle.includes('n')) { next.y = crop.y + dy; next.height = crop.height - dy; }
+    if (this.ratio === 'free') {
+      next.width = Math.max(.06, next.width);
+      next.height = Math.max(.06, next.height);
+    } else {
+      const [rw, rh] = this.ratio === 'image' ? [this.rotatedSize().width, this.rotatedSize().height] : this.ratio.split(':').map(Number);
+      const normalizedRatio = (rw / rh) * (this.rotatedSize().height / this.rotatedSize().width);
+      const horizontal = (handle.includes('e') || handle.includes('w')) && !handle.includes('n') && !handle.includes('s');
+      if (horizontal || (handle.length === 2 && Math.abs(dx * this.rotatedSize().width) >= Math.abs(dy * this.rotatedSize().height))) next.height = next.width / normalizedRatio;
+      else next.width = next.height * normalizedRatio;
+      next.width = Math.max(.06, next.width);
+      next.height = Math.max(.06, next.height);
+      if (handle.includes('w')) next.x = crop.x + crop.width - next.width;
+      if (handle.includes('n')) next.y = crop.y + crop.height - next.height;
+    }
+    const maxWidth = handle.includes('w') ? crop.x + crop.width : 1 - crop.x;
+    const maxHeight = handle.includes('n') ? crop.y + crop.height : 1 - crop.y;
+    const scale = Math.min(1, maxWidth / next.width, maxHeight / next.height);
+    next.width *= scale;
+    next.height *= scale;
+    if (handle.includes('w')) next.x = crop.x + crop.width - next.width;
+    if (handle.includes('n')) next.y = crop.y + crop.height - next.height;
+    next.x = Math.min(1 - next.width, Math.max(0, next.x));
+    next.y = Math.min(1 - next.height, Math.max(0, next.y));
+    return next;
   }
 
   private rotatedSize(): { width: number; height: number } {
@@ -219,6 +286,14 @@ class ImageEditor {
     ctx.rotate(this.rotation * Math.PI / 180);
     ctx.drawImage(this.source, -this.source.naturalWidth / 2, -this.source.naturalHeight / 2);
     return c;
+  }
+
+  private cropPixels(size: { width: number; height: number }): { x: number; y: number; width: number; height: number } {
+    const x = Math.min(size.width - 1, Math.max(0, Math.round(this.crop.x * size.width)));
+    const y = Math.min(size.height - 1, Math.max(0, Math.round(this.crop.y * size.height)));
+    const right = Math.min(size.width, Math.max(x + 1, Math.round((this.crop.x + this.crop.width) * size.width)));
+    const bottom = Math.min(size.height, Math.max(y + 1, Math.round((this.crop.y + this.crop.height) * size.height)));
+    return { x, y, width: right - x, height: bottom - y };
   }
 
   private async confirm(): Promise<void> {
@@ -263,13 +338,12 @@ class ImageEditor {
 
   private async saveCrop(source: FlowNode): Promise<void> {
     const original = this.rotatedCanvas();
-    const x = Math.round(this.crop.x * original.width), y = Math.round(this.crop.y * original.height);
-    const w = Math.max(1, Math.round(this.crop.width * original.width)), h = Math.max(1, Math.round(this.crop.height * original.height));
-    const output = document.createElement('canvas'); output.width = Math.min(w, original.width - x); output.height = Math.min(h, original.height - y);
-    output.getContext('2d')!.drawImage(original, x, y, output.width, output.height, 0, 0, output.width, output.height);
+    const crop = this.cropPixels(original);
+    const output = document.createElement('canvas'); output.width = crop.width; output.height = crop.height;
+    output.getContext('2d')!.drawImage(original, crop.x, crop.y, crop.width, crop.height, 0, 0, crop.width, crop.height);
     const saved = await this.persistCanvas(output, `crop-${Date.now()}.png`);
     flowHistory.record();
-    const trace: GenerationTrace = { prompt: '', model: 'local-canvas', aspectRatio: `${output.width}:${output.height}`, resolution: 'local', count: 1, refImageHashes: [], refImageUrls: source.imageUrl ? [source.imageUrl] : [], createdAt: Date.now(), parentId: source.id, outputType: 'image-edit', editKind: 'crop', sourceNodeId: source.id, crop: { x, y, width: output.width, height: output.height, rotation: this.rotation }, imageWidth: output.width, imageHeight: output.height };
+    const trace: GenerationTrace = { prompt: '', model: 'local-canvas', aspectRatio: `${output.width}:${output.height}`, resolution: 'local', count: 1, refImageHashes: [], refImageUrls: source.imageUrl ? [source.imageUrl] : [], createdAt: Date.now(), parentId: source.id, outputType: 'image-edit', editKind: 'crop', sourceNodeId: source.id, crop: { ...crop, rotation: this.rotation }, imageWidth: output.width, imageHeight: output.height };
     const result = this.addDerived(source, saved, '裁剪结果', trace, source.x + (source.w ?? CARD_W) + 48, source.y);
     selection.select(result.id);
     showToast('已生成裁剪结果');
@@ -278,23 +352,25 @@ class ImageEditor {
   private async saveSplit(source: FlowNode): Promise<void> {
     const original = this.rotatedCanvas();
     const { rows, cols, gutter } = this.split;
-    const cellW = Math.floor((original.width - gutter * (cols - 1)) / cols), cellH = Math.floor((original.height - gutter * (rows - 1)) / rows);
+    // Split only the user-positioned selection, rather than always splitting the
+    // entire image. This keeps the preview and the generated pieces in sync.
+    const selectedArea = this.cropPixels(original);
+    const { x, y, width: selectedW, height: selectedH } = selectedArea;
+    const cellW = Math.floor((selectedW - gutter * (cols - 1)) / cols), cellH = Math.floor((selectedH - gutter * (rows - 1)) / rows);
     if (cellW < 1 || cellH < 1) throw new Error('grid too small');
     flowHistory.record();
     const created: FlowNode[] = [];
     for (let row = 0; row < rows; row += 1) for (let col = 0; col < cols; col += 1) {
       const index = row * cols + col;
       const output = document.createElement('canvas'); output.width = cellW; output.height = cellH;
-      output.getContext('2d')!.drawImage(original, col * (cellW + gutter), row * (cellH + gutter), cellW, cellH, 0, 0, cellW, cellH);
+      output.getContext('2d')!.drawImage(original, x + col * (cellW + gutter), y + row * (cellH + gutter), cellW, cellH, 0, 0, cellW, cellH);
       const saved = await this.persistCanvas(output, `split-${Date.now()}-${String(index + 1).padStart(2, '0')}.png`);
-      const trace: GenerationTrace = { prompt: '', model: 'local-canvas', aspectRatio: `${cellW}:${cellH}`, resolution: 'local', count: 1, refImageHashes: [], refImageUrls: source.imageUrl ? [source.imageUrl] : [], createdAt: Date.now(), parentId: source.id, outputType: 'image-edit', editKind: 'split', sourceNodeId: source.id, split: { rows, cols, index, row, column: col, gutter }, imageWidth: cellW, imageHeight: cellH };
+      const trace: GenerationTrace = { prompt: '', model: 'local-canvas', aspectRatio: `${cellW}:${cellH}`, resolution: 'local', count: 1, refImageHashes: [], refImageUrls: source.imageUrl ? [source.imageUrl] : [], createdAt: Date.now(), parentId: source.id, outputType: 'image-edit', editKind: 'split', sourceNodeId: source.id, crop: { x, y, width: selectedW, height: selectedH, rotation: this.rotation }, split: { rows, cols, index, row, column: col, gutter }, imageWidth: cellW, imageHeight: cellH };
       created.push(this.addDerived(source, saved, `切图 ${index + 1}/${rows * cols}`, trace, source.x + (source.w ?? CARD_W) + 48 + col * (CARD_W + 36), source.y + row * (imageCardHeight(cellW / cellH) + 36)));
     }
     if (created[0]) selection.select(created[0].id);
     showToast(`已生成 ${created.length} 个切图结果`);
   }
 }
-
-function escapeUrl(value: string): string { return value.replace(/&/g, '&amp;').replace(/"/g, '&quot;'); }
 
 export const imageEditor = new ImageEditor();

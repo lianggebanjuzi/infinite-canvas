@@ -8,6 +8,7 @@
 import { nodeRegistry } from './node-registry';
 import { flowState } from '../state/flow-state';
 import { isGeminiImageModel } from '../api';
+import { isModelRuntimeSupported } from './model-config';
 
 const def: NodeDefinition = {
   type: 'image-gen',
@@ -43,6 +44,7 @@ const def: NodeDefinition = {
     .some(u => u.type === 'text-split' && flowState.getTextSplitSegments(u.id).length > 0);
     if (!hasOwnPrompt && !hasUpstreamText && !hasSplitText) return '请输入提示词';
     if (!p.model) return '请先选择绘图模型';
+    if (!isModelRuntimeSupported(p.model, 'drawing')) return '当前模型的自定义声明式适配器尚未接入实际生成';
     return true; // 参考图 0~N 可选
   },
 

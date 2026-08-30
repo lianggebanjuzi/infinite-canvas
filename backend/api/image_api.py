@@ -4,12 +4,43 @@
 """
 
 import base64
+import mimetypes
 import os
 import requests
 from datetime import datetime
 import tempfile
 
 from backend.api.gemini_compat import resolve_image_api_base
+
+
+def _probe_video_metadata(path):
+    """返回视频的轻量元数据；不借用音频探测，避免 MP4 被误标为 audio/*。"""
+    meta = {'duration': None, 'mime_type': None, 'size_bytes': None}
+    try:
+        if os.path.exists(path):
+            meta['size_bytes'] = os.path.getsize(path)
+    except Exception:
+        pass
+
+    mime_type, _encoding = mimetypes.guess_type(path)
+    meta['mime_type'] = mime_type if mime_type and mime_type.startswith('video/') else 'video/mp4'
+
+    try:
+        import shutil
+        import subprocess
+        if shutil.which('ffprobe'):
+            proc = subprocess.run(
+                ['ffprobe', '-v', 'error', '-show_entries', 'format=duration',
+                 '-of', 'default=noprint_wrappers=1:nokey=1', path],
+                capture_output=True, text=True, timeout=15,
+            )
+            if proc.returncode == 0:
+                duration = float(proc.stdout.strip())
+                if duration > 0:
+                    meta['duration'] = round(duration, 2)
+    except Exception:
+        pass
+    return meta
 
 
 def make_thumbnail_data_url(image_bytes: bytes, max_edge: int = 1024, quality: int = 85) -> str | None:
@@ -135,6 +166,91 @@ class ImageAPI:
         except Exception as e:
             print(f"保存图片失败: {e}")
             return {"status": "error", "message": str(e)}
+
+    # ─────────────────────────────────────────
+    # 4.2-B：本地媒体文件导入（视频/音频）
+    # ─────────────────────────────────────────
+
+    def prepare_imported_media(self, options=None):
+        """手动导入本地媒体文件（视频/音频）：大文件仅落盘路径 + 轻量元数据，不把内容塞进项目 JSON。
+
+        options: {
+            "kind": "audio" | "video",
+            "sourcePath": "本地绝对路径",      # 优先：直接复制，不经 base64 桥接
+            "dataUrl": "data:audio/mpeg;base64,...",  # 兜底：浏览器无 File.path 时经桥接（瞬时，不持久化）
+            "filename": "原始文件名（可选，用于扩展名推断）",
+        }
+        返回: {status, path, url, duration, mime_type, size_bytes}
+        """
+        options = options or {}
+        kind = options.get('kind') if options.get('kind') in ('video', 'audio') else 'audio'
+        try:
+            settings = self.settings_api.load_settings()
+            save_path = settings.get('image_save_path', '')
+            saved_to_disk = bool(save_path)
+            if not save_path:
+                save_path = os.path.join(tempfile.gettempdir(), 'infinite_canvas_imports')
+            media_dir = os.path.join(save_path, 'media')
+            os.makedirs(media_dir, exist_ok=True)
+
+            source_path = options.get('sourcePath')
+            data_url = options.get('dataUrl')
+            filename = options.get('filename') or ''
+            if not source_path and not data_url:
+                return {"status": "error", "message": "媒体文件数据无效"}
+
+            ext = 'mp3' if kind == 'audio' else 'mp4'
+            if filename and '.' in filename:
+                suffix = filename.rsplit('.', 1)[-1].lower().strip()
+                if suffix and suffix.isalnum() and len(suffix) <= 5:
+                    ext = suffix
+
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
+            target = os.path.join(media_dir, f"import_{kind}_{timestamp}.{ext}")
+
+            if source_path and os.path.exists(source_path):
+                import shutil
+                shutil.copy2(source_path, target)
+            elif data_url and ',' in data_url:
+                raw = data_url.split(',', 1)[1]
+                with open(target, 'wb') as f:
+                    f.write(base64.b64decode(raw))
+            else:
+                return {"status": "error", "message": "源文件不存在或数据无效"}
+
+            # 轻量元数据：音频走 mutagen/ffprobe，视频只走视频 MIME/ffprobe。
+            duration = None
+            mime_type = None
+            size_bytes = None
+            try:
+                if os.path.exists(target):
+                    size_bytes = os.path.getsize(target)
+                if kind == 'video':
+                    meta = _probe_video_metadata(target)
+                else:
+                    from backend.api.audio_api import _probe_audio_metadata
+                    meta = _probe_audio_metadata(target)
+                duration = meta.get('duration')
+                mime_type = meta.get('mime_type')
+                if meta.get('size_bytes') is not None:
+                    size_bytes = meta['size_bytes']
+            except Exception as e:
+                print(f"[ImageAPI] 媒体元数据解析失败（可降级）: {e}")
+
+            safe_path = target.replace('\\', '/')
+            print(f"[ImageAPI] 媒体已导入: {safe_path} ({kind})")
+            return {
+                "status": "success",
+                "path": safe_path,
+                "url": f"file:///{safe_path}",
+                "duration": duration,
+                "mime_type": mime_type,
+                "size_bytes": size_bytes,
+                "saved_to_disk": saved_to_disk,
+            }
+        except Exception as e:
+            print(f"[ImageAPI] 媒体导入失败: {e}")
+            return {"status": "error", "message": f"媒体导入失败：{e}"}
 
     # ─────────────────────────────────────────
     # 另存为（让用户选择保存路径）
@@ -271,6 +387,41 @@ class ImageAPI:
 
         except Exception as e:
             print(f"读取本地图片失败: {e}")
+            return {"status": "error", "message": str(e)}
+
+    # ─────────────────────────────────────────
+    # 临时文件延迟清理（4.1-B 蒙版 mask-*.png 等）
+    # ─────────────────────────────────────────
+
+    def delete_temp_file(self, file_path):
+        """删除应用自己管理的临时文件（如 mask-*.png）。
+
+        安全约束：只允许删除「图片保存目录」或「会话临时导入目录」下的文件，
+        绝不接受任意路径（防误删用户其它文件）。文件已不存在时视为成功（幂等）。
+        """
+        try:
+            if not isinstance(file_path, str) or not file_path.strip():
+                return {"status": "error", "message": "路径无效"}
+            absolute = os.path.abspath(file_path)
+            allowed_roots = []
+            try:
+                settings = self.settings_api.load_settings() or {}
+                save_path = (settings.get('image_save_path') or '').strip()
+                if save_path:
+                    allowed_roots.append(os.path.abspath(save_path))
+            except Exception:
+                pass
+            allowed_roots.append(os.path.abspath(os.path.join(tempfile.gettempdir(), 'infinite_canvas_imports')))
+            if not any(absolute.startswith(root + os.sep) for root in allowed_roots):
+                print(f"[ImageAPI] 拒绝删除非应用管理目录的文件: {absolute}")
+                return {"status": "error", "message": "路径不在应用管理目录内，拒绝删除"}
+            if not os.path.isfile(absolute):
+                return {"status": "success"}  # 已不存在 → 幂等成功
+            os.remove(absolute)
+            print(f"[ImageAPI] 已清理临时文件: {absolute}")
+            return {"status": "success"}
+        except Exception as e:
+            print(f"删除临时文件失败: {e}")
             return {"status": "error", "message": str(e)}
 
     # ─────────────────────────────────────────

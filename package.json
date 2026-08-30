@@ -5,9 +5,11 @@
   "private": false,
   "scripts": {
     "dev": "vite",
-    "build": "tsc --noEmit && vite build",
+    "build": "tsc --noEmit && vite build && vite build --config vite.director.config.ts",
+    "build:director": "vite build --config vite.director.config.ts",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
+    "smoke:director": "python smoke/director_smoke.py && node smoke/director_smoke.mjs",
     "verify:migration": "npm run typecheck && node scripts/verify-migration.mjs",
     "package:test": "python build_ts_test.py"
   },
@@ -28,6 +30,8 @@
     "vite": "^8.0.12"
   },
   "dependencies": {
-    "@fortawesome/fontawesome-free": "^7.2.0"
+    "@fortawesome/fontawesome-free": "^7.2.0",
+    "@types/three": "^0.185.4",
+    "three": "^0.185.1"
   }
 }
