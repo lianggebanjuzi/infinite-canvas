@@ -2,7 +2,7 @@
 // QA 独立验证：文本走线 + 反推归位（commit 31b558e）
 //
 // 运行：
-//   node node_modules/typescript/bin/tsc -p tsconfig.smoke.json --outDir .icv-qa
+//   node node_modules/typescript/bin/tsc -p tsconfig.smoke.json --outDir .icv-smoke
 //   node smoke/qa-text-wiring.cjs
 //
 // 验证点（对应任务清单 §验证任务）：
@@ -18,8 +18,8 @@
 //   S8  A2 文本关键词生图：只连文本上游、自身 prompt 空 → canRun 通过 → 运行成功 → generateImage 收到合成 prompt；
 //       自身 prompt 非空追加在后；trace/history prompt = 合成 prompt
 //   S9  W6 图生图 count=1 回写自身（旧图入历史 outputType=img2img、源节点 imageUrl 非空）
-//   S10 count=3 → 1 自身 + 2 产出节点
-//   S11 锁定保护：index=0 锁定 → 建产出节点不顶掉
+//   S10 count=3 → 同一源节点 generatedImages
+//   S11 资源库锁定不改变源节点批次回写
 //   S12 buildImageTrace promptOverride（trace 记录合成 prompt）
 //   S13 persistence migrateNode isAsset 透传（restore/collect 往返不丢标记）
 //   S14 三处联动不覆盖 prompt：cmd-panel 历史回填 / card-view 就地编辑（dirty.markUpstreamChanged）
@@ -29,12 +29,15 @@
 //   S18 insertStep 防御（to=text-gen / to=素材 → 拒绝）
 //   S19 静态：compare-panel 素材节点计入可对比（设计 §8 #13 已知语义）；action-bar 素材隐藏操作条
 //
-// 说明：DOM 桩 + pywebview.api 桩驱动真实编译产物（.icv-qa/v1），不改任何业务源码。
-//       需要 pywebview/真机验证的项（拖放坐标命中、卡片渲染角标、锁定 UI 等）在报告中标注「需手动回归」。
+// 说明：DOM 桩 + pywebview.api 桩驱动真实编译产物（.icv-smoke/v1），不改任何业务源码。
+//       需要 pywebview/真机验证的项（拖放坐标命中、卡片渲染角标等）在报告中标注「需手动回归」。
 
 'use strict';
 
-const BASE = 'D:/tmp/icv-test/v1';
+const path = require('path');
+const BASE = process.env.ICV_SMOKE_BASE
+  ? path.resolve(process.env.ICV_SMOKE_BASE)
+  : path.resolve(__dirname, '..', '.icv-smoke', 'v1');
 
 // ───────────────────────── DOM/浏览器桩 ─────────────────────────
 function makeEl(over = {}) {
@@ -168,7 +171,6 @@ let genCalls = [];
 let historyAppendCalls = [];
 let chatV2Result = { text: '绿植场景描述' };
 let genQueue = ['data:image/png;base64,NEW'];
-let lockedUrls = new Set();
 let origIsLockedByImageUrl = null;
 
 function installPywebview() {
@@ -247,8 +249,6 @@ function reset() {
   toastLog.length = 0;
   historyAppendCalls.length = 0;
   runEngine.busy = false;
-  runEngine._createdCardIds.clear();
-  runEngine._batchRunners.clear();
   batchStore.clear(); // T03：批次执行态清空（旧 runEngine.batchProgress 已删除，改从 batch-store 派生）
   chatV2Calls.length = 0;
   genCalls.length = 0;
@@ -261,7 +261,6 @@ function reset() {
     assetStore.isLockedByImageUrl = origIsLockedByImageUrl;
     origIsLockedByImageUrl = null;
   }
-  lockedUrls.clear();
 }
 
 /** 便捷建节点：type + 覆盖字段 */
@@ -436,8 +435,7 @@ function edgeIdsTo(id) { return flowState.getEdgesTo(id).map(e => e.from); }
     check(dAfter.status === 'stale', '下游节点仅标 stale');
     // 无游离反推节点：节点数不变
     check(flowState.nodes.length === nodeCountBefore, `无游离反推节点（节点数不变：${flowState.nodes.length}）`);
-    // 命令执行后清空
-    check((after.params.instruction || '') === '', '指令执行后清空');
+    check(after.params.instruction === '反推描述这张图', '指令执行后保留，便于修改后重试');
   });
 
   await section('S6 W2-4 非 data:image 上游 → fail「图片格式不支持反推」不静默丢图', async () => {
@@ -512,7 +510,7 @@ function edgeIdsTo(id) { return flowState.getEdgesTo(id).map(e => e.from); }
     check(oldEntry && oldEntry.prompt === '图生图提示', `旧图历史 prompt = 本次合成 prompt（实际 ${oldEntry && oldEntry.prompt}）`);
   });
 
-  await section('S10 count=3 → 1 自身 + 2 产出节点', async () => {
+  await section('S10 count=3 → 同一源节点 generatedImages', async () => {
     reset();
     const img = IMG('img', { prompt: '批量', model: 'draw-m1', count: 3 });
     genQueue = ['data:image/png;base64,R1', 'data:image/png;base64,R2', 'data:image/png;base64,R3'];
@@ -521,18 +519,14 @@ function edgeIdsTo(id) { return flowState.getEdgesTo(id).map(e => e.from); }
     const after = flowState.getNode(img.id);
     check(after.status === 'done', '批次全部成功 → done');
     check(after.imageUrl === 'data:image/png;base64,R1', `第 1 张写回自身（实际 ${after.imageUrl}）`);
-    const children = flowState.nodes.filter(n => n.parentId === img.id);
-    check(children.length === 2, `第 2..N 张建产出节点（实际 ${children.length} 个）`);
-    check(JSON.stringify(children.map(c => c.imageUrl).sort()) === JSON.stringify(['data:image/png;base64,R2', 'data:image/png;base64,R3']),
-      `产出节点承载 R2/R3（实际 ${JSON.stringify(children.map(c => c.imageUrl))}）`);
-    check(children.every(c => c.type === 'image-gen' && c.status === 'done'), '产出节点为 image-gen done');
-    check(flowState.nodes.length === beforeCount + 2, `节点净增 2（实际 ${flowState.nodes.length - beforeCount}）`);
-    // 产出节点自动连线（gen→child）且不被标 stale
-    check(children.every(c => flowState.getEdgesTo(c.id).some(e => e.from === img.id)), '产出节点自动连线');
-    check(children.every(c => c.status === 'done'), '产出节点未被标 stale（suppressStale）');
+    check(JSON.stringify((after.generatedImages || []).map(item => item.url)) === JSON.stringify([
+      'data:image/png;base64,R1', 'data:image/png;base64,R2', 'data:image/png;base64,R3',
+    ]), `三张结果归属源节点 generatedImages（实际 ${JSON.stringify(after.generatedImages)}）`);
+    check(after.activeGeneratedIndex === 0, `默认展示第 1 张（实际 index=${after.activeGeneratedIndex}）`);
+    check(flowState.nodes.length === beforeCount, `批量结果不创建产出节点（节点数变化 ${flowState.nodes.length - beforeCount}）`);
   });
 
-  await section('S11 锁定保护：index=0 锁定 → 建产出节点不顶掉', async () => {
+  await section('S11 资源库锁定不改变源节点批次回写', async () => {
     reset();
     const img = IMG('img', { prompt: '锁定重跑', model: 'draw-m1', count: 1, imageUrl: 'data:image/png;base64,LOCKED' });
     // 锁定旧图
@@ -542,12 +536,11 @@ function edgeIdsTo(id) { return flowState.getEdgesTo(id).map(e => e.from); }
     const beforeCount = flowState.nodes.length;
     await runEngine.run(img.id);
     const after = flowState.getNode(img.id);
-    check(after.imageUrl === 'data:image/png;base64,LOCKED', `锁定图不被顶掉（实际 ${after.imageUrl}）`);
-    check(after.status === 'done', '节点仍 done（结果有效，走产出节点）');
-    const children = flowState.nodes.filter(n => n.parentId === img.id);
-    check(children.length === 1 && children[0].imageUrl === 'data:image/png;base64,NEWX',
-      `锁定 → 改建产出节点承载新图（实际 ${children.length} 个）`);
-    check(flowState.nodes.length === beforeCount + 1, '节点净增 1（产出节点）');
+    check(after.imageUrl === 'data:image/png;base64,NEWX', `单图结果仍写回源节点（实际 ${after.imageUrl}）`);
+    check(after.status === 'done', '节点仍 done');
+    check(after.generatedImages === undefined, '单图路径不写入批量结果集合');
+    check(after.activeGeneratedIndex === undefined, '单图路径不写入批量浏览索引');
+    check(flowState.nodes.length === beforeCount, '资源库锁定不创建产出节点');
     // 恢复
     assetStore.isLockedByImageUrl = origIsLockedByImageUrl;
     origIsLockedByImageUrl = null;
@@ -698,7 +691,7 @@ function edgeIdsTo(id) { return flowState.getEdgesTo(id).map(e => e.from); }
     document.elementFromPoint = () => null;
   });
 
-  await section('S17 指令面板：素材隐藏面板 + prompt 预览（P1 W3-4）', async () => {
+  await section('S17 指令面板：素材隐藏面板 + prompt 预览保持隐藏', async () => {
     reset();
     // 素材节点：sync() 隐藏面板（含默认模型回填跳过）
     const asset = ASSET('a1', 'data:image/png;base64,A');
@@ -708,7 +701,7 @@ function edgeIdsTo(id) { return flowState.getEdgesTo(id).map(e => e.from); }
     cmdPanel['sync']();
     check(removed.includes('show'), '素材节点 sync → 面板隐藏（移除 show）');
     check(removed.includes('textgen') && removed.includes('reverse'), '素材节点 sync → 移除 textgen/reverse class');
-    // prompt 预览：image-gen 非素材显示合成 prompt
+    // 最终 prompt 预览已禁用：任何节点均保持隐藏
     const t1 = T('t1', '预览上游词');
     const img = IMG('img', { prompt: '预览自身词', model: 'draw-m1' });
     flowState.addEdge(t1.id, img.id);
@@ -716,8 +709,8 @@ function edgeIdsTo(id) { return flowState.getEdgesTo(id).map(e => e.from); }
     preview.hidden = true;
     cmdPanel['promptPreview'] = preview;
     cmdPanel['_renderPromptPreview'](img);
-    check(preview.textContent === '最终 prompt：预览上游词\n预览自身词', `image-gen 预览显示合成 prompt（实际 ${JSON.stringify(preview.textContent)}）`);
-    check(preview.hidden === false, '有内容时预览可见');
+    check(preview.textContent === '', `image-gen 不渲染最终 prompt 预览（实际 ${JSON.stringify(preview.textContent)}）`);
+    check(preview.hidden === true, 'image-gen 预览保持隐藏');
     cmdPanel['_renderPromptPreview'](asset);
     check(preview.hidden === true, '素材节点不显示 prompt 预览');
     const textNode = T('t2', '文本');
